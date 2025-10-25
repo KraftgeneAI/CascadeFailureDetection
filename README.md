@@ -7,8 +7,8 @@ This is the implementation of a Graph Neural Network (GNN) based cascade failure
 ## System Requirements
 
 ### Hardware
-- **Minimum**: 32GB RAM, 4-core CPU
-- **Recommended**: 64GB RAM, 8-core CPU, NVIDIA GPU (8GB+ VRAM)
+- **Minimum**: 8GB RAM, 4-core CPU
+- **Recommended**: 16GB RAM, 8-core CPU, NVIDIA GPU (8GB+ VRAM)
 - **Storage**: 10GB free space for data and models
 
 ### Software
@@ -22,13 +22,15 @@ This is the implementation of a Graph Neural Network (GNN) based cascade failure
 ```bash
 # Create virtual environment
 python -m venv cascade_env
+```
 
 # Activate environment
+```bash
 # On Linux/Mac:
 source cascade_env/bin/activate
 # On Windows:
 cascade_env\Scripts\activate
-
+```
 
 ### 2. Install Dependencies
 
@@ -45,13 +47,13 @@ pip install torch-geometric
 # Install other dependencies
 pip install numpy scipy matplotlib tqdm scikit-learn
 pip install pandas seaborn jupyter
-
+```
 
 ### 3. Verify Installation
 
 ```bash
 python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA Available: {torch.cuda.is_available()}')"
-
+```
 
 ## Quick Start Guide
 
@@ -69,16 +71,17 @@ python generate_training_data.py
 # - data/test_data.pkl (test scenarios)
 # - data/grid_topology.pkl (grid structure)
 # - data/metadata.json (dataset information)
-
+```
 
 **For quick testing**, modify the script to use smaller numbers:
+```bash
 python
 generate_dataset(
     num_normal=500,    # Instead of 12000
     num_cascade=50,    # Instead of 1200
     sequence_length=30  # Instead of 60
 )
-
+```
 
 ### Step 2: Train the Model
 
@@ -100,7 +103,7 @@ python train_model.py \
 
 # Quick test training (5 epochs)
 python train_model.py --num_epochs 5 --batch_size 8
-
+```
 
 **Training outputs:**
 - `checkpoints/best_model.pt` - Best model based on validation loss
@@ -138,7 +141,7 @@ python inference.py \
     --device cuda \
     --batch \
     --output predictions.json
-
+```
 
 ## Complete Workflow Example
 
@@ -163,14 +166,14 @@ python inference.py \
 
 # 4. View results
 cat test_predictions.json | python -m json.tool | head -50
-
+```
 
 ## Advanced Usage
 
 ### Custom Training Configuration
 
 Create a training configuration file `config.json`:
-
+```bash
 json
 {
   "data_dir": "data",
@@ -184,7 +187,7 @@ json
   "early_stopping": 15,
   "device": "cuda"
 }
-
+```
 
 ### Monitoring Training
 
@@ -206,7 +209,7 @@ Epoch 1 Results:
 ### Interpreting Predictions
 
 Example prediction output:
-
+```bash
 json
 {
   "cascade_probability": 0.9234,
@@ -225,7 +228,7 @@ json
     "time_to_cascade": 25.3
   }
 }
-
+```
 
 ## Performance Benchmarks
 
@@ -247,9 +250,10 @@ json
 | Medium (5K scenarios) | ~45 min | ~85% |
 | Full (13K scenarios) | ~2 hours | ~87% |
 
+```bash
 # Reduce model size
 python train_model.py --hidden_dim 64 --num_gnn_layers 2
-
+```
 
 **4. Poor Convergence**
 ```bash
@@ -258,7 +262,7 @@ python train_model.py --learning_rate 0.0001
 
 # Increase training epochs
 python train_model.py --num_epochs 100
-
+```
 
 ## File Structure
 
@@ -287,6 +291,7 @@ cascade-prediction/
 ### Model Export
 
 python
+```bash
 # Export model for production
 import torch
 from cascade_prediction_model import CascadePredictionModel
@@ -298,11 +303,12 @@ model.eval()
 # Export to TorchScript
 scripted_model = torch.jit.script(model)
 scripted_model.save('production_model.pt')
-
+```
 
 ### Real-Time Inference API
 
 python
+```bash
 from inference import CascadePredictor
 
 # Initialize predictor
@@ -314,7 +320,7 @@ predictor = CascadePredictor(
 
 # Real-time prediction
 prediction = predictor.predict(node_features, edge_features)
-
+```
 
 ## Citation
 
@@ -327,3 +333,4 @@ If you use this code in your research, please cite:
   journal={Research \& Development Division},
   year={2025}
 }
+```

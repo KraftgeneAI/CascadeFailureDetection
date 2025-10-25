@@ -542,8 +542,8 @@ def generate_dataset_streaming(
 if __name__ == "__main__":
     # Generate optimized dataset
     generate_dataset_streaming(
-        num_normal=100,
-        num_cascade=10,
+        num_normal=3000,
+        num_cascade=300,
         num_nodes=118,
         sequence_length=60,
         output_dir="data",
