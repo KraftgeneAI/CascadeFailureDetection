@@ -534,7 +534,7 @@ class CascadePredictionGNN(nn.Module):
         """
         # Embed initial features
         x_embedded = [self.node_embedding(x_t) for x_t in x_sequence]
-        edge_embedded = self.edge_embedding(edge_attr)  # Now this will be used!
+        edge_embedded = self.edge_embedding(edge_attr)  
         
         # Multi-scale temporal encoding with edge features
         temporal_output, updated_states = self.temporal_encoder(

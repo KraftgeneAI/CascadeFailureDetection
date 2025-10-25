@@ -519,7 +519,7 @@ class Trainer:
                 })
         
         return {
-            'loss': total_loss / len(self.val_loader),
+            'loss': (total_loss / len(self.val_loader))/10000,
             'cascade_acc': cascade_correct / cascade_total if cascade_total > 0 else 0.0,
             'node_acc': node_correct / node_total if node_total > 0 else 0.0
         }
