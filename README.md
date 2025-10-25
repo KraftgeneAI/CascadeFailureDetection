@@ -2,13 +2,13 @@
 
 ## Overview
 
-This is a professional implementation of a Graph Neural Network (GNN) based cascade failure prediction system for power grids, combining physics-informed learning with deep learning for accurate prediction of cascading infrastructure failures.
+This is the implementation of a Graph Neural Network (GNN) based cascade failure prediction system for power grids, combining physics-informed learning with deep learning for accurate prediction of cascading infrastructure failures.
 
 ## System Requirements
 
 ### Hardware
-- **Minimum**: 16GB RAM, 4-core CPU
-- **Recommended**: 32GB RAM, 8-core CPU, NVIDIA GPU (8GB+ VRAM)
+- **Minimum**: 32GB RAM, 4-core CPU
+- **Recommended**: 64GB RAM, 8-core CPU, NVIDIA GPU (8GB+ VRAM)
 - **Storage**: 10GB free space for data and models
 
 ### Software
@@ -19,7 +19,7 @@ This is a professional implementation of a Graph Neural Network (GNN) based casc
 
 ### 1. Create Virtual Environment
 
-\`\`\`bash
+```bash
 # Create virtual environment
 python -m venv cascade_env
 
@@ -28,11 +28,11 @@ python -m venv cascade_env
 source cascade_env/bin/activate
 # On Windows:
 cascade_env\Scripts\activate
-\`\`\`
+
 
 ### 2. Install Dependencies
 
-\`\`\`bash
+```bash
 # Install PyTorch (CPU version)
 pip install torch torchvision torchaudio
 
@@ -45,13 +45,13 @@ pip install torch-geometric
 # Install other dependencies
 pip install numpy scipy matplotlib tqdm scikit-learn
 pip install pandas seaborn jupyter
-\`\`\`
+
 
 ### 3. Verify Installation
 
-\`\`\`bash
+```bash
 python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA Available: {torch.cuda.is_available()}')"
-\`\`\`
+
 
 ## Quick Start Guide
 
@@ -59,7 +59,7 @@ python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA Av
 
 Generate synthetic power grid scenarios with cascade failures:
 
-\`\`\`bash
+```bash
 # Quick test (small dataset, ~5 minutes)
 python generate_training_data.py
 
@@ -69,22 +69,22 @@ python generate_training_data.py
 # - data/test_data.pkl (test scenarios)
 # - data/grid_topology.pkl (grid structure)
 # - data/metadata.json (dataset information)
-\`\`\`
+
 
 **For quick testing**, modify the script to use smaller numbers:
-\`\`\`python
+python
 generate_dataset(
-    num_normal=1000,    # Instead of 12000
-    num_cascade=100,    # Instead of 1200
+    num_normal=500,    # Instead of 12000
+    num_cascade=50,    # Instead of 1200
     sequence_length=30  # Instead of 60
 )
-\`\`\`
+
 
 ### Step 2: Train the Model
 
 Train the cascade prediction model:
 
-\`\`\`bash
+```bash
 # Basic training (CPU)
 python train_model.py --num_epochs 50 --batch_size 16
 
@@ -100,7 +100,7 @@ python train_model.py \
 
 # Quick test training (5 epochs)
 python train_model.py --num_epochs 5 --batch_size 8
-\`\`\`
+
 
 **Training outputs:**
 - `checkpoints/best_model.pt` - Best model based on validation loss
@@ -116,7 +116,7 @@ python train_model.py --num_epochs 5 --batch_size 8
 
 Make predictions on test data:
 
-\`\`\`bash
+```bash
 # Single scenario prediction
 python inference.py \
     --model_path checkpoints/best_model.pt \
@@ -138,11 +138,11 @@ python inference.py \
     --device cuda \
     --batch \
     --output predictions.json
-\`\`\`
+
 
 ## Complete Workflow Example
 
-\`\`\`bash
+```bash
 # 1. Generate data (quick test version)
 python generate_training_data.py
 
@@ -163,7 +163,7 @@ python inference.py \
 
 # 4. View results
 cat test_predictions.json | python -m json.tool | head -50
-\`\`\`
+
 
 ## Advanced Usage
 
@@ -171,7 +171,7 @@ cat test_predictions.json | python -m json.tool | head -50
 
 Create a training configuration file `config.json`:
 
-\`\`\`json
+json
 {
   "data_dir": "data",
   "output_dir": "checkpoints",
@@ -184,13 +184,13 @@ Create a training configuration file `config.json`:
   "early_stopping": 15,
   "device": "cuda"
 }
-\`\`\`
+
 
 ### Monitoring Training
 
 Training progress is displayed in real-time:
 
-\`\`\`
+
 Epoch 1/50
 --------------------------------------------------------------------------------
 Training: 100%|████████████| 525/525 [02:15<00:00, 3.87it/s, loss=0.4523, cascade_acc=0.8234]
@@ -201,13 +201,13 @@ Epoch 1 Results:
   Train Cascade Acc: 0.8234 | Val Cascade Acc: 0.8567
   Train Node Acc: 0.7845 | Val Node Acc: 0.8123
   ✓ New best model saved (val_loss: 0.3891)
-\`\`\`
+
 
 ### Interpreting Predictions
 
 Example prediction output:
 
-\`\`\`json
+json
 {
   "cascade_probability": 0.9234,
   "cascade_detected": true,
@@ -225,7 +225,7 @@ Example prediction output:
     "time_to_cascade": 25.3
   }
 }
-\`\`\`
+
 
 ## Performance Benchmarks
 
@@ -247,50 +247,22 @@ Example prediction output:
 | Medium (5K scenarios) | ~45 min | ~85% |
 | Full (13K scenarios) | ~2 hours | ~87% |
 
-## Troubleshooting
-
-### Common Issues
-
-**1. Out of Memory Error**
-\`\`\`bash
-# Reduce batch size
-python train_model.py --batch_size 8
-
-# Or use CPU
-python train_model.py --device cpu
-\`\`\`
-
-**2. CUDA Not Available**
-\`\`\`bash
-# Verify CUDA installation
-python -c "import torch; print(torch.cuda.is_available())"
-
-# Install correct PyTorch version
-pip install torch --index-url https://download.pytorch.org/whl/cu118
-\`\`\`
-
-**3. Slow Training**
-\`\`\`bash
-# Use smaller dataset for testing
-# Edit generate_training_data.py:
-generate_dataset(num_normal=1000, num_cascade=100)
-
 # Reduce model size
 python train_model.py --hidden_dim 64 --num_gnn_layers 2
-\`\`\`
+
 
 **4. Poor Convergence**
-\`\`\`bash
+```bash
 # Adjust learning rate
 python train_model.py --learning_rate 0.0001
 
 # Increase training epochs
 python train_model.py --num_epochs 100
-\`\`\`
+
 
 ## File Structure
 
-\`\`\`
+
 cascade-prediction/
 ├── cascade_prediction_model.py   # Model architecture
 ├── generate_training_data.py     # Data generation
@@ -308,13 +280,13 @@ cascade-prediction/
     ├── final_model.pt
     ├── training_history.json
     └── training_curves.png
-\`\`\`
+
 
 ## Production Deployment
 
 ### Model Export
 
-\`\`\`python
+python
 # Export model for production
 import torch
 from cascade_prediction_model import CascadePredictionModel
@@ -326,11 +298,11 @@ model.eval()
 # Export to TorchScript
 scripted_model = torch.jit.script(model)
 scripted_model.save('production_model.pt')
-\`\`\`
+
 
 ### Real-Time Inference API
 
-\`\`\`python
+python
 from inference import CascadePredictor
 
 # Initialize predictor
@@ -342,7 +314,7 @@ predictor = CascadePredictor(
 
 # Real-time prediction
 prediction = predictor.predict(node_features, edge_features)
-\`\`\`
+
 
 ## Citation
 

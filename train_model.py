@@ -1,6 +1,7 @@
 """
 Cascade Failure Prediction Model Training Script
 Complete training pipeline with data loading, training, validation, and model saving.
+Updated to work with batch-based data generation.
 
 Author: Kraftgene AI Inc.
 Date: October 2025
@@ -20,6 +21,7 @@ from typing import Dict, List, Tuple
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import argparse
+import glob
 
 from cascade_prediction_model import (
     CompleteCascadePredictionModel,
@@ -27,20 +29,156 @@ from cascade_prediction_model import (
 )
 
 
-class CascadeDataset(Dataset):
-    """PyTorch Dataset for cascade failure scenarios."""
+class BatchStreamingDataset(Dataset):
+    """
+    Memory-efficient dataset that loads batches on-demand.
+    Only keeps batch file paths in memory, loads data when needed.
+    """
     
-    def __init__(self, data_file: str, topology_file: str):
+    def __init__(self, batch_dir: str, topology_file: str):
+        """
+        Initialize streaming dataset.
+        
+        Args:
+            batch_dir: Directory containing batch files
+            topology_file: Path to pickle file containing grid topology
+        """
+        self.batch_dir = Path(batch_dir)
+        
+        self.batch_files = sorted(self.batch_dir.glob("batch_*.pkl"))
+        if not self.batch_files:
+            raise ValueError(f"No batch files found in {batch_dir}")
+        
+        print(f"Found {len(self.batch_files)} batch files in {batch_dir}")
+        
+        # Load batch info
+        info_file = self.batch_dir / "batch_info.json"
+        if info_file.exists():
+            with open(info_file, 'r') as f:
+                self.batch_info = json.load(f)
+                self.total_scenarios = self.batch_info['total_scenarios']
+        else:
+            # Count scenarios by loading batch files
+            print("Counting scenarios...")
+            self.total_scenarios = 0
+            for batch_file in self.batch_files:
+                with open(batch_file, 'rb') as f:
+                    batch_data = pickle.load(f)
+                    self.total_scenarios += len(batch_data)
+        
+        # Load topology
+        print(f"Loading topology from {topology_file}...")
+        with open(topology_file, 'rb') as f:
+            topology = pickle.load(f)
+            self.edge_index = topology['edge_index']
+            self.num_nodes = topology['num_nodes']
+        
+        self.scenario_index = []
+        for batch_file in self.batch_files:
+            with open(batch_file, 'rb') as f:
+                batch_data = pickle.load(f)
+                for i in range(len(batch_data)):
+                    self.scenario_index.append((batch_file, i))
+        
+        print(f"Indexed {len(self.scenario_index)} scenarios")
+    
+    def __len__(self) -> int:
+        return len(self.scenario_index)
+    
+    def __getitem__(self, idx: int) -> Dict:
+        """
+        Load a single scenario on-demand.
+        This avoids loading all data into memory.
+        """
+        batch_file, idx_in_batch = self.scenario_index[idx]
+        
+        with open(batch_file, 'rb') as f:
+            batch_data = pickle.load(f)
+            scenario = batch_data[idx_in_batch]
+        
+        sequence = scenario['sequence']
+        metadata = scenario['metadata']
+        
+        # Convert sequence to tensors
+        node_features_seq = []
+        edge_features_seq = []
+        
+        for timestep in sequence:
+            node_features_seq.append(torch.tensor(timestep['node_features'], dtype=torch.float32))
+            edge_features_seq.append(torch.tensor(timestep['edge_features'], dtype=torch.float32))
+        
+        # Stack into temporal sequences
+        node_features = torch.stack(node_features_seq)  # [T, N, F_node]
+        edge_features = torch.stack(edge_features_seq)  # [T, E, F_edge]
+        
+        # Labels
+        cascade_label = torch.tensor([1.0 if metadata['cascade'] else 0.0], dtype=torch.float32)
+        
+        # Node failure labels
+        node_failure_labels = torch.zeros(self.num_nodes, dtype=torch.float32)
+        if metadata['cascade']:
+            failed_nodes = metadata['failed_nodes']
+            node_failure_labels[failed_nodes] = 1.0
+        
+        # Time to cascade
+        time_to_cascade = torch.tensor(
+            [metadata.get('time_to_cascade', -1.0)], 
+            dtype=torch.float32
+        )
+        
+        return {
+            'node_features': node_features,
+            'edge_features': edge_features,
+            'edge_index': self.edge_index,
+            'cascade_label': cascade_label,
+            'node_failure_labels': node_failure_labels,
+            'time_to_cascade': time_to_cascade,
+            'metadata': metadata
+        }
+
+
+class CascadeDataset(Dataset):
+    """PyTorch Dataset for cascade failure scenarios with batch file support."""
+    
+    def __init__(self, data_path: str, topology_file: str):
         """
         Initialize dataset.
         
         Args:
-            data_file: Path to pickle file containing scenarios
+            data_path: Path to data file or directory containing batch files
             topology_file: Path to pickle file containing grid topology
         """
-        print(f"Loading data from {data_file}...")
-        with open(data_file, 'rb') as f:
-            self.data = pickle.load(f)
+        data_path = Path(data_path)
+        
+        if data_path.is_dir() and (data_path / "batch_info.json").exists():
+            print(f"Using memory-efficient batch streaming from: {data_path}")
+            # Use the streaming dataset instead
+            self._use_streaming = True
+            self._streaming_dataset = BatchStreamingDataset(str(data_path), topology_file)
+            return
+        
+        self._use_streaming = False
+        
+        if data_path.is_file():
+            # Single combined file
+            print(f"Loading data from single file: {data_path}...")
+            with open(data_path, 'rb') as f:
+                self.data = pickle.load(f)
+        elif data_path.is_dir():
+            # Load from batch files (old method - loads all into memory)
+            print(f"Loading data from batch directory: {data_path}...")
+            batch_files = sorted(glob.glob(str(data_path / "batch_*.pkl")))
+            if not batch_files:
+                raise ValueError(f"No batch files found in {data_path}")
+            
+            print(f"Found {len(batch_files)} batch files")
+            self.data = []
+            for batch_file in tqdm(batch_files, desc="Loading batches"):
+                with open(batch_file, 'rb') as f:
+                    batch_data = pickle.load(f)
+                    self.data.extend(batch_data)
+        else:
+            raise ValueError(f"Data path {data_path} is neither a file nor a directory")
         
         print(f"Loading topology from {topology_file}...")
         with open(topology_file, 'rb') as f:
@@ -51,10 +189,15 @@ class CascadeDataset(Dataset):
         print(f"Loaded {len(self.data)} scenarios")
     
     def __len__(self) -> int:
+        if self._use_streaming:
+            return len(self._streaming_dataset)
         return len(self.data)
     
     def __getitem__(self, idx: int) -> Dict:
         """Get a single scenario."""
+        if self._use_streaming:
+            return self._streaming_dataset[idx]
+        
         scenario = self.data[idx]
         sequence = scenario['sequence']
         metadata = scenario['metadata']
@@ -116,6 +259,8 @@ def collate_fn(batch: List[Dict]) -> Dict:
         'node_failure_labels': node_failure_labels,
         'time_to_cascade': time_to_cascade
     }
+
+
 
 
 class Trainer:
@@ -527,6 +672,8 @@ def main():
     """Main training function."""
     parser = argparse.ArgumentParser(description="Train Cascade Prediction Model")
     parser.add_argument("--data_dir", type=str, default="data", help="Data directory")
+    parser.add_argument("--train_data", type=str, default=None, help="Training data file or directory (overrides data_dir)")
+    parser.add_argument("--val_data", type=str, default=None, help="Validation data file or directory (overrides data_dir)")
     parser.add_argument("--output_dir", type=str, default="checkpoints", help="Output directory")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
     parser.add_argument("--num_epochs", type=int, default=50, help="Number of epochs")
@@ -543,16 +690,48 @@ def main():
     device = torch.device(args.device)
     print(f"Using device: {device}")
     
-    # Load datasets
     data_dir = Path(args.data_dir)
+    
+    if args.train_data:
+        train_data_path = args.train_data
+    elif (data_dir / "train_batches").exists():
+        train_data_path = str(data_dir / "train_batches")
+    elif (data_dir / "training_data_combined.pkl").exists():
+        train_data_path = str(data_dir / "training_data_combined.pkl")
+    elif (data_dir / "train_data.pkl").exists():
+        train_data_path = str(data_dir / "train_data.pkl")
+    else:
+        raise ValueError(f"No training data found in {data_dir}")
+    
+    if args.val_data:
+        val_data_path = args.val_data
+    elif (data_dir / "val_batches").exists():
+        val_data_path = str(data_dir / "val_batches")
+    elif (data_dir / "validation_data_combined.pkl").exists():
+        val_data_path = str(data_dir / "validation_data_combined.pkl")
+    elif (data_dir / "val_data.pkl").exists():
+        val_data_path = str(data_dir / "val_data.pkl")
+    else:
+        raise ValueError(f"No validation data found in {data_dir}")
+    
+    topology_path = str(data_dir / "grid_topology.pkl")
+    
+    print(f"\nData Configuration:")
+    print(f"  Training data: {train_data_path}")
+    print(f"  Validation data: {val_data_path}")
+    print(f"  Topology: {topology_path}\n")
+    
+    # Load datasets
     train_dataset = CascadeDataset(
-        data_file=str(data_dir / "train_data.pkl"),
-        topology_file=str(data_dir / "grid_topology.pkl")
+        data_path=train_data_path,
+        topology_file=topology_path
     )
     val_dataset = CascadeDataset(
-        data_file=str(data_dir / "val_data.pkl"),
-        topology_file=str(data_dir / "grid_topology.pkl")
+        data_path=val_data_path,
+        topology_file=topology_path
     )
+    
+    num_workers = 0 if isinstance(train_dataset, CascadeDataset) and train_dataset._use_streaming else 4
     
     # Create data loaders
     train_loader = DataLoader(
@@ -560,7 +739,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=True,
         collate_fn=collate_fn,
-        num_workers=4,
+        num_workers=num_workers,
         pin_memory=True if device.type == "cuda" else False
     )
     val_loader = DataLoader(
@@ -568,7 +747,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         collate_fn=collate_fn,
-        num_workers=4,
+        num_workers=num_workers,
         pin_memory=True if device.type == "cuda" else False
     )
     

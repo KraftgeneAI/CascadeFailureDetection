@@ -8,7 +8,7 @@ Based on the research paper:
 "AI-Driven Predictive Cascade Failure Analysis Using Multi-Modal 
 Environmental-Infrastructure Data Fusion"
 
-Author: Kraftgene AI Inc. (Implementation)
+Author: Kraftgene AI Inc. (R & D)
 Date: October 2025
 """
 
@@ -17,14 +17,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import add_self_loops, softmax
-from torch_geometric.data import Data, Batch
-import numpy as np
 from typing import Optional, Tuple, Dict, List
-import math
 
 
 # ============================================================================
-# STEP 3: GNN PREDICTION LAYER
+# STEP 1: GNN PREDICTION LAYER
 # ============================================================================
 
 class GraphAttentionLayer(MessagePassing):
@@ -35,6 +32,7 @@ class GraphAttentionLayer(MessagePassing):
     Based on Equation 3 and 6 from the paper.
     
     ** FIXED: Now properly handles batched inputs [B, N, F] **
+    ** CHANGE: Now supports edge features via edge_dim **
     """
     
     def __init__(
@@ -46,7 +44,8 @@ class GraphAttentionLayer(MessagePassing):
         negative_slope: float = 0.2,
         dropout: float = 0.0,
         add_self_loops: bool = True,
-        bias: bool = True
+        bias: bool = True,
+        edge_dim: Optional[int] = None  # Added edge feature dimension
     ):
         super(GraphAttentionLayer, self).__init__(aggr='add', node_dim=0)  # Fixed node_dim to 0 for proper batching
         
@@ -57,6 +56,7 @@ class GraphAttentionLayer(MessagePassing):
         self.negative_slope = negative_slope
         self.dropout = dropout
         self.add_self_loops_flag = add_self_loops
+        self.edge_dim = edge_dim  # Store edge dimension
         
         # Linear transformation for node features
         self.lin = nn.Linear(in_channels, heads * out_channels, bias=False)
@@ -64,6 +64,13 @@ class GraphAttentionLayer(MessagePassing):
         # Attention mechanism parameters (Equation 3)
         self.att_src = nn.Parameter(torch.Tensor(1, heads, out_channels))
         self.att_dst = nn.Parameter(torch.Tensor(1, heads, out_channels))
+        
+        if edge_dim is not None:
+            self.lin_edge = nn.Linear(edge_dim, heads * out_channels, bias=False)
+            self.att_edge = nn.Parameter(torch.Tensor(1, heads, out_channels))
+        else:
+            self.register_parameter('lin_edge', None)
+            self.register_parameter('att_edge', None)
         
         if bias and concat:
             self.bias = nn.Parameter(torch.Tensor(heads * out_channels))
@@ -78,6 +85,9 @@ class GraphAttentionLayer(MessagePassing):
         nn.init.xavier_uniform_(self.lin.weight)
         nn.init.xavier_uniform_(self.att_src)
         nn.init.xavier_uniform_(self.att_dst)
+        if self.lin_edge is not None:
+            nn.init.xavier_uniform_(self.lin_edge.weight)
+            nn.init.xavier_uniform_(self.att_edge)
         if self.bias is not None:
             nn.init.zeros_(self.bias)
     
@@ -93,7 +103,7 @@ class GraphAttentionLayer(MessagePassing):
         Args:
             x: Node feature matrix [B, N, in_channels]
             edge_index: Graph connectivity [2, E]
-            edge_attr: Edge features [E, edge_dim] (optional)
+            edge_attr: Edge features [B, E, edge_dim] (optional)
             
         Returns:
             Updated node features [B, N, out_channels * heads] or [B, N, out_channels]
@@ -102,10 +112,17 @@ class GraphAttentionLayer(MessagePassing):
         H, C_out = self.heads, self.out_channels
         
         # Flatten batch dimension: [B, N, C] -> [B*N, C]
-        x_flat = x.view(B * N, C)
+        x_flat = x.reshape(B * N, C)
         
         # Linear transformation
-        x_transformed = self.lin(x_flat).view(B * N, H, C_out)  # [B*N, H, C_out]
+        x_transformed = self.lin(x_flat).reshape(B * N, H, C_out)  # [B*N, H, C_out]
+        
+        edge_attr_transformed = None
+        if edge_attr is not None and self.lin_edge is not None:
+            # edge_attr shape: [B, E, edge_dim]
+            B_e, E, edge_dim = edge_attr.shape
+            edge_attr_flat = edge_attr.reshape(B_e * E, edge_dim)
+            edge_attr_transformed = self.lin_edge(edge_attr_flat).reshape(B_e * E, H, C_out)
         
         # Create batched edge_index by offsetting node indices for each batch
         edge_index_batched = []
@@ -116,16 +133,25 @@ class GraphAttentionLayer(MessagePassing):
         # Add self-loops to batched edge_index
         if self.add_self_loops_flag:
             edge_index_batched, _ = add_self_loops(edge_index_batched, num_nodes=B * N)
+            if edge_attr_transformed is not None:
+                num_self_loops = B * N
+                self_loop_attr = torch.zeros(num_self_loops, H, C_out, device=edge_attr_transformed.device)
+                edge_attr_transformed = torch.cat([edge_attr_transformed, self_loop_attr], dim=0)
         
         # Propagate messages
-        out = self.propagate(edge_index_batched, x=x_transformed, size=(B * N, B * N))  # [B*N, H, C_out]
+        out = self.propagate(
+            edge_index_batched, 
+            x=x_transformed, 
+            edge_attr=edge_attr_transformed,  # Pass edge features
+            size=(B * N, B * N)
+        )  # [B*N, H, C_out]
         
         # Reshape back to batched format: [B*N, H, C_out] -> [B, N, H, C_out]
-        out = out.view(B, N, H, C_out)
+        out = out.reshape(B, N, H, C_out)
         
         # Concatenate or average multi-head outputs
         if self.concat:
-            out = out.view(B, N, H * C_out)
+            out = out.reshape(B, N, H * C_out)
         else:
             out = out.mean(dim=2)  # [B, N, C_out]
         
@@ -151,7 +177,7 @@ class GraphAttentionLayer(MessagePassing):
             x_j: Source node features [E, heads, out_channels]
             edge_index_i: Target node indices
             size_i: Number of target nodes
-            edge_attr: Edge attributes (optional)
+            edge_attr: Edge attributes [E, heads, out_channels] (optional)
             
         Returns:
             Attention-weighted messages [E, heads, out_channels]
@@ -160,6 +186,11 @@ class GraphAttentionLayer(MessagePassing):
         alpha_src = (x_j * self.att_src).sum(dim=-1)  # [E, H]
         alpha_dst = (x_i * self.att_dst).sum(dim=-1)  # [E, H]
         alpha = alpha_src + alpha_dst
+        
+        if edge_attr is not None and self.att_edge is not None:
+            alpha_edge = (edge_attr * self.att_edge).sum(dim=-1)  # [E, H]
+            alpha = alpha + alpha_edge
+        
         alpha = F.leaky_relu(alpha, self.negative_slope)
         
         # Normalize attention coefficients using softmax
@@ -177,12 +208,14 @@ class TemporalGNNCell(nn.Module):
     Temporal GNN Cell combining graph attention with LSTM for temporal dynamics.
     Implements the temporal modeling described in Section 4.1.4.
     ** BATCH-AWARE & DIMENSION-FIXED **
+    ** CHANGE: Now accepts edge features **
     """
     
     def __init__(
         self,
         node_features: int,
         hidden_dim: int,
+        edge_dim: Optional[int] = None,  # Added edge dimension parameter
         num_heads: int = 4,
         dropout: float = 0.1
     ):
@@ -198,7 +231,8 @@ class TemporalGNNCell(nn.Module):
             out_channels=self.gat_out_channels_per_head,
             heads=num_heads,
             concat=True,
-            dropout=dropout
+            dropout=dropout,
+            edge_dim=edge_dim  # Pass edge dimension
         )
         
         if self.gat_out_dim != hidden_dim:
@@ -219,6 +253,7 @@ class TemporalGNNCell(nn.Module):
         self,
         x: torch.Tensor,
         edge_index: torch.Tensor,
+        edge_attr: Optional[torch.Tensor] = None,  # Added edge_attr parameter
         h_prev: Optional[torch.Tensor] = None,
         c_prev: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -228,6 +263,7 @@ class TemporalGNNCell(nn.Module):
         Args:
             x: Node features [B, N, node_features]
             edge_index: Graph connectivity [2, E]
+            edge_attr: Edge features [B, E, edge_dim] (optional)
             h_prev: Previous hidden state [B, N, hidden_dim]
             c_prev: Previous cell state [B, N, hidden_dim]
             
@@ -236,8 +272,8 @@ class TemporalGNNCell(nn.Module):
         """
         B, N, _ = x.shape
         
-        # Spatial aggregation via graph attention
-        spatial_features = self.gat(x, edge_index)  # [B, N, gat_out_dim]
+        # Spatial aggregation via graph attention with edge features
+        spatial_features = self.gat(x, edge_index, edge_attr)  # Pass edge_attr
         
         if self.projection is not None:
             spatial_features = self.projection(spatial_features)  # [B, N, hidden_dim]
@@ -249,16 +285,16 @@ class TemporalGNNCell(nn.Module):
             c_prev = torch.zeros(B, N, self.hidden_dim, device=x.device)
         
         # Flatten for LSTMCell
-        spatial_flat = spatial_features.view(B * N, -1)
-        h_prev_flat = h_prev.view(B * N, -1)
-        c_prev_flat = c_prev.view(B * N, -1)
+        spatial_flat = spatial_features.reshape(B * N, -1)
+        h_prev_flat = h_prev.reshape(B * N, -1)
+        c_prev_flat = c_prev.reshape(B * N, -1)
         
         # Temporal update via LSTM (Equation 7)
         h_new_flat, c_new_flat = self.lstm(spatial_flat, (h_prev_flat, c_prev_flat))
         
         # Reshape back to [B, N, H]
-        h_new = h_new_flat.view(B, N, self.hidden_dim)
-        c_new = c_new_flat.view(B, N, self.hidden_dim)
+        h_new = h_new_flat.reshape(B, N, self.hidden_dim)
+        c_new = c_new_flat.reshape(B, N, self.hidden_dim)
         
         # Layer normalization
         h_new = self.layer_norm(h_new)
@@ -271,12 +307,14 @@ class MultiScaleTemporalEncoder(nn.Module):
     Multi-scale temporal modeling with parallel streams at different resolutions.
     Implements Section 4.1.4: Multi-Scale Temporal Modeling.
     ** BATCH-AWARE **
+    ** CHANGE: Now accepts edge features **
     """
     
     def __init__(
         self,
         node_features: int,
         hidden_dim: int,
+        edge_dim: Optional[int] = None,  # Added edge dimension parameter
         num_heads: int = 4
     ):
         super(MultiScaleTemporalEncoder, self).__init__()
@@ -285,9 +323,9 @@ class MultiScaleTemporalEncoder(nn.Module):
         self.stream_dim = hidden_dim // 3
         
         # Three parallel temporal streams
-        self.fast_stream = TemporalGNNCell(node_features, self.stream_dim, num_heads)
-        self.medium_stream = TemporalGNNCell(node_features, self.stream_dim, num_heads)
-        self.slow_stream = TemporalGNNCell(node_features, self.stream_dim, num_heads)
+        self.fast_stream = TemporalGNNCell(node_features, self.stream_dim, edge_dim, num_heads)  # Pass edge_dim
+        self.medium_stream = TemporalGNNCell(node_features, self.stream_dim, edge_dim, num_heads)  # Pass edge_dim
+        self.slow_stream = TemporalGNNCell(node_features, self.stream_dim, edge_dim, num_heads)  # Pass edge_dim
         
         # Temporal attention for weighting different scales (Equation 8)
         self.temporal_attention = nn.Sequential(
@@ -301,6 +339,7 @@ class MultiScaleTemporalEncoder(nn.Module):
         self,
         x_sequence: List[torch.Tensor],
         edge_index: torch.Tensor,
+        edge_attr: Optional[torch.Tensor] = None,  # Added edge_attr parameter
         states: Optional[Dict] = None
     ) -> Tuple[torch.Tensor, Dict]:
         """
@@ -309,6 +348,7 @@ class MultiScaleTemporalEncoder(nn.Module):
         Args:
             x_sequence: List of node features at different timesteps [B, N, F]
             edge_index: Graph connectivity [2, E]
+            edge_attr: Edge features [B, E, edge_dim] (optional)
             states: Dictionary of previous states for each stream
             
         Returns:
@@ -327,13 +367,13 @@ class MultiScaleTemporalEncoder(nn.Module):
         for t, x_t in enumerate(x_sequence):
             # Fast stream (every timestep)
             fast_out, fast_h, fast_c = self.fast_stream(
-                x_t, edge_index, states['fast'][0], states['fast'][1]
+                x_t, edge_index, edge_attr, states['fast'][0], states['fast'][1]  # Pass edge_attr
             )
             
             # Medium stream (every 15 timesteps)
             if t % 15 == 0:
                 medium_out, medium_h, medium_c = self.medium_stream(
-                    x_t, edge_index, states['medium'][0], states['medium'][1]
+                    x_t, edge_index, edge_attr, states['medium'][0], states['medium'][1]  # Pass edge_attr
                 )
                 states['medium'] = (medium_h, medium_c)
             else:
@@ -342,7 +382,7 @@ class MultiScaleTemporalEncoder(nn.Module):
             # Slow stream (every 150 timesteps)
             if t % 150 == 0:
                 slow_out, slow_h, slow_c = self.slow_stream(
-                    x_t, edge_index, states['slow'][0], states['slow'][1]
+                    x_t, edge_index, edge_attr, states['slow'][0], states['slow'][1]  # Pass edge_attr
                 )
                 states['slow'] = (slow_h, slow_c)
             else:
@@ -376,6 +416,7 @@ class CascadePredictionGNN(nn.Module):
     Complete GNN architecture for cascade failure prediction.
     Implements the full prediction layer from Section 3.4 and 4.1.
     ** BATCH-AWARE **
+    ** CHANGE: Now incorporates edge features into GNN layers **
     """
     
     def __init__(
@@ -410,6 +451,7 @@ class CascadePredictionGNN(nn.Module):
         self.temporal_encoder = MultiScaleTemporalEncoder(
             node_features=hidden_dim,
             hidden_dim=hidden_dim,
+            edge_dim=hidden_dim,  # Pass edge embedding dimension
             num_heads=num_heads
         )
         
@@ -423,7 +465,8 @@ class CascadePredictionGNN(nn.Module):
                 out_channels=hidden_dim // num_heads,
                 heads=num_heads,
                 concat=True,
-                dropout=dropout
+                dropout=dropout,
+                edge_dim=hidden_dim  # Pass edge dimension
             )
             for _ in range(num_gnn_layers)
         ])
@@ -491,11 +534,11 @@ class CascadePredictionGNN(nn.Module):
         """
         # Embed initial features
         x_embedded = [self.node_embedding(x_t) for x_t in x_sequence]
-        edge_embedded = self.edge_embedding(edge_attr)
+        edge_embedded = self.edge_embedding(edge_attr)  # Now this will be used!
         
-        # Multi-scale temporal encoding
+        # Multi-scale temporal encoding with edge features
         temporal_output, updated_states = self.temporal_encoder(
-            x_embedded, edge_index, temporal_states
+            x_embedded, edge_index, edge_embedded, temporal_states  # Pass edge_embedded
         )
         
         # Use the final timestep for prediction
@@ -503,9 +546,9 @@ class CascadePredictionGNN(nn.Module):
         
         h = self.temporal_projection(h)  # [B, N, hidden_dim]
         
-        # Apply GNN layers with residual connections
+        # Apply GNN layers with residual connections and edge features
         for gnn_layer, layer_norm in zip(self.gnn_layers, self.layer_norms):
-            h_new = gnn_layer(h, edge_index)  # [B, N, H]
+            h_new = gnn_layer(h, edge_index, edge_embedded)  # Pass edge_embedded
             h = layer_norm(h + h_new)
         
         # Multi-task predictions
@@ -533,7 +576,7 @@ class CascadePredictionGNN(nn.Module):
 
 
 # ============================================================================
-# STEP 4: PHYSICS-INFORMED METHODOLOGY
+# STEP 2: PHYSICS-INFORMED METHODOLOGY
 # ============================================================================
 
 class PhysicsInformedLoss(nn.Module):
@@ -806,7 +849,11 @@ class PhysicsInformedFeatureExtractor(nn.Module):
         loading_ratios = line_flows / (thermal_limits + 1e-6)
         
         batch_size = loading_ratios.size(0)
-        num_nodes = edge_index.max().item() + 1
+        # Ensure num_nodes is correctly determined, especially for empty graphs or single nodes.
+        max_node_idx = -1
+        if edge_index.numel() > 0:
+            max_node_idx = edge_index.max().item()
+        num_nodes = max_node_idx + 1
         
         src, dst = edge_index
         
@@ -822,12 +869,23 @@ class PhysicsInformedFeatureExtractor(nn.Module):
             if loading_b.dim() > 1:
                 loading_b = loading_b.squeeze()
             
+            # Ensure max_loading_b is initialized correctly for the current batch size
             max_loading_b = torch.zeros(num_nodes, device=line_flows.device)
             
-            for i in range(loading_b.size(0)):
-                src_node = src[i].item()
-                if loading_b[i] > max_loading_b[src_node]:
-                    max_loading_b[src_node] = loading_b[i]
+            # Check if edge_index is not empty before iterating
+            if loading_b.numel() > 0:
+                for i in range(loading_b.size(0)):
+                    # Check source node
+                    if src[i] < num_nodes:
+                        src_node = src[i].item()
+                        if loading_b[i] > max_loading_b[src_node]:
+                            max_loading_b[src_node] = loading_b[i]
+                    
+                    # Check destination node (was missing!)
+                    if dst[i] < num_nodes:
+                        dst_node = dst[i].item()
+                        if loading_b[i] > max_loading_b[dst_node]:
+                            max_loading_b[dst_node] = loading_b[i]
             
             max_loading_list.append(max_loading_b)
         
@@ -876,8 +934,10 @@ class PhysicsInformedFeatureExtractor(nn.Module):
         stability_sum = torch.zeros(batch_size, num_nodes, device=voltages.device)  # [B, N]
         
         # Aggregate stability factors at each node
-        for b in range(batch_size):
-            stability_sum[b].index_add_(0, src, F_ij_squeezed[b])
+        # Check if edge_index is not empty before iterating
+        if F_ij_squeezed.numel() > 0:
+            for b in range(batch_size):
+                stability_sum[b].index_add_(0, src, F_ij_squeezed[b])
         
         stability_sum = stability_sum.unsqueeze(-1)  # [B, N, 1]
 
@@ -932,17 +992,25 @@ class PhysicsInformedFeatureExtractor(nn.Module):
         voltages = node_features[:, :, 0:1]  # [B, N, 1]
         
         batch_size = node_features.size(0)
-        num_edges = edge_index.size(1)
         
-        def prep_prop(key):
+        # Helper to get property, defaulting to zero if not found
+        def get_prop(key, default_shape):
             prop = graph_properties.get(key)
             if prop is None:
-                return torch.zeros(batch_size, num_edges, 1, device=node_features.device)
+                return torch.zeros(*default_shape, device=node_features.device)
+            # Ensure the property has the correct batch and edge dimensions if it's a tensor
+            if isinstance(prop, torch.Tensor):
+                if prop.dim() == 1: # Assuming [E]
+                    return prop.unsqueeze(0).unsqueeze(-1).expand(batch_size, -1, -1)
+                elif prop.dim() == 2: # Assuming [B, E]
+                    return prop.unsqueeze(-1).expand(batch_size, -1, -1)
+                elif prop.dim() == 3 and prop.size(0) != batch_size: # Assuming [E, 1] or similar, expand to [B, E, 1]
+                    return prop.unsqueeze(0).expand(batch_size, -1, -1)
             return prop
 
-        line_flows = prep_prop('line_flows')
-        thermal_limits = prep_prop('thermal_limits')
-        susceptance = prep_prop('susceptance')
+        line_flows = get_prop('line_flows', (batch_size, edge_index.size(1), 1))
+        thermal_limits = get_prop('thermal_limits', (batch_size, edge_index.size(1), 1))
+        susceptance = get_prop('susceptance', (batch_size, edge_index.size(1), 1))
         
         # Compute physics-based features
         n1_violations = self.compute_n1_violations(
@@ -974,7 +1042,7 @@ class PhysicsInformedFeatureExtractor(nn.Module):
 class CompleteCascadePredictionModel(nn.Module):
     """
     Complete cascade failure prediction system integrating GNN and physics.
-    This is the full model combining Steps 3 and 4.
+    This is the full model combining Steps 1 and 2.
     """
     
     def __init__(
@@ -995,6 +1063,7 @@ class CompleteCascadePredictionModel(nn.Module):
         self.physics_extractor = PhysicsInformedFeatureExtractor()
         
         # Calculate augmented feature dimension
+        # The number of physics features extracted is 2 (N-1 violations and voltage stability index)
         augmented_node_features = node_features + 2
         
         # Core GNN prediction model
