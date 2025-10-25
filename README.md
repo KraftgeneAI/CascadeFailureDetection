@@ -123,14 +123,14 @@ Make predictions on test data:
 # Single scenario prediction
 python inference.py \
     --model_path checkpoints/best_model.pt \
-    --data_file data/test_data.pkl \
+    --data_path data/test_batches \
     --scenario_idx 0 \
     --output prediction_result.json
 
 # Batch prediction with evaluation
 python inference.py \
     --model_path checkpoints/best_model.pt \
-    --data_file data/test_data.pkl \
+    --data_path data/test_batches \
     --batch \
     --max_scenarios 100 \
     --output batch_predictions.json
@@ -159,7 +159,7 @@ python train_model.py \
 # 3. Run inference on test set
 python inference.py \
     --model_path checkpoints/best_model.pt \
-    --data_file data/test_data.pkl \
+    --data_path data/test_batches \
     --batch \
     --max_scenarios 50 \
     --output test_predictions.json
@@ -266,7 +266,7 @@ python train_model.py --num_epochs 100
 
 ## File Structure
 
-
+```bash
 cascade-prediction/
 ├── cascade_prediction_model.py   # Model architecture
 ├── generate_training_data.py     # Data generation
@@ -284,7 +284,7 @@ cascade-prediction/
     ├── final_model.pt
     ├── training_history.json
     └── training_curves.png
-
+```
 
 ## Production Deployment
 
