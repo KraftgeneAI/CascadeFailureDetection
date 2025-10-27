@@ -7,9 +7,9 @@ This is the implementation of a Graph Neural Network (GNN) based cascade failure
 ## System Requirements
 
 ### Hardware
-- **Minimum**: 8GB RAM, 4-core CPU
-- **Recommended**: 16GB RAM, 8-core CPU, NVIDIA GPU (8GB+ VRAM)
-- **Storage**: 10GB free space for data and models
+- **Minimum**: 32GB RAM, 4-core CPU
+- **Recommended**: 64+GB RAM, 8-core CPU, NVIDIA GPU (8GB+ VRAM)
+- **Storage**: 100GB free space for data and models
 
 ### Software
 - Python 3.8+
@@ -63,7 +63,7 @@ Generate synthetic power grid scenarios with cascade failures:
 
 ```bash
 # Quick test (small dataset, ~5 minutes)
-python generate_training_data.py
+python multimodal_data_generator.py
 
 # This creates:
 # - data/train_data.pkl (training scenarios)
@@ -170,25 +170,6 @@ cat test_predictions.json | python -m json.tool | head -50
 
 ## Advanced Usage
 
-### Custom Training Configuration
-
-Create a training configuration file `config.json`:
-```bash
-json
-{
-  "data_dir": "data",
-  "output_dir": "checkpoints",
-  "batch_size": 32,
-  "num_epochs": 100,
-  "learning_rate": 0.001,
-  "hidden_dim": 256,
-  "num_gnn_layers": 6,
-  "num_attention_heads": 8,
-  "early_stopping": 15,
-  "device": "cuda"
-}
-```
-
 ### Monitoring Training
 
 Training progress is displayed in real-time:
@@ -273,10 +254,10 @@ cascade-prediction/
 ├── train_model.py                # Training script
 ├── inference.py                  # Inference script
 ├── README.md                     # This file
-├── data/                         # Generated data
-│   ├── train_data.pkl
-│   ├── val_data.pkl
-│   ├── test_data.pkl
+├── data_unified/                         # Generated data
+│   ├── train_batches
+│   ├── val_batches
+│   ├── test_batches
 │   ├── grid_topology.pkl
 │   └── metadata.json
 └── checkpoints/                  # Saved models
@@ -314,7 +295,7 @@ from inference import CascadePredictor
 # Initialize predictor
 predictor = CascadePredictor(
     model_path='checkpoints/best_model.pt',
-    topology_path='data/grid_topology.pkl',
+    topology_path='data_unified/grid_topology.pkl',
     device='cuda'
 )
 

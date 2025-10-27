@@ -1,7 +1,7 @@
 """
 Cascade Failure Prediction Model Inference Script
 Load trained model and make predictions on new data.
-Updated to work with batch-based data generation.
+Updated to work with unified multi-modal model and batch-based data generation.
 
 Author: Kraftgene AI Inc.
 Date: October 2025
@@ -18,7 +18,7 @@ import argparse
 from datetime import datetime
 import glob
 
-from cascade_prediction_model import CompleteCascadePredictionModel
+from multimodal_cascade_model import UnifiedCascadePredictionModel
 
 class NumpyEncoder(json.JSONEncoder):
     """Custom JSON encoder for NumPy types."""
@@ -59,12 +59,11 @@ class CascadePredictor:
         checkpoint = torch.load(model_path, map_location=self.device)
         
         # Initialize model architecture
-        self.model = CompleteCascadePredictionModel(
-            node_features=45,
-            edge_features=28,
+        self.model = UnifiedCascadePredictionModel(
+            embedding_dim=128,
             hidden_dim=128,
-            num_gnn_layers=4,
-            num_heads=4,
+            num_gnn_layers=3,
+            heads=4,
             dropout=0.1
         )
         
@@ -173,68 +172,85 @@ class CascadePredictor:
         else:
             raise ValueError(f"Data path {data_path} is neither a file nor a directory")
     
-    def predict(self, node_features: torch.Tensor, edge_features: torch.Tensor) -> Dict:
+    def predict(self, multi_modal_data: Dict) -> Dict:
         """
         Make prediction on grid scenario.
         
         Args:
-            node_features: Node features [T, N, F_node]
-            edge_features: Edge features [T, E, F_edge]
+            multi_modal_data: Dictionary containing all multi-modal inputs
         
         Returns:
             Dictionary containing predictions
         """
         with torch.no_grad():
-            # Add batch dimension if needed
-            if node_features.dim() == 3:
-                node_features = node_features.unsqueeze(0)
-                edge_features = edge_features.unsqueeze(0)
+            def safe_tensor_convert(data, name="data"):
+                """Safely convert data to tensor with detailed error reporting."""
+                try:
+                    if isinstance(data, torch.Tensor):
+                        return data
+                    if isinstance(data, (list, tuple)):
+                        data = np.array(data, dtype=np.float32)
+                    elif isinstance(data, np.ndarray):
+                        data = data.astype(np.float32)
+                    else:
+                        data = np.array(data, dtype=np.float32)
+                    return torch.from_numpy(data)
+                except Exception as e:
+                    print(f"Error converting {name}: {e}")
+                    print(f"  Type: {type(data)}")
+                    print(f"  Shape: {data.shape if hasattr(data, 'shape') else 'N/A'}")
+                    raise
             
-            # Move to device
-            node_features = node_features.to(self.device)
-            edge_features = edge_features.to(self.device)
-            
-            batch_size, seq_len, num_nodes, node_feat_dim = node_features.shape
-            x_sequence = [node_features[:, t, :, :] for t in range(seq_len)]
-            
-            graph_properties = {
-                'thermal_limits': edge_features[:, :, 1:2].mean(dim=1),
-                'susceptance': edge_features[:, :, 1:2].mean(dim=1),
-                'line_flows': edge_features[:, :, 2:3].mean(dim=1)
+            batch = {
+                'satellite_data': safe_tensor_convert(multi_modal_data['environmental']['satellite_imagery'], 'satellite_data').unsqueeze(0).to(self.device),
+                'weather_sequence': safe_tensor_convert(multi_modal_data['environmental']['weather_sequence'], 'weather_sequence').unsqueeze(0).to(self.device),
+                'threat_indicators': safe_tensor_convert(multi_modal_data['environmental']['threat_indicators'], 'threat_indicators').unsqueeze(0).to(self.device),
+                'scada_data': safe_tensor_convert(multi_modal_data['infrastructure']['scada_measurements'], 'scada_data').unsqueeze(0).to(self.device),
+                'pmu_sequence': safe_tensor_convert(multi_modal_data['infrastructure']['pmu_data'], 'pmu_sequence').unsqueeze(0).to(self.device),
+                'equipment_status': safe_tensor_convert(multi_modal_data['infrastructure']['equipment_condition'], 'equipment_status').unsqueeze(0).to(self.device),
+                'visual_data': safe_tensor_convert(multi_modal_data['robotic']['visual_inspection'], 'visual_data').unsqueeze(0).to(self.device),
+                'thermal_data': safe_tensor_convert(multi_modal_data['robotic']['thermal_imaging'], 'thermal_data').unsqueeze(0).to(self.device),
+                'sensor_data': safe_tensor_convert(multi_modal_data['robotic']['sensor_readings'], 'sensor_data').unsqueeze(0).to(self.device),
+                'edge_index': self.edge_index,
+                'edge_attr': safe_tensor_convert(multi_modal_data['infrastructure']['edge_features'], 'edge_attr').unsqueeze(0).to(self.device)
             }
             
-            outputs = self.model(
-                x_sequence=x_sequence,
-                edge_index=self.edge_index,
-                edge_attr=edge_features[:, -1, :, :],  # Use last timestep edge features
-                graph_properties=graph_properties
-            )
+            outputs = self.model(batch)
             
-            node_failure_prob = outputs['failure_probability']  # [B, N, 1]
-            cascade_prob, _ = torch.max(node_failure_prob, dim=1)  # [B, 1]
-            time_to_cascade = outputs['failure_timing']  # [B, N, 1]
-            time_to_cascade_mean = time_to_cascade.mean(dim=1)  # [B, 1]
+            node_failure_prob = outputs['failure_probability'].squeeze(0).squeeze(-1).cpu().numpy()
             
-            # Convert to numpy
-            cascade_prob = cascade_prob.cpu().numpy()
-            node_failure_prob = node_failure_prob.squeeze(-1).cpu().numpy()  # [B, N]
-            time_to_cascade_mean = time_to_cascade_mean.cpu().numpy()
+            # Convert to float properly - handle both scalar and array cases
+            if node_failure_prob.size == 1:
+                cascade_prob = float(node_failure_prob.item())
+            else:
+                cascade_prob = float(np.max(node_failure_prob))
+            
+            failure_timing = outputs['failure_timing'].squeeze(0).squeeze(-1).cpu().numpy()
+            risk_scores = outputs['risk_scores'].squeeze(0).cpu().numpy()  # Shape: [num_nodes, 7]
             
             cascade_threshold = 0.3
-            cascade_detected = bool(cascade_prob[0, 0] > cascade_threshold)
+            cascade_detected = bool(cascade_prob > cascade_threshold)
             
-            # Identify high-risk nodes
-            high_risk_nodes = np.where(node_failure_prob[0] > 0.5)[0].tolist()
+            # Use cascade_threshold + 0.05 to identify nodes slightly above the cascade detection level
+            high_risk_threshold = cascade_threshold + 0.05
+            high_risk_nodes = np.where(node_failure_prob > high_risk_threshold)[0].tolist()
             
             # Sort nodes by failure probability
-            node_risks = [(i, node_failure_prob[0, i]) for i in range(self.num_nodes)]
+            node_risks = [(i, float(node_failure_prob[i])) for i in range(self.num_nodes)]
             node_risks.sort(key=lambda x: x[1], reverse=True)
             top_risk_nodes = node_risks[:10]
             
-            time_to_cascade_value = float(time_to_cascade_mean[0, 0]) if cascade_detected else -1
+            # Handle failure timing conversion properly
+            if failure_timing.size == 1:
+                time_to_cascade_value = float(failure_timing.item()) if cascade_detected else -1.0
+            else:
+                time_to_cascade_value = float(np.mean(failure_timing)) if cascade_detected else -1.0
+            
+            # risk_scores has shape [num_nodes, 7], aggregate across nodes first
+            aggregated_risk_scores = np.mean(risk_scores, axis=0)  # Shape: [7]
             
             return {
-                'cascade_probability': float(cascade_prob[0, 0]),
+                'cascade_probability': cascade_prob,
                 'cascade_detected': cascade_detected,
                 'time_to_cascade_minutes': time_to_cascade_value,
                 'high_risk_nodes': high_risk_nodes,
@@ -242,9 +258,68 @@ class CascadePredictor:
                     {'node_id': int(node_id), 'failure_probability': float(prob)}
                     for node_id, prob in top_risk_nodes
                 ],
+                'risk_assessment': {
+                    'threat_severity': float(aggregated_risk_scores[0]),
+                    'vulnerability': float(aggregated_risk_scores[1]),
+                    'operational_impact': float(aggregated_risk_scores[2]),
+                    'cascade_probability': float(aggregated_risk_scores[3]),
+                    'response_complexity': float(aggregated_risk_scores[4]),
+                    'public_safety': float(aggregated_risk_scores[5]),
+                    'urgency': float(aggregated_risk_scores[6])
+                },
                 'total_nodes_at_risk': len(high_risk_nodes),
                 'timestamp': datetime.now().isoformat()
             }
+    
+    def extract_multi_modal_data(self, scenario: Dict) -> Dict:
+        """
+        Extract multi_modal_data from scenario, handling both old and new formats.
+        
+        Args:
+            scenario: Scenario dictionary
+            
+        Returns:
+            multi_modal_data dictionary
+        """
+        # Check if multi_modal_data already exists (new format)
+        if 'multi_modal_data' in scenario:
+            return scenario['multi_modal_data']
+        
+        # Extract from sequence (old format)
+        if 'sequence' not in scenario:
+            raise ValueError("Scenario missing both 'multi_modal_data' and 'sequence' keys")
+        
+        sequence = scenario['sequence']
+        if len(sequence) == 0:
+            raise ValueError("Scenario sequence is empty")
+        
+        # Get last timestep
+        last_timestep = sequence[-1]
+        
+        # Extract edge features from scenario level
+        edge_attr = scenario.get('edge_attr', np.zeros((scenario['edge_index'].shape[1], 4)))
+        
+        # Build multi_modal_data structure
+        multi_modal_data = {
+            'environmental': {
+                'satellite_imagery': last_timestep.get('satellite_data', np.zeros((3, 64, 64))),
+                'weather_sequence': last_timestep.get('weather_data', np.zeros((24, 10))),
+                'threat_indicators': last_timestep.get('threat_data', np.zeros(15))
+            },
+            'infrastructure': {
+                'scada_measurements': last_timestep.get('scada_data', np.zeros(self.num_nodes * 5)),
+                'pmu_data': last_timestep.get('pmu_data', np.zeros((self.num_nodes, 10, 6))),
+                'equipment_condition': last_timestep.get('equipment_health', np.zeros(self.num_nodes * 8)),
+                'edge_features': edge_attr
+            },
+            'robotic': {
+                'visual_inspection': last_timestep.get('visual_data', np.zeros((3, 128, 128))),
+                'thermal_imaging': last_timestep.get('thermal_data', np.zeros((1, 64, 64))),
+                'sensor_readings': last_timestep.get('sensor_data', np.zeros(self.num_nodes * 12))
+            }
+        }
+        
+        return multi_modal_data
     
     def predict_from_file(self, data_path: str, scenario_idx: int = 0) -> Dict:
         """
@@ -262,39 +337,39 @@ class CascadePredictor:
         current_idx = 0
         for scenario in self.load_scenarios_streaming(data_path):
             if current_idx == scenario_idx:
-                sequence = scenario['sequence']
-                
-                # Convert to tensors
-                node_features = torch.stack([
-                    torch.tensor(timestep['node_features'], dtype=torch.float32)
-                    for timestep in sequence
-                ])
-                edge_features = torch.stack([
-                    torch.tensor(timestep['edge_features'], dtype=torch.float32)
-                    for timestep in sequence
-                ])
+                try:
+                    multi_modal_data = self.extract_multi_modal_data(scenario)
+                except Exception as e:
+                    print(f"Error extracting multi_modal_data: {e}")
+                    print(f"Scenario keys: {scenario.keys()}")
+                    raise
                 
                 # Make prediction
-                prediction = self.predict(node_features, edge_features)
+                prediction = self.predict(multi_modal_data)
                 
                 if 'metadata' in scenario:
                     metadata = scenario['metadata']
+                    
+                    # Handle failed_nodes
                     failed_nodes = metadata.get('failed_nodes', [])
-                    time_to_cascade = metadata.get('time_to_cascade', -1)
-                    
-                    # Convert NumPy types to Python types
                     if isinstance(failed_nodes, np.ndarray):
-                        failed_nodes = failed_nodes.tolist()
-                    elif isinstance(failed_nodes, list):
-                        failed_nodes = [int(x) if isinstance(x, (np.integer, np.int64)) else x for x in failed_nodes]
+                        failed_nodes = failed_nodes.flatten().tolist()
+                    elif not isinstance(failed_nodes, list):
+                        failed_nodes = [failed_nodes] if failed_nodes is not None else []
                     
-                    if isinstance(time_to_cascade, (np.integer, np.floating)):
+                    # Handle time_to_cascade
+                    time_to_cascade = metadata.get('time_to_cascade', -1)
+                    if isinstance(time_to_cascade, np.ndarray):
+                        time_to_cascade = float(time_to_cascade.flatten()[0]) if time_to_cascade.size > 0 else -1.0
+                    elif isinstance(time_to_cascade, (np.floating, np.integer)):
                         time_to_cascade = float(time_to_cascade)
+                    elif time_to_cascade is None:
+                        time_to_cascade = -1.0
                     
                     prediction['ground_truth'] = {
                         'is_cascade': bool(metadata.get('cascade', False)),
-                        'failed_nodes': failed_nodes,
-                        'time_to_cascade': time_to_cascade
+                        'failed_nodes': [int(x) for x in failed_nodes],
+                        'time_to_cascade': float(time_to_cascade)
                     }
                 
                 return prediction
@@ -331,45 +406,42 @@ class CascadePredictor:
                 print(f"  Processed {processed + 1}/{num_scenarios}")
             
             try:
-                sequence = scenario['sequence']
+                multi_modal_data = self.extract_multi_modal_data(scenario)
                 
-                # Convert to tensors
-                node_features = torch.stack([
-                    torch.tensor(timestep['node_features'], dtype=torch.float32)
-                    for timestep in sequence
-                ])
-                edge_features = torch.stack([
-                    torch.tensor(timestep['edge_features'], dtype=torch.float32)
-                    for timestep in sequence
-                ])
+                pred = self.predict(multi_modal_data)
                 
-                pred = self.predict(node_features, edge_features)
-                
-                # Add ground truth if available
                 if 'metadata' in scenario:
                     metadata = scenario['metadata']
+                    
+                    # Handle failed_nodes
                     failed_nodes = metadata.get('failed_nodes', [])
-                    time_to_cascade = metadata.get('time_to_cascade', -1)
-                    
                     if isinstance(failed_nodes, np.ndarray):
-                        failed_nodes = failed_nodes.tolist()
-                    elif isinstance(failed_nodes, list):
-                        failed_nodes = [int(x) if isinstance(x, (np.integer, np.int64)) else x for x in failed_nodes]
+                        failed_nodes = failed_nodes.flatten().tolist()
+                    elif not isinstance(failed_nodes, list):
+                        failed_nodes = [failed_nodes] if failed_nodes is not None else []
                     
-                    if isinstance(time_to_cascade, (np.integer, np.floating)):
+                    # Handle time_to_cascade
+                    time_to_cascade = metadata.get('time_to_cascade', -1)
+                    if isinstance(time_to_cascade, np.ndarray):
+                        time_to_cascade = float(time_to_cascade.flatten()[0]) if time_to_cascade.size > 0 else -1.0
+                    elif isinstance(time_to_cascade, (np.floating, np.integer)):
                         time_to_cascade = float(time_to_cascade)
+                    elif time_to_cascade is None:
+                        time_to_cascade = -1.0
                     
                     pred['ground_truth'] = {
                         'is_cascade': bool(metadata.get('cascade', False)),
-                        'failed_nodes': failed_nodes,
-                        'time_to_cascade': time_to_cascade
+                        'failed_nodes': [int(x) for x in failed_nodes],
+                        'time_to_cascade': float(time_to_cascade)
                     }
                 
                 predictions.append(pred)
                 processed += 1
                 
             except Exception as e:
+                import traceback
                 print(f"  Error processing scenario {processed}: {e}")
+                print(f"  Traceback: {traceback.format_exc()}")
                 processed += 1
         
         print(f"✓ Completed processing {len(predictions)} scenarios")
@@ -445,8 +517,8 @@ def main():
     """Main inference function."""
     parser = argparse.ArgumentParser(description="Cascade Prediction Inference")
     parser.add_argument("--model_path", type=str, required=True, help="Path to model checkpoint")
-    parser.add_argument("--topology_path", type=str, default="data/grid_topology.pkl", help="Path to topology file")
-    parser.add_argument("--data_path", type=str, default="data/test_data.pkl", help="Path to test data file or directory")
+    parser.add_argument("--topology_path", type=str, default="data_unified/grid_topology.pkl", help="Path to topology file")
+    parser.add_argument("--data_path", type=str, default="data_unified/test_data.pkl", help="Path to test data file or directory")
     parser.add_argument("--scenario_idx", type=int, default=0, help="Scenario index for single prediction")
     parser.add_argument("--batch", action="store_true", help="Run batch prediction")
     parser.add_argument("--max_scenarios", type=int, default=None, help="Max scenarios for batch prediction")
