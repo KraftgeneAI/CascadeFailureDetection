@@ -363,14 +363,14 @@ class RelayTimingModel(nn.Module):
         
         # Predict relay parameters
         self.time_dial_predictor = nn.Sequential(
-            nn.Linear(hidden_dim, 64),
+            nn.Linear(hidden_dim * 2, 64),  # Changed from hidden_dim to hidden_dim * 2
             nn.ReLU(),
             nn.Linear(64, 1),
             nn.Sigmoid()  # Time dial: 0-1
         )
         
         self.pickup_current_predictor = nn.Sequential(
-            nn.Linear(hidden_dim, 64),
+            nn.Linear(hidden_dim * 2, 64),  # Changed from hidden_dim to hidden_dim * 2
             nn.ReLU(),
             nn.Linear(64, 1),
             nn.Softplus()  # Pickup current > 0
@@ -411,7 +411,7 @@ class RelayTimingModel(nn.Module):
         Predict relay parameters and operating times.
         
         Args:
-            edge_embeddings: Edge feature embeddings [batch_size, num_edges, hidden_dim]
+            edge_embeddings: Edge feature embeddings [batch_size, num_edges, hidden_dim * 2]
             line_currents: Computed line currents [batch_size, num_edges, 1]
         
         Returns:
@@ -733,12 +733,12 @@ class UnifiedCascadePredictionModel(nn.Module):
         # Relay timing model
         self.relay_model = RelayTimingModel(hidden_dim=hidden_dim)
         
-        # Three-dimensional risk dimensions with supervision
+        # Seven-dimensional risk assessment with supervision
         self.risk_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 3),  # 3 dimensions: overload, voltage, frequency
+            nn.Linear(hidden_dim // 2, 7),  # Changed from 3 to 7 dimensions
             nn.Sigmoid()
         )
         
@@ -830,7 +830,8 @@ class UnifiedCascadePredictionModel(nn.Module):
         
         relay_predictions = self.relay_model(edge_features, line_flows)
         
-        risk_scores = self.risk_head(h)  # [B, N, 3]: overload, voltage, frequency risk
+        risk_scores = self.risk_head(h)  # [B, N, 7]: threat_severity, vulnerability, operational_impact, 
+                                          # cascade_probability, response_complexity, public_safety, urgency
         
         return {
             'failure_probability': failure_prob,
@@ -839,7 +840,7 @@ class UnifiedCascadePredictionModel(nn.Module):
             'angles': angles,
             'line_flows': line_flows,
             'frequency': frequency,  # Added frequency prediction
-            'risk_scores': risk_scores,  # Reduced to 3 dimensions
+            'risk_scores': risk_scores,  # Now 7 dimensions
             'relay_time_dial': relay_predictions['time_dial'],
             'relay_pickup_current': relay_predictions['pickup_current'],
             'relay_will_operate': relay_predictions['will_operate'],

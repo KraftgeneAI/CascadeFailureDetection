@@ -1183,7 +1183,7 @@ def generate_dataset_streaming(
                 scenario = simulator.generate_single_scenario(is_cascade, sequence_length)
                 batch_data.append(scenario)
                 
-                if (i + 1) % 5 == 0:
+                if (i + 1) % 10 == 0:
                     mem = MemoryMonitor.get_memory_usage()
                     cascade_str = "CASCADE" if is_cascade else "NORMAL"
                     print(f"  [{cascade_str}] Generated {i + 1}/{total_scenarios} | Memory: {mem:.1f} MB")
@@ -1255,10 +1255,10 @@ def generate_dataset_streaming(
 
 if __name__ == "__main__":
     generate_dataset_streaming(
-        num_normal=20,
-        num_cascade=4,
+        num_normal=600,
+        num_cascade=60,
         num_nodes=118,
         sequence_length=60,
         output_dir="data_unified",
-        batch_size=5
+        batch_size=30
     )
