@@ -5,8 +5,8 @@ Generates physically realistic data that follows power grid physics and
 meaningful cascade dynamics that the model can learn from.
 
 Key Features:
-- REALISTIC DC/AC power flow with proper physics
-- PHYSICS-BASED cascade propagation (not random!)
+- REALISTIC power flow with proper physics
+- PHYSICS-BASED cascade propagation 
 - Correlated multi-modal data (environmental threats → infrastructure failures)
 - Memory-efficient batch streaming
 - Meaningful patterns for ML to learn

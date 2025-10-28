@@ -1,10 +1,10 @@
 """
-Cascade Failure Prediction Model Inference Script (IMPROVED)
+Cascade Failure Prediction Model Inference Script 
 ============================================================
 Load trained model and make predictions on new data.
 Updated to fully utilize the model's temporal and multi-task capabilities.
 
-Key Improvements:
+Key features:
 - Processes full 60-timestep sequences (LSTM temporal modeling)
 - Returns all 8 prediction heads (voltages, angles, flows, frequency, relays)
 - Correct time-to-cascade calculation (first failure, not average)
