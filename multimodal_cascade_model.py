@@ -61,23 +61,53 @@ class EnvironmentalEmbedding(nn.Module):
     
     def forward(self, satellite_data: torch.Tensor, weather_sequence: torch.Tensor,
                 threat_indicators: torch.Tensor) -> torch.Tensor:
-        B, N = satellite_data.size(0), satellite_data.size(1)
+        has_temporal = satellite_data.dim() == 6  # [B, T, N, C, H, W]
         
-        # Process satellite imagery
-        sat_flat = satellite_data.reshape(B * N, *satellite_data.shape[2:])
-        sat_features = self.satellite_cnn(sat_flat).reshape(B, N, 32)
-        
-        # Process weather sequences
-        weather_flat = weather_sequence.reshape(B * N, *weather_sequence.shape[2:])
-        _, (weather_hidden, _) = self.weather_lstm(weather_flat)
-        weather_features = weather_hidden[-1].reshape(B, N, 32)
-        
-        # Process threat indicators
-        threat_features = self.threat_encoder(threat_indicators)
-        
-        # Fuse all environmental modalities
-        combined = torch.cat([sat_features, weather_features, threat_features], dim=-1)
-        return self.fusion(combined)
+        if has_temporal:
+            B, T, N = satellite_data.size(0), satellite_data.size(1), satellite_data.size(2)
+            
+            # Process each timestep separately
+            sat_features_list = []
+            for t in range(T):
+                sat_t = satellite_data[:, t, :, :, :, :]  # [B, N, C, H, W]
+                sat_flat = sat_t.reshape(B * N, *sat_t.shape[2:])  # [B*N, C, H, W]
+                sat_feat = self.satellite_cnn(sat_flat).reshape(B, N, 32)  # [B, N, 32]
+                sat_features_list.append(sat_feat)
+            sat_features = torch.stack(sat_features_list, dim=1)  # [B, T, N, 32]
+            
+            # Process weather sequences
+            weather_flat = weather_sequence.reshape(B * T * N, *weather_sequence.shape[3:])
+            _, (weather_hidden, _) = self.weather_lstm(weather_flat)
+            weather_features = weather_hidden[-1].reshape(B, T, N, 32)
+            
+            # Process threat indicators (assuming [B, T, N, features])
+            threat_features = self.threat_encoder(threat_indicators)  # [B, T, N, 32]
+            
+            # Fuse all environmental modalities for each timestep
+            combined = torch.cat([sat_features, weather_features, threat_features], dim=-1)  # [B, T, N, 96]
+            B_flat, T_flat, N_flat, D_flat = combined.shape
+            combined_flat = combined.reshape(B_flat * T_flat * N_flat, D_flat)
+            fused = self.fusion(combined_flat).reshape(B, T, N, -1)  # [B, T, N, embedding_dim]
+            return fused
+        else:
+            # Original non-temporal processing
+            B, N = satellite_data.size(0), satellite_data.size(1)
+            
+            # Process satellite imagery
+            sat_flat = satellite_data.reshape(B * N, *satellite_data.shape[2:])
+            sat_features = self.satellite_cnn(sat_flat).reshape(B, N, 32)
+            
+            # Process weather sequences
+            weather_flat = weather_sequence.reshape(B * N, *weather_sequence.shape[2:])
+            _, (weather_hidden, _) = self.weather_lstm(weather_flat)
+            weather_features = weather_hidden[-1].reshape(B, N, 32)
+            
+            # Process threat indicators
+            threat_features = self.threat_encoder(threat_indicators)
+            
+            # Fuse all environmental modalities
+            combined = torch.cat([sat_features, weather_features, threat_features], dim=-1)
+            return self.fusion(combined)
 
 
 class InfrastructureEmbedding(nn.Module):
@@ -112,23 +142,51 @@ class InfrastructureEmbedding(nn.Module):
     
     def forward(self, scada_data: torch.Tensor, pmu_sequence: torch.Tensor,
                 equipment_status: torch.Tensor) -> torch.Tensor:
-        scada_features = self.scada_encoder(scada_data)
+        has_temporal = scada_data.dim() == 4  # [B, T, N, features]
         
-        if pmu_sequence.dim() == 4:
-            # Has time dimension: [B, N, T, features] -> average over time
-            pmu_avg = pmu_sequence.mean(dim=2)  # [B, N, features]
-        elif pmu_sequence.dim() == 3:
-            # No time dimension (last_timestep mode): [B, N, features]
-            pmu_avg = pmu_sequence
+        if has_temporal:
+            B, T, N, _ = scada_data.shape
+            
+            # Process each timestep separately
+            scada_flat = scada_data.reshape(B * T * N, -1)
+            scada_features = self.scada_encoder(scada_flat).reshape(B, T, N, 64)
+            
+            # Handle PMU sequence
+            if pmu_sequence.dim() == 5:  # [B, T, N, T_pmu, features]
+                pmu_avg = pmu_sequence.mean(dim=3)  # Average over PMU time dimension
+            elif pmu_sequence.dim() == 4:  # [B, T, N, features]
+                pmu_avg = pmu_sequence
+            else:
+                raise ValueError(f"Unexpected pmu_sequence dimensions: {pmu_sequence.dim()}")
+            
+            pmu_flat = pmu_avg.reshape(B * T * N, -1)
+            pmu_features = self.pmu_projection(pmu_flat).reshape(B, T, N, 32)
+            
+            # Process equipment status
+            equip_flat = equipment_status.reshape(B * T * N, -1)
+            equip_features = self.equipment_encoder(equip_flat).reshape(B, T, N, 32)
+            
+            # Fuse all infrastructure modalities
+            combined = torch.cat([scada_features, pmu_features, equip_features], dim=-1)
+            combined_flat = combined.reshape(B * T * N, -1)
+            fused = self.fusion(combined_flat).reshape(B, T, N, -1)
+            return fused
         else:
-            raise ValueError(f"Unexpected pmu_sequence dimensions: {pmu_sequence.dim()}")
-        
-        pmu_features = self.pmu_projection(pmu_avg)
-        
-        equip_features = self.equipment_encoder(equipment_status)
-        
-        combined = torch.cat([scada_features, pmu_features, equip_features], dim=-1)
-        return self.fusion(combined)
+            # Original non-temporal processing
+            scada_features = self.scada_encoder(scada_data)
+            
+            if pmu_sequence.dim() == 4:
+                pmu_avg = pmu_sequence.mean(dim=2)
+            elif pmu_sequence.dim() == 3:
+                pmu_avg = pmu_sequence
+            else:
+                raise ValueError(f"Unexpected pmu_sequence dimensions: {pmu_sequence.dim()}")
+            
+            pmu_features = self.pmu_projection(pmu_avg)
+            equip_features = self.equipment_encoder(equipment_status)
+            
+            combined = torch.cat([scada_features, pmu_features, equip_features], dim=-1)
+            return self.fusion(combined)
 
 
 class RoboticEmbedding(nn.Module):
@@ -169,18 +227,51 @@ class RoboticEmbedding(nn.Module):
     
     def forward(self, visual_data: torch.Tensor, thermal_data: torch.Tensor,
                 sensor_data: torch.Tensor) -> torch.Tensor:
-        B, N = visual_data.size(0), visual_data.size(1)
+        has_temporal = visual_data.dim() == 6  # [B, T, N, C, H, W]
         
-        vis_flat = visual_data.reshape(B * N, *visual_data.shape[2:])
-        vis_features = self.visual_cnn(vis_flat).reshape(B, N, 32)
-        
-        therm_flat = thermal_data.reshape(B * N, *thermal_data.shape[2:])
-        therm_features = self.thermal_cnn(therm_flat).reshape(B, N, 16)
-        
-        sensor_features = self.sensor_encoder(sensor_data)
-        
-        combined = torch.cat([vis_features, therm_features, sensor_features], dim=-1)
-        return self.fusion(combined)
+        if has_temporal:
+            B, T, N = visual_data.size(0), visual_data.size(1), visual_data.size(2)
+            
+            # Process each timestep separately
+            vis_features_list = []
+            therm_features_list = []
+            for t in range(T):
+                vis_t = visual_data[:, t, :, :, :, :]  # [B, N, C, H, W]
+                vis_flat = vis_t.reshape(B * N, *vis_t.shape[2:])
+                vis_feat = self.visual_cnn(vis_flat).reshape(B, N, 32)
+                vis_features_list.append(vis_feat)
+                
+                therm_t = thermal_data[:, t, :, :, :, :]  # [B, N, C, H, W]
+                therm_flat = therm_t.reshape(B * N, *therm_t.shape[2:])
+                therm_feat = self.thermal_cnn(therm_flat).reshape(B, N, 16)
+                therm_features_list.append(therm_feat)
+            
+            vis_features = torch.stack(vis_features_list, dim=1)  # [B, T, N, 32]
+            therm_features = torch.stack(therm_features_list, dim=1)  # [B, T, N, 16]
+            
+            # Process sensor data
+            sensor_flat = sensor_data.reshape(B * T * N, -1)
+            sensor_features = self.sensor_encoder(sensor_flat).reshape(B, T, N, 32)
+            
+            # Fuse all robotic modalities
+            combined = torch.cat([vis_features, therm_features, sensor_features], dim=-1)
+            combined_flat = combined.reshape(B * T * N, -1)
+            fused = self.fusion(combined_flat).reshape(B, T, N, -1)
+            return fused
+        else:
+            # Original non-temporal processing
+            B, N = visual_data.size(0), visual_data.size(1)
+            
+            vis_flat = visual_data.reshape(B * N, *visual_data.shape[2:])
+            vis_features = self.visual_cnn(vis_flat).reshape(B, N, 32)
+            
+            therm_flat = thermal_data.reshape(B * N, *thermal_data.shape[2:])
+            therm_features = self.thermal_cnn(therm_flat).reshape(B, N, 16)
+            
+            sensor_features = self.sensor_encoder(sensor_data)
+            
+            combined = torch.cat([vis_features, therm_features, sensor_features], dim=-1)
+            return self.fusion(combined)
 
 
 # ============================================================================
@@ -763,7 +854,6 @@ class UnifiedCascadePredictionModel(nn.Module):
         Returns:
             Dictionary with predictions
         """
-        # Multi-modal embeddings
         env_emb = self.env_embedding(
             batch['satellite_data'],
             batch['weather_sequence'],
@@ -782,34 +872,61 @@ class UnifiedCascadePredictionModel(nn.Module):
             batch['sensor_data']
         )
         
-        # Attention-based fusion
-        multi_modal = torch.stack([env_emb, infra_emb, robot_emb], dim=2)
-        B, N, M, D = multi_modal.shape
-        multi_modal_flat = multi_modal.reshape(B * N, M, D)
+        has_temporal = env_emb.dim() == 4  # [B, T, N, D]
         
-        fused, _ = self.fusion_attention(
-            multi_modal_flat, multi_modal_flat, multi_modal_flat
-        )
-        fused = fused.mean(dim=1).reshape(B, N, D)
-        fused = self.fusion_norm(fused)
-        
-        # Edge embedding
-        edge_embedded = self.edge_embedding(batch.get('edge_attr', torch.zeros(B, batch['edge_index'].shape[1], 10, device=fused.device)))
-        
-        if return_sequence and 'temporal_sequence' in batch:
-            # Process full 60-timestep sequence
-            sequence_length = batch['temporal_sequence'].shape[2]
+        if has_temporal:
+            B, T, N, D = env_emb.shape
+            
+            # Attention-based fusion for each timestep
+            fused_list = []
+            for t in range(T):
+                multi_modal_t = torch.stack([
+                    env_emb[:, t, :, :],
+                    infra_emb[:, t, :, :],
+                    robot_emb[:, t, :, :]
+                ], dim=2)  # [B, N, 3, D]
+                
+                multi_modal_flat = multi_modal_t.reshape(B * N, 3, D)
+                fused_t, _ = self.fusion_attention(
+                    multi_modal_flat, multi_modal_flat, multi_modal_flat
+                )
+                fused_t = fused_t.mean(dim=1).reshape(B, N, D)
+                fused_t = self.fusion_norm(fused_t)
+                fused_list.append(fused_t)
+            
+            fused_sequence = torch.stack(fused_list, dim=1)  # [B, T, N, D]
+            
+            fused = fused_sequence[:, -1, :, :]  # [B, N, D] - last timestep
+            
+            # Edge embedding
+            edge_embedded = self.edge_embedding(batch.get('edge_attr', torch.zeros(B, batch['edge_index'].shape[1], 10, device=env_emb.device)))
+            
+            # Process temporal sequence through LSTM
             h_states = []
             lstm_state = None
             
-            for t in range(sequence_length):
-                x_t = batch['temporal_sequence'][:, :, t, :]
+            for t in range(T):
+                x_t = fused_sequence[:, t, :, :]  # [B, N, D]
                 h_t, lstm_state = self.temporal_gnn(x_t, batch['edge_index'], edge_embedded, lstm_state)
                 h_states.append(h_t)
             
             h = torch.stack(h_states, dim=2)  # [B, N, T, D]
             h = h[:, :, -1, :]  # Use last timestep for predictions
         else:
+            # Single timestep processing
+            multi_modal = torch.stack([env_emb, infra_emb, robot_emb], dim=2)
+            B, N, M, D = multi_modal.shape
+            multi_modal_flat = multi_modal.reshape(B * N, M, D)
+            
+            fused, _ = self.fusion_attention(
+                multi_modal_flat, multi_modal_flat, multi_modal_flat
+            )
+            fused = fused.mean(dim=1).reshape(B, N, D)
+            fused = self.fusion_norm(fused)
+            
+            # Edge embedding
+            edge_embedded = self.edge_embedding(batch.get('edge_attr', torch.zeros(B, batch['edge_index'].shape[1], 10, device=fused.device)))
+            
             # Single timestep processing
             h, _ = self.temporal_gnn(fused, batch['edge_index'], edge_embedded)
         
@@ -845,11 +962,14 @@ class UnifiedCascadePredictionModel(nn.Module):
             'voltages': voltages,
             'angles': angles,
             'line_flows': line_flows,
-            'frequency': frequency,  # Added frequency prediction
-            'risk_scores': risk_scores,  # Now 7 dimensions
-            'relay_time_dial': relay_predictions['time_dial'],
-            'relay_pickup_current': relay_predictions['pickup_current'],
-            'relay_will_operate': relay_predictions['will_operate'],
+            'frequency': frequency,
+            'risk_scores': risk_scores,
+            'relay_outputs': {  # Nested dict for inference script compatibility
+                'time_dial': relay_predictions['time_dial'],
+                'pickup_current': relay_predictions['pickup_current'],
+                'operating_time': relay_predictions['operating_time'],
+                'will_operate': relay_predictions['will_operate']
+            },
             'node_embeddings': h,
             'env_embedding': env_emb,
             'infra_embedding': infra_emb,

@@ -111,21 +111,20 @@ generate_dataset(
 Train the cascade prediction model:
 
 ```bash
-# Basic training (CPU)
-python train_model.py --num_epochs 50 --batch_size 16
+# Basic training 
+python train_model.py 
 
-# GPU training with custom parameters
-python train_model.py \
-    --device cuda \
-    --num_epochs 100 \
-    --batch_size 32 \
-    --learning_rate 0.001 \
-    --hidden_dim 128 \
-    --num_gnn_layers 4 \
-    --early_stopping 15
-
-# Quick test training (5 epochs)
-python train_model.py --num_epochs 5 --batch_size 8
+# Change training config:
+# Configuration (train_model.py at line 574)
+DATA_DIR = "data_unified"
+OUTPUT_DIR = "checkpoints"
+BATCH_SIZE = 8  
+NUM_EPOCHS = 30
+LEARNING_RATE = 0.001
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+MAX_GRAD_NORM = 1.0
+USE_AMP = torch.cuda.is_available()  # Use mixed precision if CUDA available
+MODEL_OUTPUTS_LOGITS = False
 ```
 
 **Training outputs:**

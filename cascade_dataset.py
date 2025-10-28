@@ -136,6 +136,8 @@ class CascadeDataset(Dataset):
             - node_failure_labels: [N] or [T, N]
             - cascade_timing: [N] or [T, N]
             - graph_properties: dict with conductance, susceptance, thermal_limits
+            - temporal_sequence: [T, N, embedding_dim] - for LSTM processing (full_sequence mode only)
+            - sequence_length: Scalar - number of timesteps
         """
         batch_idx, scenario_idx = self.scenario_index[idx]
         
@@ -147,59 +149,71 @@ class CascadeDataset(Dataset):
         edge_index = scenario['edge_index']
         metadata = scenario.get('metadata', {})
         
+        def to_tensor(data):
+            """Convert numpy array or other data to torch tensor."""
+            if isinstance(data, torch.Tensor):
+                return data
+            elif isinstance(data, np.ndarray):
+                return torch.from_numpy(data).float()
+            else:
+                return torch.tensor(data, dtype=torch.float32)
+        
         if self.mode == 'last_timestep':
             # Use only the last timestep for prediction
             last_step = sequence[-1]
             
             return {
-                'satellite_data': last_step['satellite_data'],
-                'scada_data': last_step['scada_data'],
-                'weather_sequence': last_step['weather_sequence'],
-                'threat_indicators': last_step['threat_indicators'],
-                'visual_data': last_step['visual_data'],
-                'thermal_data': last_step['thermal_data'],
-                'sensor_data': last_step['sensor_data'],
-                'pmu_sequence': last_step['pmu_sequence'],
-                'equipment_status': last_step['equipment_status'],
-                'node_features': last_step['scada_data'],
-                'edge_index': edge_index,
-                'edge_attr': last_step['edge_attr'],
-                'node_failure_labels': last_step['node_labels'],
-                'cascade_timing': last_step.get('cascade_timing', torch.zeros(last_step['node_labels'].shape[0])),
+                'satellite_data': to_tensor(last_step['satellite_data']),
+                'scada_data': to_tensor(last_step['scada_data']),
+                'weather_sequence': to_tensor(last_step['weather_sequence']),
+                'threat_indicators': to_tensor(last_step['threat_indicators']),
+                'visual_data': to_tensor(last_step['visual_data']),
+                'thermal_data': to_tensor(last_step['thermal_data']),
+                'sensor_data': to_tensor(last_step['sensor_data']),
+                'pmu_sequence': to_tensor(last_step['pmu_sequence']),
+                'equipment_status': to_tensor(last_step['equipment_status']),
+                'node_features': to_tensor(last_step['scada_data']),
+                'edge_index': to_tensor(edge_index).long(),
+                'edge_attr': to_tensor(last_step['edge_attr']),
+                'node_failure_labels': to_tensor(last_step['node_labels']),
+                'cascade_timing': to_tensor(last_step.get('cascade_timing', np.zeros(last_step['node_labels'].shape[0]))),
                 'graph_properties': self._extract_graph_properties(last_step, metadata)
             }
         
         elif self.mode == 'full_sequence':
-            # Stack all timesteps for temporal modeling
-            satellite_seq = torch.stack([step['satellite_data'] for step in sequence])
-            scada_seq = torch.stack([step['scada_data'] for step in sequence])
-            weather_seq = torch.stack([step['weather_sequence'] for step in sequence])
-            threat_seq = torch.stack([step['threat_indicators'] for step in sequence])
-            visual_seq = torch.stack([step['visual_data'] for step in sequence])
-            thermal_seq = torch.stack([step['thermal_data'] for step in sequence])
-            sensor_seq = torch.stack([step['sensor_data'] for step in sequence])
-            pmu_seq = torch.stack([step['pmu_sequence'] for step in sequence])
-            equipment_seq = torch.stack([step['equipment_status'] for step in sequence])
-            node_feat_seq = scada_seq
-            edge_feat_seq = torch.stack([step['edge_attr'] for step in sequence])
-            label_seq = torch.stack([step['node_labels'] for step in sequence])
+            satellite_seq = torch.stack([to_tensor(step['satellite_data']) for step in sequence])  # [T, N, C, H, W]
+            scada_seq = torch.stack([to_tensor(step['scada_data']) for step in sequence])  # [T, N, features]
+            weather_seq = torch.stack([to_tensor(step['weather_sequence']) for step in sequence])  # [T, N, features]
+            threat_seq = torch.stack([to_tensor(step['threat_indicators']) for step in sequence])  # [T, N, features]
+            visual_seq = torch.stack([to_tensor(step['visual_data']) for step in sequence])  # [T, N, C, H, W]
+            thermal_seq = torch.stack([to_tensor(step['thermal_data']) for step in sequence])  # [T, N, C, H, W]
+            sensor_seq = torch.stack([to_tensor(step['sensor_data']) for step in sequence])  # [T, N, features]
+            pmu_seq = torch.stack([to_tensor(step['pmu_sequence']) for step in sequence])  # [T, N, features]
+            equipment_seq = torch.stack([to_tensor(step['equipment_status']) for step in sequence])  # [T, N, features]
+            node_feat_seq = scada_seq  # [T, N, features]
+            edge_feat_seq = torch.stack([to_tensor(step['edge_attr']) for step in sequence])  # [T, E, features]
+            label_seq = torch.stack([to_tensor(step['node_labels']) for step in sequence])  # [T, N]
+            
+            temporal_sequence = scada_seq  # [T, N, features] - use SCADA as temporal marker
             
             return {
-                'satellite_data': satellite_seq,
-                'scada_data': scada_seq,
-                'weather_sequence': weather_seq,
-                'threat_indicators': threat_seq,
-                'visual_data': visual_seq,
-                'thermal_data': thermal_seq,
-                'sensor_data': sensor_seq,
-                'pmu_sequence': pmu_seq,
-                'equipment_status': equipment_seq,
-                'node_features': node_feat_seq,
-                'edge_index': edge_index,
-                'edge_attr': edge_feat_seq[-1],
-                'node_failure_labels': label_seq[-1],
-                'cascade_timing': sequence[-1].get('cascade_timing', torch.zeros(label_seq.shape[1])),
-                'graph_properties': self._extract_graph_properties(sequence[-1], metadata)
+                'satellite_data': satellite_seq,  # [T, N, C, H, W]
+                'scada_data': scada_seq,  # [T, N, features]
+                'weather_sequence': weather_seq,  # [T, N, features]
+                'threat_indicators': threat_seq,  # [T, N, features]
+                'visual_data': visual_seq,  # [T, N, C, H, W]
+                'thermal_data': thermal_seq,  # [T, N, C, H, W]
+                'sensor_data': sensor_seq,  # [T, N, features]
+                'pmu_sequence': pmu_seq,  # [T, N, features]
+                'equipment_status': equipment_seq,  # [T, N, features]
+                'node_features': node_feat_seq,  # [T, N, features]
+                'edge_index': to_tensor(edge_index).long(),  # [2, E]
+                'edge_attr': edge_feat_seq[-1],  # [E, features] - use last timestep
+                'node_failure_labels': label_seq[-1],  # [N] - use last timestep labels
+                'cascade_timing': to_tensor(sequence[-1].get('cascade_timing', np.zeros(label_seq.shape[1]))),
+                'graph_properties': self._extract_graph_properties(sequence[-1], metadata),
+                'temporal_sequence': temporal_sequence,  # [T, N, features] - KEY FOR LSTM PROCESSING
+                'sequence_length': len(sequence)  # Scalar - number of timesteps
             }
         
         else:
@@ -278,6 +292,14 @@ def collate_cascade_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor
                 edge_index = torch.tensor(edge_index, dtype=torch.long)
             batch_dict['edge_index'] = edge_index
         
+        elif key == 'sequence_length':
+            batch_dict['sequence_length'] = batch[0]['sequence_length']
+        
+        elif key == 'temporal_sequence':
+            items = [item[key] for item in batch]
+            # Stack to [B, T, N, features] for batch processing
+            batch_dict['temporal_sequence'] = torch.stack(items, dim=0)
+        
         elif key == 'graph_properties':
             # Batch graph properties
             graph_props_batch = {}
@@ -312,23 +334,28 @@ def collate_cascade_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor
                     items = [torch.tensor(item, dtype=torch.float32) if not isinstance(item, torch.Tensor) else item 
                             for item in items]
             
-            # Image modalities need [B, N, C, H, W] format
-            if key in ['satellite_data', 'visual_data', 'thermal_data']:
-                # Image data: Stack to [B, N, C, H, W]
+            # Check if items have temporal dimension (4D or 5D tensors)
+            if items[0].dim() >= 4 and key in ['satellite_data', 'visual_data', 'thermal_data']:
+                # Image data with temporal dimension: [T, N, C, H, W] -> [B, T, N, C, H, W]
                 batch_dict[key] = torch.stack(items, dim=0)
             
-            elif key in ['scada_data', 'weather_sequence', 'threat_indicators', 'equipment_status', 
-                        'pmu_sequence', 'sensor_data', 'node_failure_labels']:
-                # Stack to [B, N, features] or [B, N] for consistent dimensions
+            elif items[0].dim() >= 2 and key in ['scada_data', 'weather_sequence', 'threat_indicators', 
+                                                   'equipment_status', 'pmu_sequence', 'sensor_data', 'node_features']:
+                # Feature data with possible temporal dimension: [T, N, features] or [N, features]
+                # Stack to [B, T, N, features] or [B, N, features]
                 batch_dict[key] = torch.stack(items, dim=0)
             
-            elif key in ['edge_attr']:
+            elif key == 'edge_attr':
                 # Stack to [B, E, features] instead of concatenating
                 batch_dict[key] = torch.stack(items, dim=0)
             
             # Node-level data for graph batching: Concatenate to [B*N, features]
-            elif key in ['node_features', 'cascade_timing']:
+            elif key == 'cascade_timing':
                 batch_dict[key] = torch.cat(items, dim=0)
+            
+            elif key == 'node_failure_labels':
+                # Stack to [B, N] for proper batching
+                batch_dict[key] = torch.stack(items, dim=0)
             
             else:
                 # Default stacking for other keys
