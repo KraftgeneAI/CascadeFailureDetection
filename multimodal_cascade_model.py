@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import add_self_loops, softmax
-from typing import Optional, Tuple, Dict, List
+from typing import Optional, Tuple, Dict
 
 
 # ============================================================================
@@ -462,7 +462,6 @@ class PhysicsInformedLoss(nn.Module):
         """
         src, dst = edge_index
         batch_size, num_nodes, _ = voltages.shape
-        num_edges = edge_index.shape[1]
         
         # Ensure conductance and susceptance have shape [batch_size, num_edges, 1]
         if conductance.dim() == 1:

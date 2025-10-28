@@ -11,7 +11,7 @@ Key Features:
 - Memory-efficient batch streaming
 - Meaningful patterns for ML to learn
 
-Author: Kraftgene AI Inc. (Unified R&D)
+Author: Kraftgene AI Inc. (R&D)
 Date: October 2025
 """
 
