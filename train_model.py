@@ -3,18 +3,33 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 import json
 import os
 import matplotlib.pyplot as plt
 import numpy as np
 
 class PhysicsInformedLoss(nn.Module):
-    """Physics-informed loss function with CLASS WEIGHTING for imbalanced data."""
+    """
+    Physics-informed loss function with CLASS WEIGHTING for imbalanced data.
+    
+    Combines prediction loss with physics constraints:
+    - Power flow constraints (voltage magnitudes, power balance)
+    - Thermal capacity constraints (line flow limits)
+    - Frequency stability constraints (frequency near nominal)
+    
+    Args:
+        lambda_powerflow: Weight for power flow constraints
+        lambda_capacity: Weight for thermal capacity constraints
+        lambda_stability: Weight for stability constraints (deprecated, kept for compatibility)
+        lambda_frequency: Weight for frequency constraints
+        pos_weight: Class weight for positive samples (failures) to handle imbalance
+        use_logits: If True, expects model to output logits; if False, expects probabilities
+    """
     
     def __init__(self, lambda_powerflow: float = 0.1, lambda_capacity: float = 0.05,
                  lambda_stability: float = 0.05, lambda_frequency: float = 0.08,
-                 pos_weight: float = 20.0):
+                 pos_weight: float = 20.0, use_logits: bool = False):
         super(PhysicsInformedLoss, self).__init__()
         
         self.lambda_powerflow = lambda_powerflow
@@ -22,51 +37,121 @@ class PhysicsInformedLoss(nn.Module):
         self.lambda_stability = lambda_stability
         self.lambda_frequency = lambda_frequency
         self.pos_weight = pos_weight
+        self.use_logits = use_logits
+        
+        self._warned_missing_outputs = set()
     
     def forward(self, predictions: Dict[str, torch.Tensor],
                 targets: Dict[str, torch.Tensor],
                 graph_properties: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Compute total physics-informed loss with CLASS WEIGHTING."""
+        """
+        Compute total physics-informed loss with CLASS WEIGHTING.
+        
+        Args:
+            predictions: Dict with keys:
+                - 'failure_probability': [B, N, 1] node failure probabilities or logits
+                - 'voltages': [B, N, 1] optional voltage predictions
+                - 'line_flows': [B, E, 1] optional line flow predictions
+                - 'frequency': [B, 1, 1] optional frequency predictions
+            targets: Dict with 'failure_label': [B*N] ground truth labels
+            graph_properties: Dict with optional keys:
+                - 'conductance': [B, E] line conductance
+                - 'susceptance': [B, E] line susceptance
+                - 'thermal_limits': [B, E] line thermal limits
+                - 'power_injection': [B, N] power injections
+        
+        Returns:
+            total_loss: Scalar tensor
+            loss_components: Dict of individual loss component values
+        """
         pos_weight_tensor = torch.tensor([self.pos_weight], device=predictions['failure_probability'].device)
         
-        # Convert probabilities to logits for BCEWithLogitsLoss
-        probs = predictions['failure_probability'].clamp(1e-7, 1 - 1e-7)
-        logits = torch.log(probs / (1 - probs))
+        # Model outputs [B, N, 1], targets are [B*N]
+        failure_prob = predictions['failure_probability']  # [B, N, 1]
+        B, N, _ = failure_prob.shape
+        
+        # Flatten to [B*N]
+        failure_prob_flat = failure_prob.reshape(-1)  # [B*N]
+        targets_flat = targets['failure_label'].reshape(-1)  # [B*N]
+        
+        if self.use_logits:
+            # Model outputs logits directly
+            logits = failure_prob_flat
+        else:
+            # Model outputs probabilities, convert to logits
+            probs = failure_prob_flat.clamp(1e-7, 1 - 1e-7)
+            logits = torch.log(probs / (1 - probs))
         
         # Main prediction loss with class weighting
         L_prediction = F.binary_cross_entropy_with_logits(
             logits,
-            targets['failure_label'],
+            targets_flat,
             pos_weight=pos_weight_tensor
         )
         
         loss_components = {'prediction': L_prediction.item()}
         total_loss = L_prediction
         
-        if graph_properties and 'conductance' in graph_properties:
+        if graph_properties and len(graph_properties) > 0:
             # Power flow physics constraint
-            if 'voltages' in predictions and 'power_injection' in graph_properties:
-                # Simplified power flow constraint: P = sum(conductance * V^2)
-                predicted_voltages = predictions.get('voltages', None)
-                if predicted_voltages is not None:
+            if 'voltages' in predictions and 'conductance' in graph_properties:
+                predicted_voltages = predictions['voltages']
+                conductance = graph_properties['conductance']
+                
+                # Voltage magnitude constraint (should be near 1.0 p.u.)
+                L_voltage = torch.mean((predicted_voltages - 1.0) ** 2)
+                total_loss += self.lambda_powerflow * L_voltage
+                loss_components['voltage'] = L_voltage.item()
+                
+                # Power injection balance (if available)
+                if 'power_injection' in graph_properties:
                     power_injection = graph_properties['power_injection']
-                    conductance = graph_properties['conductance']
-                    
-                    # Power balance constraint (simplified)
-                    L_powerflow = torch.mean((predicted_voltages - 1.0) ** 2)  # Voltage should be near 1.0 p.u.
+                    # Simplified power balance: sum of injections should be near zero
+                    L_powerflow = torch.mean(power_injection ** 2)
                     total_loss += self.lambda_powerflow * L_powerflow
                     loss_components['powerflow'] = L_powerflow.item()
+            elif 'voltages' not in predictions and 'voltage' not in self._warned_missing_outputs:
+                print("\n[WARNING] Model does not output 'voltages' - voltage physics constraint disabled")
+                self._warned_missing_outputs.add('voltage')
             
             # Thermal capacity constraint
             if 'line_flows' in predictions and 'thermal_limits' in graph_properties:
                 predicted_flows = predictions['line_flows']
                 thermal_limits = graph_properties['thermal_limits']
                 
+                # predicted_flows: [B, E, 1] or [B, E]
+                # thermal_limits: [B, E]
+                if predicted_flows.dim() == 3 and predicted_flows.size(-1) == 1:
+                    predicted_flows = predicted_flows.squeeze(-1)  # [B, E, 1] -> [B, E]
+                
+                # Ensure thermal_limits has same shape as predicted_flows
+                if thermal_limits.dim() != predicted_flows.dim():
+                    if thermal_limits.dim() == 1:
+                        # thermal_limits is [E], expand to [B, E]
+                        thermal_limits = thermal_limits.unsqueeze(0).expand_as(predicted_flows)
+                    elif thermal_limits.shape != predicted_flows.shape:
+                        # Shape mismatch, try to broadcast
+                        thermal_limits = thermal_limits.expand_as(predicted_flows)
+                
                 # Penalize flows exceeding thermal limits
                 violations = F.relu(torch.abs(predicted_flows) - thermal_limits)
                 L_capacity = torch.mean(violations ** 2)
                 total_loss += self.lambda_capacity * L_capacity
                 loss_components['capacity'] = L_capacity.item()
+            elif 'line_flows' not in predictions and 'line_flows' not in self._warned_missing_outputs:
+                print("\n[WARNING] Model does not output 'line_flows' - thermal capacity constraint disabled")
+                self._warned_missing_outputs.add('line_flows')
+            
+            # Frequency stability constraint
+            if 'frequency' in predictions:
+                predicted_freq = predictions['frequency']
+                # Frequency should be near 1.0 p.u. (60 Hz nominal)
+                L_frequency = torch.mean((predicted_freq - 1.0) ** 2)
+                total_loss += self.lambda_frequency * L_frequency
+                loss_components['frequency'] = L_frequency.item()
+            elif 'frequency' not in self._warned_missing_outputs:
+                print("\n[WARNING] Model does not output 'frequency' - frequency constraint disabled")
+                self._warned_missing_outputs.add('frequency')
         
         return total_loss, loss_components
 
@@ -80,7 +165,10 @@ class Trainer:
         val_loader: DataLoader,
         device: torch.device,
         learning_rate: float = 0.001,
-        output_dir: str = "checkpoints"
+        output_dir: str = "checkpoints",
+        max_grad_norm: float = 1.0,
+        use_amp: bool = False,
+        model_outputs_logits: bool = False
     ):
         self.model = model
         self.train_loader = train_loader
@@ -89,6 +177,10 @@ class Trainer:
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, 'min', patience=5)
         self.output_dir = output_dir
+        self.max_grad_norm = max_grad_norm
+        self.use_amp = use_amp
+        
+        self.scaler = torch.cuda.amp.GradScaler() if use_amp else None
         
         os.makedirs(output_dir, exist_ok=True)
         
@@ -110,10 +202,36 @@ class Trainer:
             'train_node_precision': [],
             'val_node_precision': [],
             'train_node_recall': [],
-            'val_node_recall': []
+            'val_node_recall': [],
+            'learning_rate': []
         }
         
-        self.criterion = PhysicsInformedLoss(pos_weight=20.0)
+        self.criterion = PhysicsInformedLoss(pos_weight=20.0, use_logits=model_outputs_logits)
+        
+        self.start_epoch = 0
+        self.best_val_loss = float('inf')
+        
+        self._model_validated = False
+    
+    def load_checkpoint(self, checkpoint_path: str):
+        """Load checkpoint to resume training."""
+        if not os.path.exists(checkpoint_path):
+            print(f"Checkpoint not found: {checkpoint_path}")
+            return False
+        
+        print(f"Loading checkpoint from {checkpoint_path}...")
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.start_epoch = checkpoint['epoch'] + 1
+        self.best_val_loss = checkpoint.get('val_loss', float('inf'))
+        
+        if 'history' in checkpoint:
+            self.history = checkpoint['history']
+        
+        print(f"✓ Resumed from epoch {self.start_epoch} (best val_loss: {self.best_val_loss:.4f})")
+        return True
     
     def train_epoch(self) -> Dict[str, float]:
         """Train for one epoch with PROPER METRICS."""
@@ -122,6 +240,8 @@ class Trainer:
         total_loss = 0.0
         cascade_tp = cascade_fp = cascade_tn = cascade_fn = 0
         node_tp = node_fp = node_tn = node_fn = 0
+        
+        grad_norms = []
         
         pbar = tqdm(self.train_loader, desc="Training")
         for batch_idx, batch in enumerate(pbar):
@@ -140,20 +260,53 @@ class Trainer:
             
             self.optimizer.zero_grad()
             
-            # Forward pass
-            outputs = self.model(batch_device)
-            
-            graph_properties = batch_device.get('graph_properties', {})
-            
-            # Compute loss with physics constraints
-            loss, loss_components = self.criterion(
-                outputs, 
-                {'failure_label': batch_device['node_failure_labels']},
-                graph_properties
-            )
-            
-            loss.backward()
-            self.optimizer.step()
+            if self.use_amp:
+                with torch.cuda.amp.autocast():
+                    outputs = self.model(batch_device)
+                    
+                    if not self._model_validated:
+                        self._validate_model_outputs(outputs)
+                        self._model_validated = True
+                    
+                    graph_properties = batch_device.get('graph_properties', {})
+                    loss, loss_components = self.criterion(
+                        outputs, 
+                        {'failure_label': batch_device['node_failure_labels'].reshape(-1)},
+                        graph_properties
+                    )
+                
+                # Backward with gradient scaling
+                self.scaler.scale(loss).backward()
+                
+                # Gradient clipping
+                self.scaler.unscale_(self.optimizer)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                grad_norms.append(grad_norm.item())
+                
+                # Optimizer step
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                # Standard training
+                outputs = self.model(batch_device)
+                
+                if not self._model_validated:
+                    self._validate_model_outputs(outputs)
+                    self._model_validated = True
+                
+                graph_properties = batch_device.get('graph_properties', {})
+                loss, loss_components = self.criterion(
+                    outputs, 
+                    {'failure_label': batch_device['node_failure_labels'].reshape(-1)},
+                    graph_properties
+                )
+                
+                loss.backward()
+                
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                grad_norms.append(grad_norm.item())
+                
+                self.optimizer.step()
             
             total_loss += loss.item()
             
@@ -166,8 +319,8 @@ class Trainer:
             cascade_tn += ((cascade_pred == 0) & (cascade_labels == 0)).sum().item()
             cascade_fn += ((cascade_pred == 0) & (cascade_labels == 1)).sum().item()
             
-            node_pred = (outputs['failure_probability'] > 0.5).float()
-            node_labels = batch_device['node_failure_labels']
+            node_pred = (outputs['failure_probability'] > 0.5).float().squeeze(-1)  # [B, N, 1] -> [B, N]
+            node_labels = batch_device['node_failure_labels']  # [B, N]
             
             node_tp += ((node_pred == 1) & (node_labels == 1)).sum().item()
             node_fp += ((node_pred == 1) & (node_labels == 0)).sum().item()
@@ -181,6 +334,7 @@ class Trainer:
                 print(f"  Node labels: {node_labels.sum().item():.0f}/{node_labels.numel()} positive ({node_labels.mean().item()*100:.2f}%)")
                 print(f"  Node predictions: {node_pred.sum().item():.0f}/{node_pred.numel()} positive ({node_pred.mean().item()*100:.2f}%)")
                 print(f"  Failure prob range: [{outputs['failure_probability'].min():.4f}, {outputs['failure_probability'].max():.4f}], mean={outputs['failure_probability'].mean():.4f}")
+                print(f"  Gradient norm: {grad_norm:.4f}")
                 if loss_components:
                     print(f"  Loss components: {', '.join([f'{k}={v:.4f}' for k, v in loss_components.items()])}")
             
@@ -198,7 +352,8 @@ class Trainer:
                 'casc_f1': f"{cascade_f1:.4f}",
                 'node_f1': f"{node_f1:.4f}",
                 'casc_rec': f"{cascade_recall:.4f}",
-                'node_rec': f"{node_recall:.4f}"
+                'node_rec': f"{node_recall:.4f}",
+                'grad': f"{grad_norm:.2f}"
             })
         
         # Compute final epoch metrics
@@ -212,6 +367,9 @@ class Trainer:
         node_f1 = 2 * node_precision * node_recall / (node_precision + node_recall + 1e-7)
         node_acc = (node_tp + node_tn) / (node_tp + node_tn + node_fp + node_fn + 1e-7)
         
+        avg_grad_norm = np.mean(grad_norms) if grad_norms else 0.0
+        print(f"\n  Average gradient norm: {avg_grad_norm:.4f}")
+        
         return {
             'loss': total_loss / len(self.train_loader),
             'cascade_acc': cascade_acc,
@@ -223,6 +381,38 @@ class Trainer:
             'node_precision': node_precision,
             'node_recall': node_recall
         }
+    
+    def _validate_model_outputs(self, outputs: Dict[str, torch.Tensor]):
+        """Validate that model outputs match expected format."""
+        print("\n" + "="*80)
+        print("MODEL OUTPUT VALIDATION")
+        print("="*80)
+        
+        required_keys = ['failure_probability']
+        optional_keys = ['voltages', 'line_flows', 'frequency', 'cascade_timing', 'risk_scores']
+        
+        print("\nRequired outputs:")
+        for key in required_keys:
+            if key in outputs:
+                print(f"  ✓ {key}: shape {outputs[key].shape}")
+            else:
+                raise ValueError(f"Model missing required output: {key}")
+        
+        print("\nOptional outputs (for physics constraints):")
+        for key in optional_keys:
+            if key in outputs:
+                print(f"  ✓ {key}: shape {outputs[key].shape}")
+            else:
+                print(f"  ✗ {key}: not present")
+        
+        # Check if failure_probability is in valid range
+        fp = outputs['failure_probability']
+        if fp.min() < 0 or fp.max() > 1:
+            print(f"\n[WARNING] failure_probability outside [0,1] range: [{fp.min():.4f}, {fp.max():.4f}]")
+            print("  This suggests the model outputs logits, not probabilities.")
+            print("  Consider setting model_outputs_logits=True in Trainer initialization.")
+        
+        print("="*80 + "\n")
     
     def validate(self) -> Dict[str, float]:
         """Validate the model with PROPER METRICS."""
@@ -255,7 +445,7 @@ class Trainer:
                 # Compute loss
                 loss, _ = self.criterion(
                     outputs,
-                    {'failure_label': batch_device['node_failure_labels']},
+                    {'failure_label': batch_device['node_failure_labels'].reshape(-1)},
                     graph_properties
                 )
                 
@@ -271,9 +461,8 @@ class Trainer:
                 cascade_tn += ((cascade_pred == 0) & (cascade_labels == 0)).sum().item()
                 cascade_fn += ((cascade_pred == 0) & (cascade_labels == 1)).sum().item()
                 
-                # Node-level metrics
-                node_pred = (outputs['failure_probability'] > 0.5).float()
-                node_labels = batch_device['node_failure_labels']
+                node_pred = (outputs['failure_probability'] > 0.5).float().squeeze(-1)  # [B, N, 1] -> [B, N]
+                node_labels = batch_device['node_failure_labels']  # [B, N]
                 
                 node_tp += ((node_pred == 1) & (node_labels == 1)).sum().item()
                 node_fp += ((node_pred == 1) & (node_labels == 0)).sum().item()
@@ -315,10 +504,9 @@ class Trainer:
     
     def train(self, num_epochs: int, early_stopping_patience: int = 10):
         """Train the model and save history/plots."""
-        best_val_loss = float('inf')
         patience_counter = 0
         
-        for epoch in range(num_epochs):
+        for epoch in range(self.start_epoch, num_epochs):
             print(f"\nEpoch {epoch + 1}/{num_epochs}")
             print("-" * 80)
             
@@ -327,7 +515,9 @@ class Trainer:
             
             self.scheduler.step(val_metrics['loss'])
             
-            # Save all metrics to history
+            current_lr = self.optimizer.param_groups[0]['lr']
+            self.history['learning_rate'].append(current_lr)
+            
             self.history['train_loss'].append(train_metrics['loss'])
             self.history['val_loss'].append(val_metrics['loss'])
             self.history['train_cascade_acc'].append(train_metrics['cascade_acc'])
@@ -349,6 +539,7 @@ class Trainer:
             
             print(f"\nEpoch {epoch + 1} Results:")
             print(f"  Train Loss: {train_metrics['loss']:.4f} | Val Loss: {val_metrics['loss']:.4f}")
+            print(f"  Learning Rate: {current_lr:.6f}")
             print(f"\n  CASCADE DETECTION:")
             print(f"    Accuracy:  Train {train_metrics['cascade_acc']:.4f} | Val {val_metrics['cascade_acc']:.4f}")
             print(f"    F1 Score:  Train {train_metrics['cascade_f1']:.4f} | Val {val_metrics['cascade_f1']:.4f}")
@@ -360,9 +551,8 @@ class Trainer:
             print(f"    Precision: Train {train_metrics['node_precision']:.4f} | Val {val_metrics['node_precision']:.4f}")
             print(f"    Recall:    Train {train_metrics['node_recall']:.4f} | Val {val_metrics['node_recall']:.4f}")
             
-            # Save checkpoint
-            if val_metrics['loss'] < best_val_loss:
-                best_val_loss = val_metrics['loss']
+            if val_metrics['loss'] < self.best_val_loss:
+                self.best_val_loss = val_metrics['loss']
                 patience_counter = 0
                 torch.save({
                     'epoch': epoch,
@@ -370,7 +560,8 @@ class Trainer:
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'val_loss': val_metrics['loss'],
                     'val_cascade_f1': val_metrics['cascade_f1'],
-                    'val_node_f1': val_metrics['node_f1']
+                    'val_node_f1': val_metrics['node_f1'],
+                    'history': self.history
                 }, f"{self.output_dir}/best_model.pth")
                 print(f"  ✓ Saved best model (val_loss: {val_metrics['loss']:.4f})")
             else:
@@ -378,6 +569,14 @@ class Trainer:
                 if patience_counter >= early_stopping_patience:
                     print(f"\nEarly stopping at epoch {epoch + 1}")
                     break
+            
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'val_loss': val_metrics['loss'],
+                'history': self.history
+            }, f"{self.output_dir}/latest_checkpoint.pth")
         
         # Save training history
         self.save_history()
@@ -387,7 +586,7 @@ class Trainer:
         
         print(f"\n{'='*80}")
         print(f"Training complete!")
-        print(f"  Best validation loss: {best_val_loss:.4f}")
+        print(f"  Best validation loss: {self.best_val_loss:.4f}")
         print(f"  Training history saved to: {self.output_dir}/training_history.json")
         print(f"  Training curves saved to: {self.output_dir}/training_curves.png")
         print(f"  Best model saved to: {self.output_dir}/best_model.pth")
@@ -493,10 +692,13 @@ if __name__ == "__main__":
     # Configuration
     DATA_DIR = "data_unified"
     OUTPUT_DIR = "checkpoints"
-    BATCH_SIZE = 8
+    BATCH_SIZE = 4  # Reduced from 8 to 4 for memory efficiency
     NUM_EPOCHS = 30
     LEARNING_RATE = 0.001
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    MAX_GRAD_NORM = 1.0
+    USE_AMP = torch.cuda.is_available()  # Use mixed precision if CUDA available
+    MODEL_OUTPUTS_LOGITS = False
     
     print(f"\nConfiguration:")
     print(f"  Data directory: {DATA_DIR}")
@@ -505,10 +707,13 @@ if __name__ == "__main__":
     print(f"  Epochs: {NUM_EPOCHS}")
     print(f"  Learning rate: {LEARNING_RATE}")
     print(f"  Device: {DEVICE}")
+    print(f"  Gradient clipping: {MAX_GRAD_NORM}")
+    print(f"  Mixed precision: {USE_AMP}")
+    print(f"  Model outputs logits: {MODEL_OUTPUTS_LOGITS}")
     
     print(f"\nLoading datasets...")
-    train_dataset = CascadeDataset(f"{DATA_DIR}/train_batches", mode='last_timestep')
-    val_dataset = CascadeDataset(f"{DATA_DIR}/val_batches", mode='last_timestep')
+    train_dataset = CascadeDataset(f"{DATA_DIR}/train_batches", mode='last_timestep', cache_size=1)
+    val_dataset = CascadeDataset(f"{DATA_DIR}/val_batches", mode='last_timestep', cache_size=1)
     
     print(f"  Training samples: {len(train_dataset)}")
     print(f"  Validation samples: {len(val_dataset)}")
@@ -517,8 +722,8 @@ if __name__ == "__main__":
         train_dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=4,
-        pin_memory=True,
+        num_workers=0,  # Single-process loading to avoid memory multiplication
+        pin_memory=False,  # Don't pin memory
         collate_fn=collate_cascade_batch
     )
     
@@ -526,20 +731,18 @@ if __name__ == "__main__":
         val_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
-        num_workers=4,
-        pin_memory=True,
+        num_workers=0,  # Single-process loading
+        pin_memory=False,  # Don't pin memory
         collate_fn=collate_cascade_batch
     )
     
     # Initialize model
     print(f"\nInitializing model...")
     model = UnifiedCascadePredictionModel(
-        num_nodes=118,
-        node_feature_dim=42,
-        edge_feature_dim=24,
+        embedding_dim=128,
         hidden_dim=128,
         num_gnn_layers=3,
-        num_lstm_layers=3,
+        heads=4,
         dropout=0.3
     ).to(DEVICE)
     
@@ -555,8 +758,17 @@ if __name__ == "__main__":
         val_loader=val_loader,
         device=DEVICE,
         learning_rate=LEARNING_RATE,
-        output_dir=OUTPUT_DIR
+        output_dir=OUTPUT_DIR,
+        max_grad_norm=MAX_GRAD_NORM,
+        use_amp=USE_AMP,
+        model_outputs_logits=MODEL_OUTPUTS_LOGITS  # Pass logits flag
     )
+    
+    checkpoint_path = f"{OUTPUT_DIR}/latest_checkpoint.pth"
+    if os.path.exists(checkpoint_path):
+        resume = input(f"\nFound checkpoint at {checkpoint_path}. Resume training? (y/n): ")
+        if resume.lower() == 'y':
+            trainer.load_checkpoint(checkpoint_path)
     
     # Train
     print(f"\n{'='*80}")

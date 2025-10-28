@@ -41,8 +41,8 @@ The UnifiedCascadePredictionModel leverages data patterns through specialized co
 ## System Requirements
 
 ### Hardware
-- **Minimum**: 8GB RAM, 4-core CPU
-- **Recommended**: 16GB RAM, 8-core CPU, NVIDIA GPU (8GB+ VRAM)
+- **Minimum**: 16GB RAM, 4-core CPU
+- **Recommended**: 32GB RAM, 8-core CPU, NVIDIA GPU (8GB+ VRAM)
 - **Storage**: 100+ GB free space for data and models (depending on the size of datasets)
 
 ### Software

@@ -114,8 +114,15 @@ class InfrastructureEmbedding(nn.Module):
                 equipment_status: torch.Tensor) -> torch.Tensor:
         scada_features = self.scada_encoder(scada_data)
         
-        # Average PMU sequence over time
-        pmu_avg = pmu_sequence.mean(dim=2)
+        if pmu_sequence.dim() == 4:
+            # Has time dimension: [B, N, T, features] -> average over time
+            pmu_avg = pmu_sequence.mean(dim=2)  # [B, N, features]
+        elif pmu_sequence.dim() == 3:
+            # No time dimension (last_timestep mode): [B, N, features]
+            pmu_avg = pmu_sequence
+        else:
+            raise ValueError(f"Unexpected pmu_sequence dimensions: {pmu_sequence.dim()}")
+        
         pmu_features = self.pmu_projection(pmu_avg)
         
         equip_features = self.equipment_encoder(equipment_status)
