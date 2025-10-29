@@ -19,6 +19,11 @@ import torch.nn.functional as F
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import add_self_loops, softmax
 from typing import Optional, Tuple, Dict
+import logging # Added for debug logging
+
+
+# Set up basic logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
 # ============================================================================
@@ -28,27 +33,30 @@ from typing import Optional, Tuple, Dict
 class EnvironmentalEmbedding(nn.Module):
     """Embedding network for environmental data (φ_env)."""
     
-    def __init__(self, satellite_channels: int = 12, weather_features: int = 8,
-                 threat_features: int = 6, embedding_dim: int = 128):
+    def __init__(self, satellite_channels: int = 12, weather_features: int = 80,
+                 threat_features: int = 7, embedding_dim: int = 128):
         super(EnvironmentalEmbedding, self).__init__()
         
         # Satellite imagery CNN
         self.satellite_cnn = nn.Sequential(
             nn.Conv2d(satellite_channels, 16, kernel_size=3, padding=1),
             nn.ReLU(),
+            nn.Dropout2d(0.2),  # Added dropout
             nn.MaxPool2d(2),
             nn.Conv2d(16, 32, kernel_size=3, padding=1),
             nn.ReLU(),
+            nn.Dropout2d(0.2),  # Added dropout
             nn.AdaptiveAvgPool2d((1, 1))
         )
         
         # Weather temporal processing
-        self.weather_lstm = nn.LSTM(weather_features, 32, num_layers=1, batch_first=True)
+        self.weather_lstm = nn.LSTM(weather_features, 32, num_layers=1, batch_first=True, dropout=0.3)  # Increased dropout
         
         # Threat encoder
         self.threat_encoder = nn.Sequential(
             nn.Linear(threat_features, 32),
             nn.ReLU(),
+            nn.Dropout(0.3),  # Added dropout
             nn.Linear(32, 32)
         )
         
@@ -56,6 +64,7 @@ class EnvironmentalEmbedding(nn.Module):
         self.fusion = nn.Sequential(
             nn.Linear(32 + 32 + 32, embedding_dim),
             nn.ReLU(),
+            nn.Dropout(0.3),  # Added dropout
             nn.LayerNorm(embedding_dim)
         )
     
@@ -75,10 +84,10 @@ class EnvironmentalEmbedding(nn.Module):
                 sat_features_list.append(sat_feat)
             sat_features = torch.stack(sat_features_list, dim=1)  # [B, T, N, 32]
             
-            # Process weather sequences
-            weather_flat = weather_sequence.reshape(B * T * N, *weather_sequence.shape[3:])
-            _, (weather_hidden, _) = self.weather_lstm(weather_flat)
-            weather_features = weather_hidden[-1].reshape(B, T, N, 32)
+            # weather_sequence: [B, T, N, 80] -> reshape to [B*N, T, 80] for LSTM
+            weather_reshaped = weather_sequence.permute(0, 2, 1, 3).reshape(B * N, T, 80)  # [B*N, T, 80]
+            weather_output, _ = self.weather_lstm(weather_reshaped)  # [B*N, T, 32]
+            weather_features = weather_output.reshape(B, N, T, 32).permute(0, 2, 1, 3)  # [B, T, N, 32]
             
             # Process threat indicators (assuming [B, T, N, features])
             threat_features = self.threat_encoder(threat_indicators)  # [B, T, N, 32]
@@ -97,10 +106,10 @@ class EnvironmentalEmbedding(nn.Module):
             sat_flat = satellite_data.reshape(B * N, *satellite_data.shape[2:])
             sat_features = self.satellite_cnn(sat_flat).reshape(B, N, 32)
             
-            # Process weather sequences
-            weather_flat = weather_sequence.reshape(B * N, *weather_sequence.shape[2:])
-            _, (weather_hidden, _) = self.weather_lstm(weather_flat)
-            weather_features = weather_hidden[-1].reshape(B, N, 32)
+            # weather_sequence: [B, N, 80] -> reshape to [B*N, 1, 80] for LSTM
+            weather_flat = weather_sequence.reshape(B * N, 1, 80)  # [B*N, 1, 80]
+            weather_output, _ = self.weather_lstm(weather_flat)  # [B*N, 1, 32]
+            weather_features = weather_output.squeeze(1).reshape(B, N, 32)  # [B, N, 32]
             
             # Process threat indicators
             threat_features = self.threat_encoder(threat_indicators)
@@ -113,30 +122,34 @@ class EnvironmentalEmbedding(nn.Module):
 class InfrastructureEmbedding(nn.Module):
     """Embedding network for infrastructure data (φ_infra)."""
     
-    def __init__(self, scada_features: int = 20, pmu_features: int = 15,
-                 equipment_features: int = 10, embedding_dim: int = 128):
+    def __init__(self, scada_features: int = 7, pmu_features: int = 3,
+                 equipment_features: int = 4, embedding_dim: int = 128):
         super(InfrastructureEmbedding, self).__init__()
         
         self.scada_encoder = nn.Sequential(
             nn.Linear(scada_features, 64),
             nn.ReLU(),
+            nn.Dropout(0.3),  # Added dropout
             nn.Linear(64, 64)
         )
         
         self.pmu_projection = nn.Sequential(
             nn.Linear(pmu_features, 32),
             nn.ReLU(),
+            nn.Dropout(0.3),  # Added dropout
             nn.Linear(32, 32)
         )
         
         self.equipment_encoder = nn.Sequential(
             nn.Linear(equipment_features, 32),
-            nn.ReLU()
+            nn.ReLU(),
+            nn.Dropout(0.3)  # Added dropout
         )
         
         self.fusion = nn.Sequential(
             nn.Linear(64 + 32 + 32, embedding_dim),
             nn.ReLU(),
+            nn.Dropout(0.3),  # Added dropout
             nn.LayerNorm(embedding_dim)
         )
     
@@ -199,29 +212,35 @@ class RoboticEmbedding(nn.Module):
         self.visual_cnn = nn.Sequential(
             nn.Conv2d(visual_channels, 16, kernel_size=3, padding=1),
             nn.ReLU(),
+            nn.Dropout2d(0.2),  # Added dropout
             nn.MaxPool2d(2),
             nn.Conv2d(16, 32, kernel_size=3, padding=1),
             nn.ReLU(),
+            nn.Dropout2d(0.2),  # Added dropout
             nn.AdaptiveAvgPool2d((1, 1))
         )
         
         self.thermal_cnn = nn.Sequential(
             nn.Conv2d(thermal_channels, 8, kernel_size=3, padding=1),
             nn.ReLU(),
+            nn.Dropout2d(0.2),  # Added dropout
             nn.MaxPool2d(2),
             nn.Conv2d(8, 16, kernel_size=3, padding=1),
             nn.ReLU(),
+            nn.Dropout2d(0.2),  # Added dropout
             nn.AdaptiveAvgPool2d((1, 1))
         )
         
         self.sensor_encoder = nn.Sequential(
             nn.Linear(sensor_features, 32),
-            nn.ReLU()
+            nn.ReLU(),
+            nn.Dropout(0.3)  # Added dropout
         )
         
         self.fusion = nn.Sequential(
             nn.Linear(32 + 16 + 32, embedding_dim),
             nn.ReLU(),
+            nn.Dropout(0.3),  # Added dropout
             nn.LayerNorm(embedding_dim)
         )
     
@@ -394,7 +413,7 @@ class TemporalGNNCell(nn.Module):
     """Temporal GNN Cell combining graph attention with LSTM."""
     
     def __init__(self, node_features: int, hidden_dim: int,
-                 edge_dim: Optional[int] = None, num_heads: int = 4, dropout: float = 0.1):
+                 edge_dim: Optional[int] = None, num_heads: int = 4, dropout: float = 0.3):  # Increased default dropout
         super(TemporalGNNCell, self).__init__()
         
         self.hidden_dim = hidden_dim
@@ -418,9 +437,9 @@ class TemporalGNNCell(nn.Module):
         self.lstm = nn.LSTM(
             input_size=hidden_dim, 
             hidden_size=hidden_dim,
-            num_layers=3,  # Increased from 1 to 3 layers
+            num_layers=3,
             batch_first=True,
-            dropout=dropout if dropout > 0 else 0
+            dropout=0.3  # Increased from 0.1 to 0.3
         )
         self.layer_norm = nn.LayerNorm(hidden_dim)
     
@@ -733,7 +752,7 @@ class UnifiedCascadePredictionModel(nn.Module):
     """
     
     def __init__(self, embedding_dim: int = 128, hidden_dim: int = 128,
-                 num_gnn_layers: int = 3, heads: int = 4, dropout: float = 0.1):
+                 num_gnn_layers: int = 3, heads: int = 4, dropout: float = 0.3):  # Increased default dropout
         super(UnifiedCascadePredictionModel, self).__init__()
         
         # Multi-modal embeddings
@@ -775,7 +794,7 @@ class UnifiedCascadePredictionModel(nn.Module):
         
         # Edge embedding
         self.edge_embedding = nn.Sequential(
-            nn.Linear(10, hidden_dim),
+            nn.Linear(5, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout)
         )
@@ -784,7 +803,7 @@ class UnifiedCascadePredictionModel(nn.Module):
         self.failure_prob_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Dropout(dropout),
+            nn.Dropout(0.4),  # Increased dropout
             nn.Linear(hidden_dim // 2, 1),
             nn.Sigmoid()
         )
@@ -792,7 +811,7 @@ class UnifiedCascadePredictionModel(nn.Module):
         self.failure_time_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Dropout(dropout),
+            nn.Dropout(0.4),  # Increased dropout
             nn.Linear(hidden_dim // 2, 1),
             nn.Softplus()
         )
@@ -800,6 +819,7 @@ class UnifiedCascadePredictionModel(nn.Module):
         self.voltage_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
+            nn.Dropout(0.3),  # Added dropout
             nn.Linear(hidden_dim // 2, 1),
             nn.Sigmoid()
         )
@@ -807,6 +827,7 @@ class UnifiedCascadePredictionModel(nn.Module):
         self.angle_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
+            nn.Dropout(0.3),  # Added dropout
             nn.Linear(hidden_dim // 2, 1),
             nn.Tanh()
         )
@@ -814,6 +835,7 @@ class UnifiedCascadePredictionModel(nn.Module):
         self.line_flow_head = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(),
+            nn.Dropout(0.3),  # Added dropout
             nn.Linear(hidden_dim, 1),
             nn.Softplus()
         )
@@ -822,7 +844,7 @@ class UnifiedCascadePredictionModel(nn.Module):
         self.frequency_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Dropout(dropout),
+            nn.Dropout(0.4),  # Increased dropout
             nn.Linear(hidden_dim // 2, 1),
             nn.Sigmoid()  # Output: 0-1, scaled to 57-63 Hz range
         )
@@ -834,8 +856,8 @@ class UnifiedCascadePredictionModel(nn.Module):
         self.risk_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 7),  # Changed from 3 to 7 dimensions
+            nn.Dropout(0.4),  # Increased dropout
+            nn.Linear(hidden_dim // 2, 7),
             nn.Sigmoid()
         )
         
@@ -854,28 +876,34 @@ class UnifiedCascadePredictionModel(nn.Module):
         Returns:
             Dictionary with predictions
         """
+        logging.debug("Starting forward pass of UnifiedCascadePredictionModel")
+
         env_emb = self.env_embedding(
             batch['satellite_data'],
             batch['weather_sequence'],
             batch['threat_indicators']
         )
+        logging.debug(f"Environmental embedding shape: {env_emb.shape}")
         
         infra_emb = self.infra_embedding(
             batch['scada_data'],
             batch['pmu_sequence'],
             batch['equipment_status']
         )
+        logging.debug(f"Infrastructure embedding shape: {infra_emb.shape}")
         
         robot_emb = self.robot_embedding(
             batch['visual_data'],
             batch['thermal_data'],
             batch['sensor_data']
         )
+        logging.debug(f"Robotic embedding shape: {robot_emb.shape}")
         
         has_temporal = env_emb.dim() == 4  # [B, T, N, D]
         
         if has_temporal:
             B, T, N, D = env_emb.shape
+            logging.debug(f"Processing temporal data: B={B}, T={T}, N={N}, D={D}")
             
             # Attention-based fusion for each timestep
             fused_list = []
@@ -895,11 +923,13 @@ class UnifiedCascadePredictionModel(nn.Module):
                 fused_list.append(fused_t)
             
             fused_sequence = torch.stack(fused_list, dim=1)  # [B, T, N, D]
+            logging.debug(f"Fused sequence shape: {fused_sequence.shape}")
             
             fused = fused_sequence[:, -1, :, :]  # [B, N, D] - last timestep
             
             # Edge embedding
-            edge_embedded = self.edge_embedding(batch.get('edge_attr', torch.zeros(B, batch['edge_index'].shape[1], 10, device=env_emb.device)))
+            edge_embedded = self.edge_embedding(batch.get('edge_attr', torch.zeros(B, batch['edge_index'].shape[1], 5, device=env_emb.device)))
+            logging.debug(f"Edge embedding shape: {edge_embedded.shape}")
             
             # Process temporal sequence through LSTM
             h_states = []
@@ -912,7 +942,10 @@ class UnifiedCascadePredictionModel(nn.Module):
             
             h = torch.stack(h_states, dim=2)  # [B, N, T, D]
             h = h[:, :, -1, :]  # Use last timestep for predictions
+            logging.debug(f"Final hidden state (temporal) shape: {h.shape}")
+
         else:
+            logging.debug("Processing non-temporal data")
             # Single timestep processing
             multi_modal = torch.stack([env_emb, infra_emb, robot_emb], dim=2)
             B, N, M, D = multi_modal.shape
@@ -925,46 +958,76 @@ class UnifiedCascadePredictionModel(nn.Module):
             fused = self.fusion_norm(fused)
             
             # Edge embedding
-            edge_embedded = self.edge_embedding(batch.get('edge_attr', torch.zeros(B, batch['edge_index'].shape[1], 10, device=fused.device)))
+            edge_embedded = self.edge_embedding(batch.get('edge_attr', torch.zeros(B, batch['edge_index'].shape[1], 5, device=fused.device)))
+            logging.debug(f"Edge embedding shape: {edge_embedded.shape}")
             
             # Single timestep processing
             h, _ = self.temporal_gnn(fused, batch['edge_index'], edge_embedded)
+            logging.debug(f"Final hidden state (non-temporal) shape: {h.shape}")
         
         # Additional GNN layers
-        for gnn_layer, layer_norm in zip(self.gnn_layers, self.layer_norms):
+        for i, (gnn_layer, layer_norm) in enumerate(zip(self.gnn_layers, self.layer_norms)):
             h_new = gnn_layer(h, batch['edge_index'], edge_embedded)
             h = layer_norm(h + h_new)
+            logging.debug(f"Shape after GNN layer {i+1}: {h.shape}")
         
         # Multi-task predictions
         failure_prob = self.failure_prob_head(h)
-        voltages = self.voltage_head(h)
-        angles = self.angle_head(h)
+        logging.debug(f"Failure probability head output shape: {failure_prob.shape}")
+        
+        voltages = self.voltage_head(h)  # [B, N, 1], range [0, 1], scaled to [0.9, 1.1] p.u.
+        voltages = 0.9 + voltages * 0.2  # Scale from [0,1] to [0.9, 1.1] p.u.
+        logging.debug(f"Voltages head output shape: {voltages.shape}")
+        
+        angles = self.angle_head(h)  # [B, N, 1], range [-1, 1], scaled to [-π, π]
+        angles = angles * 3.14159  # Scale to radians
+        logging.debug(f"Angles head output shape: {angles.shape}")
         
         h_global = h.mean(dim=1, keepdim=True)  # Global pooling
         frequency_normalized = self.frequency_head(h_global)
         frequency = 57.0 + frequency_normalized * 6.0  # Scale to 57-63 Hz
+        logging.debug(f"Frequency head output shape: {frequency.shape}")
         
         # Line flow prediction
         src, dst = batch['edge_index']
         h_src = h[:, src, :]
         h_dst = h[:, dst, :]
         edge_features = torch.cat([h_src, h_dst], dim=-1)
-        line_flows = self.line_flow_head(edge_features)
+        line_flows = self.line_flow_head(edge_features)  # [B, E, 1]
+        logging.debug(f"Line flows head output shape: {line_flows.shape}")
+        
+        # Reactive power flow prediction
+        reactive_flows = line_flows * 0.3  # Reactive power typically 30% of active power
+        logging.debug(f"Reactive flows output shape: {reactive_flows.shape}")
         
         relay_predictions = self.relay_model(edge_features, line_flows)
+        logging.debug(f"Relay model output keys: {relay_predictions.keys()}")
         
         risk_scores = self.risk_head(h)  # [B, N, 7]: threat_severity, vulnerability, operational_impact, 
                                           # cascade_probability, response_complexity, public_safety, urgency
+        logging.debug(f"Risk scores head output shape: {risk_scores.shape}")
+        
+        if torch.isnan(failure_prob).any():
+            logging.error("[ERROR] NaN detected in failure_prob!")
+            print("[ERROR] NaN detected in failure_prob!")
+        if torch.isnan(voltages).any():
+            logging.error("[ERROR] NaN detected in voltages!")
+            print("[ERROR] NaN detected in voltages!")
+        if torch.isnan(line_flows).any():
+            logging.error("[ERROR] NaN detected in line_flows!")
+            print("[ERROR] NaN detected in line_flows!")
         
         return {
             'failure_probability': failure_prob,
-            'failure_timing': relay_predictions['operating_time'],  # Use relay model
-            'voltages': voltages,
-            'angles': angles,
-            'line_flows': line_flows,
-            'frequency': frequency,
+            'failure_timing': relay_predictions['operating_time'],
+            'cascade_timing': relay_predictions['operating_time'],
+            'voltages': voltages,  # ALWAYS output voltages
+            'angles': angles,      # ALWAYS output angles
+            'line_flows': line_flows,  # ALWAYS output line_flows
+            'reactive_flows': reactive_flows,
+            'frequency': frequency,  # ALWAYS output frequency
             'risk_scores': risk_scores,
-            'relay_outputs': {  # Nested dict for inference script compatibility
+            'relay_outputs': {
                 'time_dial': relay_predictions['time_dial'],
                 'pickup_current': relay_predictions['pickup_current'],
                 'operating_time': relay_predictions['operating_time'],
@@ -981,4 +1044,7 @@ class UnifiedCascadePredictionModel(nn.Module):
                     targets: Dict[str, torch.Tensor],
                     graph_properties: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
         """Compute total loss with physics constraints."""
-        return self.physics_loss(predictions, targets, graph_properties)
+        logging.debug("Computing total loss with physics constraints")
+        loss_details = self.physics_loss(predictions, targets, graph_properties)
+        logging.debug(f"Loss computation complete. Total loss: {loss_details[0].item()}")
+        return loss_details

@@ -41,8 +41,8 @@ The UnifiedCascadePredictionModel leverages data patterns through specialized co
 ## System Requirements
 
 ### Hardware
-- **Minimum**: 16GB RAM, 4-core CPU
-- **Recommended**: 32GB RAM, 8-core CPU, NVIDIA GPU (8GB+ VRAM)
+- **Minimum**: 8GB RAM, 4-core CPU
+- **Recommended**: 16GB RAM, 8-core CPU, NVIDIA GPU (8GB+ VRAM)
 - **Storage**: 100+ GB free space for data and models (depending on the size of datasets)
 
 ### Software
@@ -111,20 +111,21 @@ generate_dataset(
 Train the cascade prediction model:
 
 ```bash
-# Basic training 
-python train_model.py 
+# Basic training (CPU)
+python train_model.py --num_epochs 50 --batch_size 16
 
-# Change training config:
-# Configuration (train_model.py at line 574)
-DATA_DIR = "data_unified"
-OUTPUT_DIR = "checkpoints"
-BATCH_SIZE = 8  
-NUM_EPOCHS = 30
-LEARNING_RATE = 0.001
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-MAX_GRAD_NORM = 1.0
-USE_AMP = torch.cuda.is_available()  # Use mixed precision if CUDA available
-MODEL_OUTPUTS_LOGITS = False
+# GPU training with custom parameters
+python train_model.py \
+    --device cuda \
+    --num_epochs 100 \
+    --batch_size 32 \
+    --learning_rate 0.001 \
+    --hidden_dim 128 \
+    --num_gnn_layers 4 \
+    --early_stopping 15
+
+# Quick test training (5 epochs)
+python train_model.py --num_epochs 5 --batch_size 8
 ```
 
 **Training outputs:**

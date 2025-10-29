@@ -11,7 +11,7 @@ import numpy as np
 
 class PhysicsInformedLoss(nn.Module):
     """
-    Physics-informed loss function with CLASS WEIGHTING for imbalanced data.
+    Physics-informed loss function with FOCAL LOSS for severe class imbalance.
     
     Combines prediction loss with physics constraints:
     - Power flow constraints (voltage magnitudes, power balance)
@@ -23,29 +23,63 @@ class PhysicsInformedLoss(nn.Module):
         lambda_capacity: Weight for thermal capacity constraints
         lambda_stability: Weight for stability constraints (deprecated, kept for compatibility)
         lambda_frequency: Weight for frequency constraints
+        lambda_reactive: Weight for reactive power loss
         pos_weight: Class weight for positive samples (failures) to handle imbalance
+        focal_alpha: Alpha parameter for focal loss
+        focal_gamma: Gamma parameter for focal loss
+        label_smoothing: Label smoothing factor to prevent overconfidence
         use_logits: If True, expects model to output logits; if False, expects probabilities
     """
     
-    def __init__(self, lambda_powerflow: float = 0.1, lambda_capacity: float = 0.05,
-                 lambda_stability: float = 0.05, lambda_frequency: float = 0.08,
-                 pos_weight: float = 20.0, use_logits: bool = False):
+    def __init__(self, lambda_powerflow: float = 0.1, lambda_capacity: float = 0.1,
+                 lambda_stability: float = 0.001, lambda_frequency: float = 0.1,
+                 lambda_reactive: float = 0.1,
+                 pos_weight: float = 10.0, focal_alpha: float = 0.25, focal_gamma: float = 2.0,
+                 label_smoothing: float = 0.15, use_logits: bool = False):
         super(PhysicsInformedLoss, self).__init__()
         
         self.lambda_powerflow = lambda_powerflow
         self.lambda_capacity = lambda_capacity
         self.lambda_stability = lambda_stability
         self.lambda_frequency = lambda_frequency
+        self.lambda_reactive = lambda_reactive
         self.pos_weight = pos_weight
+        self.focal_alpha = focal_alpha
+        self.focal_gamma = focal_gamma
+        self.label_smoothing = label_smoothing
         self.use_logits = use_logits
         
         self._warned_missing_outputs = set()
+        
+        self.power_base = 100.0
+        self.freq_nominal = 60.0
+        self.voltage_nominal = 1.0
+        self.reactive_base = 100.0
+    
+    def focal_loss(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Focal loss with label smoothing for handling severe class imbalance.
+        FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+        """
+        # Smooth labels: 0 -> epsilon, 1 -> 1-epsilon
+        targets_smooth = targets * (1 - self.label_smoothing) + self.label_smoothing * 0.5
+        
+        bce_loss = F.binary_cross_entropy_with_logits(logits, targets_smooth, reduction='none')
+        probs = torch.sigmoid(logits)
+        
+        # Use original targets (not smoothed) for focal weight computation
+        p_t = probs * targets + (1 - probs) * (1 - targets)
+        alpha_t = self.focal_alpha * targets + (1 - self.focal_alpha) * (1 - targets)
+        focal_weight = alpha_t * (1 - p_t) ** self.focal_gamma
+        focal_loss = focal_weight * bce_loss
+        
+        return focal_loss.mean()
     
     def forward(self, predictions: Dict[str, torch.Tensor],
                 targets: Dict[str, torch.Tensor],
                 graph_properties: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
-        Compute total physics-informed loss with CLASS WEIGHTING.
+        Compute total physics-informed loss with CLASS WEIGHTING and NORMALIZATION.
         
         Args:
             predictions: Dict with keys:
@@ -53,12 +87,14 @@ class PhysicsInformedLoss(nn.Module):
                 - 'voltages': [B, N, 1] optional voltage predictions
                 - 'line_flows': [B, E, 1] optional line flow predictions
                 - 'frequency': [B, 1, 1] optional frequency predictions
+                - 'reactive_flows': [B, E, 1] optional reactive power flow predictions
             targets: Dict with 'failure_label': [B*N] ground truth labels
             graph_properties: Dict with optional keys:
                 - 'conductance': [B, E] line conductance
                 - 'susceptance': [B, E] line susceptance
                 - 'thermal_limits': [B, E] line thermal limits
                 - 'power_injection': [B, N] power injections
+                - 'reactive_injection': [B, N] reactive power injections
         
         Returns:
             total_loss: Scalar tensor
@@ -83,70 +119,120 @@ class PhysicsInformedLoss(nn.Module):
             logits = torch.log(probs / (1 - probs))
         
         # Main prediction loss with class weighting
-        L_prediction = F.binary_cross_entropy_with_logits(
-            logits,
-            targets_flat,
-            pos_weight=pos_weight_tensor
-        )
+        L_prediction = self.focal_loss(logits, targets_flat)
         
         loss_components = {'prediction': L_prediction.item()}
         total_loss = L_prediction
         
+        # Reshape targets back to [B, N] to detect cascades per sample
+        targets_reshaped = targets_flat.reshape(B, N)
+        has_cascade = (targets_reshaped.sum(dim=1) > 0).float()  # [B] - 1.0 if cascade, 0.0 if normal
+        cascade_ratio = has_cascade.mean().item()  # Fraction of batch with cascades
+        
         if graph_properties and len(graph_properties) > 0:
-            # Power flow physics constraint
             if 'voltages' in predictions and 'conductance' in graph_properties:
-                predicted_voltages = predictions['voltages']
-                conductance = graph_properties['conductance']
+                predicted_voltages = predictions['voltages']  # [B, N, 1]
                 
-                # Voltage magnitude constraint (should be near 1.0 p.u.)
-                L_voltage = torch.mean((predicted_voltages - 1.0) ** 2)
+                # During cascades, voltages should DROP (0.85-0.95 p.u.)
+                # During normal operation, voltages should be near 1.0 p.u.
+                # Penalize the model for predicting stable voltages during cascades
+                
+                # Expand has_cascade to match voltage shape: [B] -> [B, N, 1]
+                has_cascade_expanded = has_cascade.view(B, 1, 1).expand_as(predicted_voltages)
+                
+                # Expected voltage during cascade: 0.90 p.u. (10% drop)
+                # Expected voltage during normal: 1.0 p.u.
+                expected_voltage = 1.0 - 0.10 * has_cascade_expanded
+                
+                # Penalize deviation from expected voltage
+                L_voltage = torch.mean((predicted_voltages - expected_voltage) ** 2)
                 total_loss += self.lambda_powerflow * L_voltage
                 loss_components['voltage'] = L_voltage.item()
-                
-                # Power injection balance (if available)
-                if 'power_injection' in graph_properties:
-                    power_injection = graph_properties['power_injection']
-                    # Simplified power balance: sum of injections should be near zero
-                    L_powerflow = torch.mean(power_injection ** 2)
-                    total_loss += self.lambda_powerflow * L_powerflow
-                    loss_components['powerflow'] = L_powerflow.item()
             elif 'voltages' not in predictions and 'voltage' not in self._warned_missing_outputs:
                 print("\n[WARNING] Model does not output 'voltages' - voltage physics constraint disabled")
                 self._warned_missing_outputs.add('voltage')
             
-            # Thermal capacity constraint
+            # Power flow constraint (unchanged)
+            if 'voltages' in predictions and 'power_injection' in graph_properties:
+                power_injection = graph_properties['power_injection']
+                power_injection_pu = power_injection / self.power_base
+                L_powerflow = torch.mean(power_injection_pu ** 2)
+                L_powerflow = torch.clamp(L_powerflow, 0.0, 10.0)
+                total_loss += self.lambda_powerflow * L_powerflow
+                loss_components['powerflow'] = L_powerflow.item()
+            
+            # Reactive power constraint (unchanged)
+            if 'reactive_flows' in predictions and 'reactive_injection' in graph_properties:
+                reactive_injection = graph_properties['reactive_injection']
+                reactive_injection_pu = reactive_injection / self.reactive_base
+                L_reactive = torch.mean(reactive_injection_pu ** 2)
+                L_reactive = torch.clamp(L_reactive, 0.0, 10.0)
+                total_loss += self.lambda_reactive * L_reactive
+                loss_components['reactive'] = L_reactive.item()
+            elif 'reactive_flows' not in predictions and 'reactive' not in self._warned_missing_outputs:
+                print("\n[WARNING] Model does not output 'reactive_flows' - reactive power constraint disabled")
+                self._warned_missing_outputs.add('reactive')
+            
             if 'line_flows' in predictions and 'thermal_limits' in graph_properties:
-                predicted_flows = predictions['line_flows']
-                thermal_limits = graph_properties['thermal_limits']
+                predicted_flows = predictions['line_flows']  # [B, E, 1]
+                thermal_limits = graph_properties['thermal_limits']  # [B, E]
                 
-                # predicted_flows: [B, E, 1] or [B, E]
-                # thermal_limits: [B, E]
                 if predicted_flows.dim() == 3 and predicted_flows.size(-1) == 1:
-                    predicted_flows = predicted_flows.squeeze(-1)  # [B, E, 1] -> [B, E]
+                    predicted_flows = predicted_flows.squeeze(-1)  # [B, E]
                 
-                # Ensure thermal_limits has same shape as predicted_flows
                 if thermal_limits.dim() != predicted_flows.dim():
                     if thermal_limits.dim() == 1:
-                        # thermal_limits is [E], expand to [B, E]
                         thermal_limits = thermal_limits.unsqueeze(0).expand_as(predicted_flows)
                     elif thermal_limits.shape != predicted_flows.shape:
-                        # Shape mismatch, try to broadcast
                         thermal_limits = thermal_limits.expand_as(predicted_flows)
                 
-                # Penalize flows exceeding thermal limits
-                violations = F.relu(torch.abs(predicted_flows) - thermal_limits)
-                L_capacity = torch.mean(violations ** 2)
+                # During cascades, line flows SHOULD violate limits (overloading)
+                # Penalize the model for predicting low flows during cascades
+                
+                # Expand has_cascade to match flow shape: [B] -> [B, E]
+                E = predicted_flows.shape[1]
+                has_cascade_expanded = has_cascade.view(B, 1).expand(B, E)
+                
+                # During cascades, expect flows to be 1.2x thermal limits (20% overload)
+                # During normal, expect flows below limits
+                expected_flow_ratio = 1.0 + 0.2 * has_cascade_expanded
+                expected_flows = thermal_limits * expected_flow_ratio
+                
+                # Penalize deviation from expected flows
+                flow_deviation = torch.abs(predicted_flows) - expected_flows
+                # Only penalize if predicted flows are LOWER than expected during cascades
+                # or HIGHER than expected during normal operation
+                violations = F.relu(flow_deviation * (2 * has_cascade_expanded - 1))
+                violations_pu = violations / (thermal_limits + 1e-6)
+                L_capacity = torch.mean(violations_pu ** 2)
+                L_capacity = torch.clamp(L_capacity, 0.0, 10.0)
                 total_loss += self.lambda_capacity * L_capacity
                 loss_components['capacity'] = L_capacity.item()
             elif 'line_flows' not in predictions and 'line_flows' not in self._warned_missing_outputs:
                 print("\n[WARNING] Model does not output 'line_flows' - thermal capacity constraint disabled")
                 self._warned_missing_outputs.add('line_flows')
             
-            # Frequency stability constraint
             if 'frequency' in predictions:
-                predicted_freq = predictions['frequency']
-                # Frequency should be near 1.0 p.u. (60 Hz nominal)
-                L_frequency = torch.mean((predicted_freq - 1.0) ** 2)
+                predicted_freq = predictions['frequency']  # [B, 1, 1]
+                
+                if predicted_freq.mean() > 10.0:
+                    predicted_freq_pu = predicted_freq / self.freq_nominal
+                else:
+                    predicted_freq_pu = predicted_freq
+                
+                # During cascades, frequency should DEVIATE (0.98-1.02 p.u.)
+                # During normal, frequency should be near 1.0 p.u.
+                
+                # Expand has_cascade to match frequency shape
+                has_cascade_expanded = has_cascade.view(B, 1, 1).expand_as(predicted_freq_pu)
+                
+                # Expected frequency during cascade: 0.99 p.u. (1% drop)
+                # Expected frequency during normal: 1.0 p.u.
+                expected_freq = 1.0 - 0.01 * has_cascade_expanded
+                
+                # Penalize deviation from expected frequency
+                L_frequency = torch.mean((predicted_freq_pu - expected_freq) ** 2)
+                L_frequency = torch.clamp(L_frequency, 0.0, 10.0)
                 total_loss += self.lambda_frequency * L_frequency
                 loss_components['frequency'] = L_frequency.item()
             elif 'frequency' not in self._warned_missing_outputs:
@@ -164,9 +250,9 @@ class Trainer:
         train_loader: DataLoader,
         val_loader: DataLoader,
         device: torch.device,
-        learning_rate: float = 0.001,
+        learning_rate: float = 0.01,
         output_dir: str = "checkpoints",
-        max_grad_norm: float = 1.0,
+        max_grad_norm: float = 5.0,
         use_amp: bool = False,
         model_outputs_logits: bool = False
     ):
@@ -174,7 +260,13 @@ class Trainer:
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.device = device
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
+        
+        self.optimizer = torch.optim.Adam(
+            self.model.parameters(), 
+            lr=learning_rate,
+            weight_decay=1e-4  # Added L2 regularization
+        )
+        
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, 'min', patience=5)
         self.output_dir = output_dir
         self.max_grad_norm = max_grad_norm
@@ -206,10 +298,24 @@ class Trainer:
             'learning_rate': []
         }
         
-        self.criterion = PhysicsInformedLoss(pos_weight=20.0, use_logits=model_outputs_logits)
+        self.criterion = PhysicsInformedLoss(
+            lambda_powerflow=0.0001,  # Reduced from 0.1 to prevent dominance
+            lambda_capacity=0.05,   # Reduced from 0.1
+            lambda_frequency=10000,  # Reduced from 0.1
+            lambda_reactive=0.03,   # Reduced from 0.1 to prevent dominance
+            pos_weight=40.0,  # Increased from 25.0 to 40.0 for stronger class balancing (93% negative samples)
+            focal_alpha=0.25, 
+            focal_gamma=2.0,
+            label_smoothing=0.1,  # Reduced from 0.15 to allow more confident predictions
+            use_logits=model_outputs_logits
+        )
         
         self.start_epoch = 0
         self.best_val_loss = float('inf')
+        
+        self.cascade_threshold = 0.5  # Increased from 0.2 to reduce false positives
+        self.node_threshold = 0.50     # Increased from 0.15 to 0.30 to drastically reduce 77% false positive rate
+        self.best_val_f1 = 0.0
         
         self._model_validated = False
     
@@ -227,10 +333,14 @@ class Trainer:
         self.start_epoch = checkpoint['epoch'] + 1
         self.best_val_loss = checkpoint.get('val_loss', float('inf'))
         
+        self.cascade_threshold = checkpoint.get('cascade_threshold', 0.2)
+        self.node_threshold = checkpoint.get('node_threshold', 0.15)
+        
         if 'history' in checkpoint:
             self.history = checkpoint['history']
         
         print(f"✓ Resumed from epoch {self.start_epoch} (best val_loss: {self.best_val_loss:.4f})")
+        print(f"✓ Loaded thresholds: cascade={self.cascade_threshold:.3f}, node={self.node_threshold:.3f}")
         return True
     
     def train_epoch(self) -> Dict[str, float]:
@@ -242,6 +352,8 @@ class Trainer:
         node_tp = node_fp = node_tn = node_fn = 0
         
         grad_norms = []
+        
+        loss_component_sums = {}
         
         pbar = tqdm(self.train_loader, desc="Training")
         for batch_idx, batch in enumerate(pbar):
@@ -310,8 +422,13 @@ class Trainer:
             
             total_loss += loss.item()
             
+            for comp_name, comp_value in loss_components.items():
+                if comp_name not in loss_component_sums:
+                    loss_component_sums[comp_name] = 0.0
+                loss_component_sums[comp_name] += comp_value
+            
             cascade_prob = outputs['failure_probability'].max(dim=1)[0]
-            cascade_pred = (cascade_prob > 0.5).float()
+            cascade_pred = (cascade_prob > self.cascade_threshold).float()
             cascade_labels = (batch_device['node_failure_labels'].max(dim=1)[0] > 0.5).float()
             
             cascade_tp += ((cascade_pred == 1) & (cascade_labels == 1)).sum().item()
@@ -319,7 +436,7 @@ class Trainer:
             cascade_tn += ((cascade_pred == 0) & (cascade_labels == 0)).sum().item()
             cascade_fn += ((cascade_pred == 0) & (cascade_labels == 1)).sum().item()
             
-            node_pred = (outputs['failure_probability'] > 0.5).float().squeeze(-1)  # [B, N, 1] -> [B, N]
+            node_pred = (outputs['failure_probability'] > self.node_threshold).float().squeeze(-1)
             node_labels = batch_device['node_failure_labels']  # [B, N]
             
             node_tp += ((node_pred == 1) & (node_labels == 1)).sum().item()
@@ -335,6 +452,7 @@ class Trainer:
                 print(f"  Node predictions: {node_pred.sum().item():.0f}/{node_pred.numel()} positive ({node_pred.mean().item()*100:.2f}%)")
                 print(f"  Failure prob range: [{outputs['failure_probability'].min():.4f}, {outputs['failure_probability'].max():.4f}], mean={outputs['failure_probability'].mean():.4f}")
                 print(f"  Gradient norm: {grad_norm:.4f}")
+                print(f"  Thresholds: cascade={self.cascade_threshold:.3f}, node={self.node_threshold:.3f}")
                 if loss_components:
                     print(f"  Loss components: {', '.join([f'{k}={v:.4f}' for k, v in loss_components.items()])}")
             
@@ -368,7 +486,13 @@ class Trainer:
         node_acc = (node_tp + node_tn) / (node_tp + node_tn + node_fp + node_fn + 1e-7)
         
         avg_grad_norm = np.mean(grad_norms) if grad_norms else 0.0
+        
         print(f"\n  Average gradient norm: {avg_grad_norm:.4f}")
+        if loss_component_sums:
+            print(f"  Average loss components:")
+            for comp_name, comp_sum in loss_component_sums.items():
+                avg_comp = comp_sum / len(self.train_loader)
+                print(f"    {comp_name}: {avg_comp:.6f}")
         
         return {
             'loss': total_loss / len(self.train_loader),
@@ -389,7 +513,7 @@ class Trainer:
         print("="*80)
         
         required_keys = ['failure_probability']
-        optional_keys = ['voltages', 'line_flows', 'frequency', 'cascade_timing', 'risk_scores', 'relay_outputs']
+        optional_keys = ['voltages', 'line_flows', 'frequency', 'cascade_timing', 'risk_scores', 'relay_outputs', 'reactive_flows'] 
         
         print("\nRequired outputs:")
         for key in required_keys:
@@ -415,8 +539,8 @@ class Trainer:
             seq_shape = batch['temporal_sequence'].shape
             print(f"  ✓ Temporal sequences provided: shape {seq_shape}")
             print(f"    - Batch size: {seq_shape[0]}")
-            print(f"    - Num nodes: {seq_shape[1]}")
-            print(f"    - Sequence length: {seq_shape[2]} timesteps")
+            print(f"    - Sequence length: {seq_shape[1]} timesteps")
+            print(f"    - Num nodes: {seq_shape[2]}")
             print(f"    - Features: {seq_shape[3]}")
             print(f"  ✓ 3-layer LSTM IS BEING UTILIZED for temporal modeling")
             print(f"  ✓ Early warning capability: ENABLED (30-60 sec advance)")
@@ -473,9 +597,8 @@ class Trainer:
                 
                 total_loss += loss.item()
                 
-                # Cascade-level metrics
                 cascade_prob = outputs['failure_probability'].max(dim=1)[0]
-                cascade_pred = (cascade_prob > 0.5).float()
+                cascade_pred = (cascade_prob > self.cascade_threshold).float()
                 cascade_labels = (batch_device['node_failure_labels'].max(dim=1)[0] > 0.5).float()
                 
                 cascade_tp += ((cascade_pred == 1) & (cascade_labels == 1)).sum().item()
@@ -483,7 +606,7 @@ class Trainer:
                 cascade_tn += ((cascade_pred == 0) & (cascade_labels == 0)).sum().item()
                 cascade_fn += ((cascade_pred == 0) & (cascade_labels == 1)).sum().item()
                 
-                node_pred = (outputs['failure_probability'] > 0.5).float().squeeze(-1)  # [B, N, 1] -> [B, N]
+                node_pred = (outputs['failure_probability'] > self.node_threshold).float().squeeze(-1)
                 node_labels = batch_device['node_failure_labels']  # [B, N]
                 
                 node_tp += ((node_pred == 1) & (node_labels == 1)).sum().item()
@@ -535,6 +658,22 @@ class Trainer:
             train_metrics = self.train_epoch()
             val_metrics = self.validate()
             
+            combined_f1 = (val_metrics['cascade_f1'] + val_metrics['node_f1']) / 2
+            if combined_f1 > self.best_val_f1:
+                self.best_val_f1 = combined_f1
+                # Keep current thresholds - they're working well
+                print(f"  ✓ Improved F1 score: {combined_f1:.4f} (thresholds: cascade={self.cascade_threshold:.3f}, node={self.node_threshold:.3f})")
+            elif val_metrics['cascade_recall'] < 0.5 or val_metrics['node_recall'] < 0.3:
+                # Recall too low - lower thresholds
+                self.cascade_threshold = max(0.1, self.cascade_threshold - 0.02)
+                self.node_threshold = max(0.05, self.node_threshold - 0.02)
+                print(f"  ⚠ Low recall detected - lowering thresholds to cascade={self.cascade_threshold:.3f}, node={self.node_threshold:.3f}")
+            elif val_metrics['cascade_precision'] < 0.3 or val_metrics['node_precision'] < 0.2:
+                # Precision too low - raise thresholds
+                self.cascade_threshold = min(0.5, self.cascade_threshold + 0.02)
+                self.node_threshold = min(0.3, self.node_threshold + 0.02)
+                print(f"  ⚠ Low precision detected - raising thresholds to cascade={self.cascade_threshold:.3f}, node={self.node_threshold:.3f}")
+            
             self.scheduler.step(val_metrics['loss'])
             
             current_lr = self.optimizer.param_groups[0]['lr']
@@ -583,6 +722,8 @@ class Trainer:
                     'val_loss': val_metrics['loss'],
                     'val_cascade_f1': val_metrics['cascade_f1'],
                     'val_node_f1': val_metrics['node_f1'],
+                    'cascade_threshold': self.cascade_threshold,
+                    'node_threshold': self.node_threshold,
                     'history': self.history
                 }, f"{self.output_dir}/best_model.pth")
                 print(f"  ✓ Saved best model (val_loss: {val_metrics['loss']:.4f})")
@@ -597,6 +738,8 @@ class Trainer:
                 'model_state_dict': self.model.state_dict(),
                 'optimizer_state_dict': self.optimizer.state_dict(),
                 'val_loss': val_metrics['loss'],
+                'cascade_threshold': self.cascade_threshold,
+                'node_threshold': self.node_threshold,
                 'history': self.history
             }, f"{self.output_dir}/latest_checkpoint.pth")
         
@@ -712,13 +855,13 @@ if __name__ == "__main__":
     print("="*80)
     
     # Configuration
-    DATA_DIR = "data_unified"
+    DATA_DIR = "data"
     OUTPUT_DIR = "checkpoints"
-    BATCH_SIZE = 4  # Reduced from 8 to 4 for memory efficiency
-    NUM_EPOCHS = 30
-    LEARNING_RATE = 0.001
+    BATCH_SIZE = 8  # Reduced from 8 to 4 for memory efficiency
+    NUM_EPOCHS = 100
+    LEARNING_RATE = 0.0077  # Increased from 0.003 to 0.005 to address small gradients (0.0077)
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    MAX_GRAD_NORM = 1.0
+    MAX_GRAD_NORM = 15.0  # Increased from 5.0 to 10.0 to allow larger gradient updates
     USE_AMP = torch.cuda.is_available()  # Use mixed precision if CUDA available
     MODEL_OUTPUTS_LOGITS = False
     
@@ -734,29 +877,67 @@ if __name__ == "__main__":
     print(f"  Model outputs logits: {MODEL_OUTPUTS_LOGITS}")
     
     print(f"\nLoading datasets...")
-    train_dataset = CascadeDataset(f"{DATA_DIR}/train_batches", mode='full_sequence', cache_size=1)
-    val_dataset = CascadeDataset(f"{DATA_DIR}/val_batches", mode='full_sequence', cache_size=1)
+    train_dataset = CascadeDataset(f"{DATA_DIR}/train_batches", mode='full_sequence', cache_size=10)  # Increased from 1 to 10
+    val_dataset = CascadeDataset(f"{DATA_DIR}/val_batches", mode='full_sequence', cache_size=5)  # Increased from 1 to 5
     
     print(f"  Training samples: {len(train_dataset)}")
     print(f"  Validation samples: {len(val_dataset)}")
     print(f"  Mode: full_sequence (utilizing 3-layer LSTM for temporal modeling)")
     
+    print(f"\nComputing sample weights for balanced sampling...")
+    sample_weights = []
+    positive_count = 0
+    negative_count = 0
+    
+    for idx in range(len(train_dataset)):
+        has_cascade = train_dataset.get_cascade_label(idx)
+        
+        if has_cascade:
+            sample_weights.append(15.0)  # Increased from 10.0 to 15.0
+            positive_count += 1
+        else:
+            sample_weights.append(1.0)
+            negative_count += 1
+    
+    print(f"  Positive samples: {positive_count} ({positive_count/len(train_dataset)*100:.1f}%)")
+    print(f"  Negative samples: {negative_count} ({negative_count/len(train_dataset)*100:.1f}%)")
+    print(f"  Oversampling ratio: 15:1 (positive:negative)")  # Updated message
+    
+    if positive_count < 10:
+        print(f"\n[CRITICAL WARNING] Only {positive_count} cascade scenarios found!")
+        print(f"  The model needs at least 50-100 positive examples to learn effectively.")
+        print(f"  Please regenerate the dataset with the fixed multimodal_data_generator.py")
+        print(f"  which ensures 30% cascade rate and actual cascade propagation.")
+        response = input("\nContinue anyway? (y/n): ")
+        if response.lower() != 'y':
+            print("Exiting. Please regenerate the dataset first.")
+            exit(1)
+    
+    from torch.utils.data import WeightedRandomSampler
+    sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(train_dataset),
+        replacement=True
+    )
+    
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
-        shuffle=True,
-        num_workers=0,  # Single-process loading to avoid memory multiplication
-        pin_memory=False,  # Don't pin memory
-        collate_fn=collate_cascade_batch
+        sampler=sampler,
+        num_workers=2,  # Changed from 0 to 2 for parallel data loading
+        pin_memory=True,  # Changed from False to True for faster GPU transfer
+        collate_fn=collate_cascade_batch,
+        persistent_workers=True  # Keep workers alive between epochs
     )
     
     val_loader = DataLoader(
         val_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
-        num_workers=0,  # Single-process loading
-        pin_memory=False,  # Don't pin memory
-        collate_fn=collate_cascade_batch
+        num_workers=2,  # Changed from 0 to 2
+        pin_memory=True,  # Changed from False to True
+        collate_fn=collate_cascade_batch,
+        persistent_workers=True
     )
     
     # Initialize model
