@@ -58,13 +58,20 @@ class PhysicsInformedLoss(nn.Module):
     
     def focal_loss(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
-        Focal loss with label smoothing for handling severe class imbalance.
-        FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+        Focal loss with label smoothing and POS_WEIGHT for handling severe class imbalance.
+        FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t) * pos_weight
         """
         # Smooth labels: 0 -> epsilon, 1 -> 1-epsilon
         targets_smooth = targets * (1 - self.label_smoothing) + self.label_smoothing * 0.5
         
-        bce_loss = F.binary_cross_entropy_with_logits(logits, targets_smooth, reduction='none')
+        # pos_weight is applied to positive samples (failures) to increase their importance
+        pos_weight_tensor = torch.tensor([self.pos_weight], device=logits.device)
+        bce_loss = F.binary_cross_entropy_with_logits(
+            logits, 
+            targets_smooth, 
+            pos_weight=pos_weight_tensor,  # Now actually using pos_weight!
+            reduction='none'
+        )
         probs = torch.sigmoid(logits)
         
         # Use original targets (not smoothed) for focal weight computation
@@ -100,8 +107,6 @@ class PhysicsInformedLoss(nn.Module):
             total_loss: Scalar tensor
             loss_components: Dict of individual loss component values
         """
-        pos_weight_tensor = torch.tensor([self.pos_weight], device=predictions['failure_probability'].device)
-        
         # Model outputs [B, N, 1], targets are [B*N]
         failure_prob = predictions['failure_probability']  # [B, N, 1]
         B, N, _ = failure_prob.shape
@@ -250,7 +255,7 @@ class Trainer:
         train_loader: DataLoader,
         val_loader: DataLoader,
         device: torch.device,
-        learning_rate: float = 0.01,
+        learning_rate: float = 0.003,
         output_dir: str = "checkpoints",
         max_grad_norm: float = 5.0,
         use_amp: bool = False,
@@ -299,9 +304,9 @@ class Trainer:
         }
         
         self.criterion = PhysicsInformedLoss(
-            lambda_powerflow=0.0001,  # Reduced from 0.1 to prevent dominance
+            lambda_powerflow=0.03,  # Reduced from 0.1 to prevent dominance
             lambda_capacity=0.05,   # Reduced from 0.1
-            lambda_frequency=10000,  # Reduced from 0.1
+            lambda_frequency=0.05,  # Reduced from 0.1
             lambda_reactive=0.03,   # Reduced from 0.1 to prevent dominance
             pos_weight=40.0,  # Increased from 25.0 to 40.0 for stronger class balancing (93% negative samples)
             focal_alpha=0.25, 
@@ -313,7 +318,7 @@ class Trainer:
         self.start_epoch = 0
         self.best_val_loss = float('inf')
         
-        self.cascade_threshold = 0.5  # Increased from 0.2 to reduce false positives
+        self.cascade_threshold = 0.25  # Increased from 0.2 to reduce false positives
         self.node_threshold = 0.50     # Increased from 0.15 to 0.30 to drastically reduce 77% false positive rate
         self.best_val_f1 = 0.0
         
@@ -859,9 +864,9 @@ if __name__ == "__main__":
     OUTPUT_DIR = "checkpoints"
     BATCH_SIZE = 8  # Reduced from 8 to 4 for memory efficiency
     NUM_EPOCHS = 100
-    LEARNING_RATE = 0.0077  # Increased from 0.003 to 0.005 to address small gradients (0.0077)
+    LEARNING_RATE = 0.005  # Increased from 0.003 to 0.005 to address small gradients (0.0077)
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    MAX_GRAD_NORM = 15.0  # Increased from 5.0 to 10.0 to allow larger gradient updates
+    MAX_GRAD_NORM = 12.0  # Increased from 5.0 to 10.0 to allow larger gradient updates
     USE_AMP = torch.cuda.is_available()  # Use mixed precision if CUDA available
     MODEL_OUTPUTS_LOGITS = False
     
