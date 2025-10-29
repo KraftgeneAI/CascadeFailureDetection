@@ -100,8 +100,8 @@ python multimodal_data_generator.py
 **For quick testing**, modify the script to use smaller numbers:
 ```python
 generate_dataset(
-    num_normal=60,    # Instead of 600
-    num_cascade=6,    # Instead of 60
+    num_normal=6000,    # Instead of 12000
+    num_cascade=4000,    # Instead of 8000
     sequence_length=30  # Instead of 60
 )
 ```
