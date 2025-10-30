@@ -1,6 +1,7 @@
 """
 IMPROVED Memory-efficient dataset loader for pre-generated cascade failure data.
 Handles BOTH old flat array format AND new sequence format.
+WITH PHYSICS-INFORMED NORMALIZATION
 """
 
 import torch
@@ -22,9 +23,11 @@ class CascadeDataset(Dataset):
     - NEW FORMAT: Sequence of timestep dictionaries
     
     Automatically detects format and converts to model-expected format.
+    WITH PHYSICS-INFORMED NORMALIZATION for power, voltage, capacity, frequency.
     """
     
-    def __init__(self, batch_dir: str, mode: str = 'last_timestep', cache_size: int = 1):
+    def __init__(self, batch_dir: str, mode: str = 'last_timestep', cache_size: int = 1,
+                 base_mva: float = 100.0, base_frequency: float = 60.0):
         """
         Initialize dataset from pre-generated batch files.
         
@@ -32,13 +35,19 @@ class CascadeDataset(Dataset):
             batch_dir: Directory containing batch_*.pkl files
             mode: 'last_timestep' or 'full_sequence'
             cache_size: Number of batch files to keep in memory (default: 1 for memory efficiency)
+            base_mva: Base MVA for per-unit normalization (default: 100.0)
+            base_frequency: Base frequency in Hz for per-unit normalization (default: 60.0)
         """
         self.batch_dir = Path(batch_dir)
         self.mode = mode
         self.cache_size = cache_size
         
+        self.base_mva = base_mva
+        self.base_frequency = base_frequency
+        
         self._batch_cache = {}
         self._cache_order = []
+        
         
         # Find batch files
         self.batch_files = sorted(self.batch_dir.glob("batch_*.pkl"))
@@ -49,6 +58,7 @@ class CascadeDataset(Dataset):
             raise ValueError(f"No batch files found in {batch_dir}")
         
         print(f"Indexing scenarios from {len(self.batch_files)} batch files...")
+        print(f"Physics normalization: base_mva={base_mva}, base_frequency={base_frequency}")
         self.scenario_index = []
         self.cascade_labels = []
         
@@ -67,11 +77,9 @@ class CascadeDataset(Dataset):
                     scenario = batch_data[scenario_idx] if isinstance(batch_data, list) else batch_data
                     
                     if 'sequence' in scenario:
-                        # Valid if sequence is non-empty OR if metadata exists
                         if isinstance(scenario['sequence'], list):
                             has_metadata = 'metadata' in scenario and isinstance(scenario['metadata'], dict)
                             if len(scenario['sequence']) > 0 or has_metadata:
-                                # Valid scenario
                                 pass
                             else:
                                 skipped_invalid += 1
@@ -80,10 +88,8 @@ class CascadeDataset(Dataset):
                             skipped_invalid += 1
                             continue
                     elif 'node_features' in scenario:
-                        # OLD FORMAT - always valid
                         pass
                     else:
-                        # No recognizable format
                         skipped_invalid += 1
                         continue
                     
@@ -159,33 +165,22 @@ class CascadeDataset(Dataset):
             sequence = scenario['sequence']
             metadata = scenario['metadata']
             
-            # Case 1: Empty sequence with metadata - reconstruct from metadata
             if len(sequence) == 0 and 'failed_nodes' in metadata:
                 return self._process_metadata_format(scenario)
-            
-            # Case 2: Non-empty sequence - use sequence data
             elif len(sequence) > 0:
                 return self._process_sequence_format(scenario)
-            
-            # Case 3: Empty sequence without metadata - error
             else:
                 raise ValueError(f"Scenario has empty sequence and no metadata to reconstruct labels")
         
-        # Check for OLD FORMAT: flat arrays
         elif 'node_features' in scenario and 'node_failure' in scenario:
             return self._process_flat_array_format(scenario)
         
-        # Unknown format
         else:
             raise ValueError(f"Unknown scenario format. Keys: {scenario.keys()}. "
                            f"Expected 'sequence'+'metadata' (NEW FORMAT) or 'node_features'+'node_failure' (OLD FORMAT)")
     
     def _process_flat_array_format(self, scenario: Dict) -> Dict[str, Any]:
-        """
-        Process OLD FORMAT (flat arrays) and convert to model-expected format.
-        
-        This is the CRITICAL FIX for the zero-label issue!
-        """
+        """Process OLD FORMAT (flat arrays) and convert to model-expected format."""
         def to_tensor(data):
             if isinstance(data, torch.Tensor):
                 return data
@@ -204,48 +199,45 @@ class CascadeDataset(Dataset):
         else:
             raise ValueError("edge_index not found in scenario data")
         
-        # Extract all data arrays
-        node_features = to_tensor(scenario['node_features'])  # [T, N, 15]
+        node_features = to_tensor(scenario['node_features'])
         edge_features = to_tensor(scenario.get('edge_features', np.zeros((node_features.shape[0], edge_index.shape[1], 5))))
-        satellite_data = to_tensor(scenario['satellite_data'])  # [T, N, 12, 16, 16]
-        weather_data = to_tensor(scenario['weather_data'])  # [T, N, 10, 8]
-        visual_data = to_tensor(scenario['robotic_visual_data'])  # [T, N, 3, 32, 32]
-        thermal_data = to_tensor(scenario['robotic_thermal_data'])  # [T, N, 1, 32, 32]
-        sensor_data = to_tensor(scenario['robotic_sensor_data'])  # [T, N, 12]
-        node_failure = to_tensor(scenario['node_failure'])  # [T, N] - CRITICAL: This contains the labels!
+        satellite_data = to_tensor(scenario['satellite_data'])
+        weather_data = to_tensor(scenario['weather_data'])
+        visual_data = to_tensor(scenario['robotic_visual_data'])
+        thermal_data = to_tensor(scenario['robotic_thermal_data'])
+        sensor_data = to_tensor(scenario['robotic_sensor_data'])
+        node_failure = to_tensor(scenario['node_failure'])
         
         T, N, node_feat_dim = node_features.shape
         
-        # SCADA: voltages, angles, loading, generation, load, reactive_gen, reactive_load (7 features)
+        frequency_normalized = node_features[:, :, 4:5] / self.base_frequency
+        
         scada_data = torch.cat([
-            node_features[:, :, 0:3],  # voltages, angles, loading
-            node_features[:, :, 7:11],  # generation, load, reactive_generation, reactive_load
-        ], dim=2)  # [T, N, 7]
+            node_features[:, :, 0:3],
+            node_features[:, :, 7:11],
+        ], dim=2)
         
-        # PMU: voltages, angles, frequency (3 features)
         pmu_sequence = torch.cat([
-            node_features[:, :, 0:2],  # voltages, angles
-            node_features[:, :, 4:5],  # frequency
-        ], dim=2)  # [T, N, 3]
+            node_features[:, :, 0:2],
+            frequency_normalized,
+        ], dim=2)
         
-        # Equipment: temperatures, age, condition, thermal_capacity (4 features)
         equipment_status = torch.cat([
-            node_features[:, :, 3:4],  # temperatures
-            node_features[:, :, 5:7],  # equipment_age, equipment_condition
-            node_features[:, :, 11:12],  # thermal_capacity
-        ], dim=2)  # [T, N, 4]
+            node_features[:, :, 3:4],
+            node_features[:, :, 5:7],
+            node_features[:, :, 11:12],
+        ], dim=2)
         
-        weather_sequence = weather_data.reshape(T, N, -1)  # [T, N, 80]
+        weather_sequence = weather_data.reshape(T, N, -1)
         
         threat_indicators = torch.cat([
-            weather_data[:, :, 0:1, 0],  # temperature
-            weather_data[:, :, 1:2, 0],  # humidity
-            weather_data[:, :, 2:3, 0],  # wind speed
-            weather_data[:, :, 3:4, 0],  # precipitation
-            weather_data[:, :, 4:5, 0],  # storm indicator
-            weather_data[:, :, 5:6, 0],  # wildfire indicator
-            torch.zeros(T, N, 1, device=weather_data.device),  # placeholder
-        ], dim=2)  # [T, N, 7]
+            weather_data[:, :, 0:1, 0],
+            weather_data[:, :, 1:2, 0],
+            weather_data[:, :, 2:3, 0],
+            weather_data[:, :, 3:4, 0],
+            weather_data[:, :, 4:5, 0],
+            weather_data[:, :, 5:6, 0],
+        ], dim=2)
         
         if self.mode == 'last_timestep':
             return {
@@ -261,7 +253,7 @@ class CascadeDataset(Dataset):
                 'node_features': scada_data[-1],
                 'edge_index': edge_index,
                 'edge_attr': edge_features[-1],
-                'node_failure_labels': node_failure[-1],  # CRITICAL: Extract labels from last timestep
+                'node_failure_labels': node_failure[-1],
                 'cascade_timing': torch.zeros(N),
                 'graph_properties': self._extract_graph_properties_from_flat(scenario, -1)
             }
@@ -280,10 +272,10 @@ class CascadeDataset(Dataset):
                 'node_features': scada_data,
                 'edge_index': edge_index,
                 'edge_attr': edge_features[-1],
-                'node_failure_labels': node_failure[-1],  # CRITICAL: Extract labels from last timestep
+                'node_failure_labels': node_failure[-1],
                 'cascade_timing': torch.zeros(N),
                 'graph_properties': self._extract_graph_properties_from_flat(scenario, -1),
-                'temporal_sequence': scada_data,  # KEY FOR LSTM
+                'temporal_sequence': scada_data,
                 'sequence_length': T
             }
         
@@ -304,6 +296,13 @@ class CascadeDataset(Dataset):
             else:
                 return torch.tensor(data, dtype=torch.float32)
         
+        def normalize_pmu(pmu_data):
+            pmu_tensor = to_tensor(pmu_data)
+            if pmu_tensor.shape[-1] >= 3:
+                # Frequency is the 3rd column (index 2)
+                pmu_tensor[..., 2] = pmu_tensor[..., 2] / self.base_frequency
+            return pmu_tensor
+        
         if self.mode == 'last_timestep':
             last_step = sequence[-1]
             
@@ -315,7 +314,7 @@ class CascadeDataset(Dataset):
                 'visual_data': to_tensor(last_step['visual_data']),
                 'thermal_data': to_tensor(last_step['thermal_data']),
                 'sensor_data': to_tensor(last_step['sensor_data']),
-                'pmu_sequence': to_tensor(last_step['pmu_sequence']),
+                'pmu_sequence': normalize_pmu(last_step['pmu_sequence']),
                 'equipment_status': to_tensor(last_step['equipment_status']),
                 'node_features': to_tensor(last_step['scada_data']),
                 'edge_index': to_tensor(edge_index).long(),
@@ -333,7 +332,7 @@ class CascadeDataset(Dataset):
             visual_seq = torch.stack([to_tensor(step['visual_data']) for step in sequence])
             thermal_seq = torch.stack([to_tensor(step['thermal_data']) for step in sequence])
             sensor_seq = torch.stack([to_tensor(step['sensor_data']) for step in sequence])
-            pmu_seq = torch.stack([to_tensor(step['pmu_sequence']) for step in sequence])
+            pmu_seq = torch.stack([normalize_pmu(step['pmu_sequence']) for step in sequence])
             equipment_seq = torch.stack([to_tensor(step['equipment_status']) for step in sequence])
             edge_feat_seq = torch.stack([to_tensor(step['edge_attr']) for step in sequence])
             label_seq = torch.stack([to_tensor(step['node_labels']) for step in sequence])
@@ -362,10 +361,7 @@ class CascadeDataset(Dataset):
             raise ValueError(f"Unknown mode: {self.mode}")
     
     def _process_metadata_format(self, scenario: Dict) -> Dict[str, Any]:
-        """
-        Process NEW FORMAT with empty sequence but metadata containing failure information.
-        This reconstructs the labels from metadata['failed_nodes'] and metadata['failure_times'].
-        """
+        """Process NEW FORMAT with empty sequence but metadata containing failure information."""
         metadata = scenario['metadata']
         edge_index = scenario['edge_index']
         
@@ -377,37 +373,24 @@ class CascadeDataset(Dataset):
             else:
                 return torch.tensor(data, dtype=torch.float32)
         
-        # Extract basic info
         num_nodes = metadata.get('num_nodes', 118)
         num_edges = metadata.get('num_edges', edge_index.shape[1] if hasattr(edge_index, 'shape') else 686)
         
         node_failure_labels = np.zeros(num_nodes, dtype=np.float32)
         if 'failed_nodes' in metadata and len(metadata['failed_nodes']) > 0:
             failed_nodes = metadata['failed_nodes']
-            num_failed = 0
             for node_idx in failed_nodes:
-                # Convert to int, handling both int and float types
                 try:
                     node_idx_int = int(node_idx)
                     if 0 <= node_idx_int < num_nodes:
                         node_failure_labels[node_idx_int] = 1.0
-                        num_failed += 1
                 except (ValueError, TypeError):
-                    # Skip invalid node indices
                     continue
-            
-            # Debug output to verify label extraction
-            if num_failed > 0:
-                print(f"[DEBUG] Extracted {num_failed}/{num_nodes} failed nodes ({num_failed/num_nodes*100:.1f}%) from metadata")
-        else:
-            print(f"[DEBUG] No failed nodes in metadata - normal scenario")
         
         if self.mode == 'full_sequence':
-            # Reconstruct temporal sequence from failure_times
             failure_times = metadata.get('failure_times', [])
             num_timesteps = max(10, len(failure_times) + 5) if failure_times else 10
             
-            # Create temporal sequences with realistic progression
             scada_seq = []
             weather_seq = []
             threat_seq = []
@@ -419,29 +402,32 @@ class CascadeDataset(Dataset):
             sensor_seq = []
             
             for t in range(num_timesteps):
-                # Add small temporal variation to make sequences realistic
                 time_factor = t / num_timesteps
                 noise_scale = 0.05 * (1 + time_factor)
                 
                 scada_seq.append(np.random.randn(num_nodes, 7).astype(np.float32) * noise_scale)
                 weather_seq.append(np.random.randn(num_nodes, 80).astype(np.float32) * noise_scale)
-                threat_seq.append(np.random.randn(num_nodes, 7).astype(np.float32) * noise_scale)
-                pmu_seq.append(np.random.randn(num_nodes, 3).astype(np.float32) * noise_scale)
+                threat_seq.append(np.random.randn(num_nodes, 6).astype(np.float32) * noise_scale)
+                
+                pmu_data = np.random.randn(num_nodes, 3).astype(np.float32) * noise_scale
+                pmu_data[:, 2] = 1.0 + np.random.randn(num_nodes).astype(np.float32) * 0.01  # Frequency ~1.0 p.u.
+                pmu_seq.append(pmu_data)
+                
                 equipment_seq.append(np.random.randn(num_nodes, 4).astype(np.float32) * noise_scale)
                 satellite_seq.append(np.random.randn(num_nodes, 12, 16, 16).astype(np.float32) * noise_scale)
                 visual_seq.append(np.random.randn(num_nodes, 3, 32, 32).astype(np.float32) * noise_scale)
                 thermal_seq.append(np.random.randn(num_nodes, 1, 32, 32).astype(np.float32) * noise_scale)
                 sensor_seq.append(np.random.randn(num_nodes, 12).astype(np.float32) * noise_scale)
             
-            scada_data = to_tensor(np.stack(scada_seq))  # [T, N, 7]
-            weather_sequence = to_tensor(np.stack(weather_seq))  # [T, N, 80]
-            threat_indicators = to_tensor(np.stack(threat_seq))  # [T, N, 7]
-            pmu_sequence = to_tensor(np.stack(pmu_seq))  # [T, N, 3]
-            equipment_status = to_tensor(np.stack(equipment_seq))  # [T, N, 4]
-            satellite_data = to_tensor(np.stack(satellite_seq))  # [T, N, 12, 16, 16]
-            visual_data = to_tensor(np.stack(visual_seq))  # [T, N, 3, 32, 32]
-            thermal_data = to_tensor(np.stack(thermal_seq))  # [T, N, 1, 32, 32]
-            sensor_data = to_tensor(np.stack(sensor_seq))  # [T, N, 12]
+            scada_data = to_tensor(np.stack(scada_seq))
+            weather_sequence = to_tensor(np.stack(weather_seq))
+            threat_indicators = to_tensor(np.stack(threat_seq))
+            pmu_sequence = to_tensor(np.stack(pmu_seq))
+            equipment_status = to_tensor(np.stack(equipment_seq))
+            satellite_data = to_tensor(np.stack(satellite_seq))
+            visual_data = to_tensor(np.stack(visual_seq))
+            thermal_data = to_tensor(np.stack(thermal_seq))
+            sensor_data = to_tensor(np.stack(sensor_seq))
             edge_attr = to_tensor(np.random.randn(num_edges, 5).astype(np.float32) * 0.1)
             
             return {
@@ -460,16 +446,18 @@ class CascadeDataset(Dataset):
                 'node_failure_labels': to_tensor(node_failure_labels),
                 'cascade_timing': torch.zeros(num_nodes),
                 'graph_properties': self._extract_graph_properties_from_metadata(metadata, num_edges),
-                'temporal_sequence': scada_data,  # KEY: Enable LSTM utilization
-                'sequence_length': num_timesteps  # KEY: Enable LSTM utilization
+                'temporal_sequence': scada_data,
+                'sequence_length': num_timesteps
             }
         
-        else:  # last_timestep mode
-            # Single timestep data (original behavior)
+        else:
             scada_data = np.random.randn(num_nodes, 7).astype(np.float32) * 0.1
             weather_sequence = np.random.randn(num_nodes, 80).astype(np.float32) * 0.1
-            threat_indicators = np.random.randn(num_nodes, 7).astype(np.float32) * 0.1
+            threat_indicators = np.random.randn(num_nodes, 6).astype(np.float32) * 0.1
+            
             pmu_sequence = np.random.randn(num_nodes, 3).astype(np.float32) * 0.1
+            pmu_sequence[:, 2] = 1.0 + np.random.randn(num_nodes).astype(np.float32) * 0.01
+            
             equipment_status = np.random.randn(num_nodes, 4).astype(np.float32) * 0.1
             satellite_data = np.random.randn(num_nodes, 12, 16, 16).astype(np.float32) * 0.1
             visual_data = np.random.randn(num_nodes, 3, 32, 32).astype(np.float32) * 0.1
@@ -496,7 +484,7 @@ class CascadeDataset(Dataset):
             }
     
     def _extract_graph_properties_from_flat(self, scenario: Dict, timestep_idx: int) -> Dict[str, torch.Tensor]:
-        """Extract graph properties from flat array format."""
+        """Extract graph properties from flat array format WITH NORMALIZATION."""
         graph_props = {}
         
         if 'edge_features' in scenario:
@@ -507,7 +495,9 @@ class CascadeDataset(Dataset):
             if edge_features.shape[2] >= 5:
                 graph_props['conductance'] = torch.from_numpy(edge_features[timestep_idx, :, 4]).float()
                 graph_props['susceptance'] = torch.from_numpy(edge_features[timestep_idx, :, 3]).float()
-                graph_props['thermal_limits'] = torch.from_numpy(edge_features[timestep_idx, :, 1]).float()
+                
+                thermal_limits_raw = torch.from_numpy(edge_features[timestep_idx, :, 1]).float()
+                graph_props['thermal_limits'] = thermal_limits_raw / self.base_mva
         
         if 'node_features' in scenario:
             node_features = scenario['node_features']
@@ -516,12 +506,14 @@ class CascadeDataset(Dataset):
             
             generation = node_features[timestep_idx, :, 7]
             load = node_features[timestep_idx, :, 8]
-            graph_props['power_injection'] = torch.from_numpy(generation - load).float()
+            
+            power_injection_raw = torch.from_numpy(generation - load).float()
+            graph_props['power_injection'] = power_injection_raw / self.base_mva
         
         return graph_props
     
     def _extract_graph_properties(self, timestep_data: Dict, metadata: Dict) -> Dict[str, torch.Tensor]:
-        """Extract graph properties for physics-informed loss."""
+        """Extract graph properties for physics-informed loss WITH NORMALIZATION."""
         graph_props = {}
         
         if 'conductance' in timestep_data:
@@ -531,17 +523,20 @@ class CascadeDataset(Dataset):
             graph_props['susceptance'] = torch.from_numpy(timestep_data['susceptance']).float()
         
         if 'thermal_limits' in timestep_data:
-            graph_props['thermal_limits'] = torch.from_numpy(timestep_data['thermal_limits']).float()
+            thermal_limits_raw = torch.from_numpy(timestep_data['thermal_limits']).float()
+            graph_props['thermal_limits'] = thermal_limits_raw / self.base_mva
         
         if 'power_injection' in timestep_data:
-            graph_props['power_injection'] = torch.from_numpy(timestep_data['power_injection']).float()
+            power_injection_raw = torch.from_numpy(timestep_data['power_injection']).float()
+            graph_props['power_injection'] = power_injection_raw / self.base_mva
         
         if 'power_injection' not in graph_props:
             scada = timestep_data.get('scada_data', None)
             if scada is not None and scada.shape[1] >= 6:
                 generation = scada[:, 2]
                 load = scada[:, 4]
-                graph_props['power_injection'] = generation - load
+                power_injection_raw = generation - load
+                graph_props['power_injection'] = power_injection_raw / self.base_mva
         
         if 'conductance' not in graph_props or 'susceptance' not in graph_props:
             edge_attr = timestep_data.get('edge_attr', None)
@@ -558,7 +553,8 @@ class CascadeDataset(Dataset):
         if 'thermal_limits' not in graph_props:
             edge_attr = timestep_data.get('edge_attr', None)
             if edge_attr is not None and edge_attr.shape[1] >= 2:
-                graph_props['thermal_limits'] = edge_attr[:, 1]
+                thermal_limits_raw = edge_attr[:, 1]
+                graph_props['thermal_limits'] = thermal_limits_raw / self.base_mva
         
         if 'base_mva' in metadata:
             graph_props['base_mva'] = torch.tensor(metadata['base_mva'])
@@ -566,35 +562,26 @@ class CascadeDataset(Dataset):
         return graph_props
     
     def _extract_graph_properties_from_metadata(self, metadata: Dict, num_edges: int) -> Dict[str, torch.Tensor]:
-        """Extract graph properties from metadata when sequence is empty."""
+        """Extract graph properties from metadata when sequence is empty WITH NORMALIZATION."""
         graph_props = {}
         
-        # Use default values since we don't have actual data
         num_nodes = metadata.get('num_nodes', 118)
         
-        # Realistic thermal limits: 10-50 MW (not 100.0)
-        # IEEE 118-bus system has lines with varying capacities
         thermal_limits_base = torch.rand(num_edges) * 40.0 + 10.0  # [10, 50] MW
-        graph_props['thermal_limits'] = thermal_limits_base
+        graph_props['thermal_limits'] = thermal_limits_base / self.base_mva  # Convert to per-unit
         
-        # Realistic conductance and susceptance based on line impedance
-        # Typical values for transmission lines: X/R ratio ~ 5-10
-        reactance = torch.rand(num_edges) * 0.3 + 0.05  # [0.05, 0.35] p.u.
-        resistance = reactance * 0.1  # R = X/10
+        reactance = torch.rand(num_edges) * 0.3 + 0.05
+        resistance = reactance * 0.1
         impedance_sq = resistance**2 + reactance**2
         graph_props['conductance'] = resistance / impedance_sq
         graph_props['susceptance'] = -reactance / impedance_sq
         
-        # Realistic power injection based on cascade state
         is_cascade = metadata.get('is_cascade', False)
         failed_nodes = metadata.get('failed_nodes', [])
         
         if is_cascade and len(failed_nodes) > 0:
-            # During cascade: significant power imbalance
-            # Failed generators lose generation, failed loads lose consumption
-            power_injection = torch.randn(num_nodes) * 50.0  # Large imbalance during cascade
+            power_injection = torch.randn(num_nodes) * 50.0
             
-            # Mark failed nodes with zero injection (they're offline)
             for node_idx in failed_nodes:
                 try:
                     node_idx_int = int(node_idx)
@@ -603,12 +590,10 @@ class CascadeDataset(Dataset):
                 except (ValueError, TypeError):
                     continue
         else:
-            # Normal operation: small power imbalance (near balanced)
-            power_injection = torch.randn(num_nodes) * 5.0  # Small imbalance in normal state
+            power_injection = torch.randn(num_nodes) * 5.0
         
-        graph_props['power_injection'] = power_injection
+        graph_props['power_injection'] = power_injection / self.base_mva
         
-        # Reactive power injection (similar pattern)
         if is_cascade and len(failed_nodes) > 0:
             reactive_injection = torch.randn(num_nodes) * 30.0
             for node_idx in failed_nodes:
@@ -621,7 +606,7 @@ class CascadeDataset(Dataset):
         else:
             reactive_injection = torch.randn(num_nodes) * 3.0
         
-        graph_props['reactive_injection'] = reactive_injection
+        graph_props['reactive_injection'] = reactive_injection / self.base_mva
         
         if 'base_mva' in metadata:
             graph_props['base_mva'] = torch.tensor(metadata['base_mva'])
@@ -658,11 +643,9 @@ def collate_cascade_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor
             items = [item[key] for item in batch]
             max_len = max(item.shape[0] for item in items)
             
-            # Pad each sequence to max_len
             padded_items = []
             for item in items:
                 if item.shape[0] < max_len:
-                    # Pad with zeros at the end
                     pad_size = max_len - item.shape[0]
                     padding = torch.zeros(pad_size, *item.shape[1:], dtype=item.dtype, device=item.device)
                     padded_item = torch.cat([item, padding], dim=0)
@@ -703,10 +686,8 @@ def collate_cascade_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor
             if items[0].dim() >= 3 and key in ['satellite_data', 'visual_data', 'thermal_data', 
                                                  'scada_data', 'weather_sequence', 'threat_indicators',
                                                  'equipment_status', 'pmu_sequence', 'sensor_data', 'node_features']:
-                # Check if first dimension varies (temporal dimension)
                 first_dims = [item.shape[0] for item in items]
                 if len(set(first_dims)) > 1:
-                    # Variable length - pad to max
                     max_len = max(first_dims)
                     padded_items = []
                     for item in items:
@@ -719,7 +700,6 @@ def collate_cascade_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor
                         padded_items.append(padded_item)
                     batch_dict[key] = torch.stack(padded_items, dim=0)
                 else:
-                    # Same length - stack normally
                     batch_dict[key] = torch.stack(items, dim=0)
             
             elif items[0].dim() >= 2 and key in ['scada_data', 'weather_sequence', 'threat_indicators', 

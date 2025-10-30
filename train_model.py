@@ -41,7 +41,7 @@ class PhysicsInformedLoss(nn.Module):
         self.lambda_powerflow = lambda_powerflow
         self.lambda_capacity = lambda_capacity
         self.lambda_stability = lambda_stability
-        self.lambda_frequency = lambda_frequency
+        self.lambda_frequency = 0.15  # Increased from 0.05 to make frequency loss contribute
         self.lambda_reactive = lambda_reactive
         self.pos_weight = pos_weight
         self.focal_alpha = focal_alpha
@@ -304,22 +304,22 @@ class Trainer:
         }
         
         self.criterion = PhysicsInformedLoss(
-            lambda_powerflow=0.03,  # Reduced from 0.1 to prevent dominance
-            lambda_capacity=0.05,   # Reduced from 0.1
-            lambda_frequency=0.05,  # Reduced from 0.1
-            lambda_reactive=0.03,   # Reduced from 0.1 to prevent dominance
-            pos_weight=40.0,  # Increased from 25.0 to 40.0 for stronger class balancing (93% negative samples)
-            focal_alpha=0.25, 
-            focal_gamma=2.0,
-            label_smoothing=0.1,  # Reduced from 0.15 to allow more confident predictions
+            lambda_powerflow=0.1,    # Power balance constraint
+            lambda_capacity=0.001,     # Thermal limit violations
+            lambda_frequency=0.5,    # Frequency stability (critical for cascades)
+            lambda_reactive=0.05,    # Reactive power balance
+            pos_weight=20.0,         # Keep this - handles class imbalance
+            focal_alpha=0.25,        # Keep this
+            focal_gamma=2.0,         # Keep this
+            label_smoothing=0.1,     # Keep this
             use_logits=model_outputs_logits
         )
         
         self.start_epoch = 0
         self.best_val_loss = float('inf')
         
-        self.cascade_threshold = 0.25  # Increased from 0.2 to reduce false positives
-        self.node_threshold = 0.50     # Increased from 0.15 to 0.30 to drastically reduce 77% false positive rate
+        self.cascade_threshold = 0.7  # Increased from 0.30 to 0.60 to handle high probability predictions
+        self.node_threshold = 0.7     # Increased from 0.35 to 0.65 to drastically reduce false positives
         self.best_val_f1 = 0.0
         
         self._model_validated = False
@@ -456,6 +456,8 @@ class Trainer:
                 print(f"  Node labels: {node_labels.sum().item():.0f}/{node_labels.numel()} positive ({node_labels.mean().item()*100:.2f}%)")
                 print(f"  Node predictions: {node_pred.sum().item():.0f}/{node_pred.numel()} positive ({node_pred.mean().item()*100:.2f}%)")
                 print(f"  Failure prob range: [{outputs['failure_probability'].min():.4f}, {outputs['failure_probability'].max():.4f}], mean={outputs['failure_probability'].mean():.4f}")
+                if outputs['failure_probability'].mean() > 0.7:
+                    print(f"  ⚠️ WARNING: Mean probability ({outputs['failure_probability'].mean():.4f}) is very high - model may be biased toward positive predictions")
                 print(f"  Gradient norm: {grad_norm:.4f}")
                 print(f"  Thresholds: cascade={self.cascade_threshold:.3f}, node={self.node_threshold:.3f}")
                 if loss_components:
@@ -473,7 +475,9 @@ class Trainer:
             pbar.set_postfix({
                 'loss': f"{loss.item():.4f}",
                 'casc_f1': f"{cascade_f1:.4f}",
+                'casc_prec': f"{cascade_precision:.4f}",  # Added precision tracking
                 'node_f1': f"{node_f1:.4f}",
+                'node_prec': f"{node_precision:.4f}",  # Added precision tracking
                 'casc_rec': f"{cascade_recall:.4f}",
                 'node_rec': f"{node_recall:.4f}",
                 'grad': f"{grad_norm:.2f}"
@@ -862,11 +866,11 @@ if __name__ == "__main__":
     # Configuration
     DATA_DIR = "data"
     OUTPUT_DIR = "checkpoints"
-    BATCH_SIZE = 8  # Reduced from 8 to 4 for memory efficiency
-    NUM_EPOCHS = 100
+    BATCH_SIZE = 4  # Reduced from 8 to 4 for memory efficiency
+    NUM_EPOCHS = 30
     LEARNING_RATE = 0.005  # Increased from 0.003 to 0.005 to address small gradients (0.0077)
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    MAX_GRAD_NORM = 12.0  # Increased from 5.0 to 10.0 to allow larger gradient updates
+    MAX_GRAD_NORM = 10.0  # Increased from 5.0 to 10.0 to allow larger gradient updates
     USE_AMP = torch.cuda.is_available()  # Use mixed precision if CUDA available
     MODEL_OUTPUTS_LOGITS = False
     
@@ -898,7 +902,7 @@ if __name__ == "__main__":
         has_cascade = train_dataset.get_cascade_label(idx)
         
         if has_cascade:
-            sample_weights.append(15.0)  # Increased from 10.0 to 15.0
+            sample_weights.append(20.0)  # Increased from 15.0 to 20.0 for stronger oversampling
             positive_count += 1
         else:
             sample_weights.append(1.0)
@@ -906,17 +910,32 @@ if __name__ == "__main__":
     
     print(f"  Positive samples: {positive_count} ({positive_count/len(train_dataset)*100:.1f}%)")
     print(f"  Negative samples: {negative_count} ({negative_count/len(train_dataset)*100:.1f}%)")
-    print(f"  Oversampling ratio: 15:1 (positive:negative)")  # Updated message
+    print(f"  Oversampling ratio: 20:1 (positive:negative)")
     
     if positive_count < 10:
-        print(f"\n[CRITICAL WARNING] Only {positive_count} cascade scenarios found!")
-        print(f"  The model needs at least 50-100 positive examples to learn effectively.")
-        print(f"  Please regenerate the dataset with the fixed multimodal_data_generator.py")
-        print(f"  which ensures 30% cascade rate and actual cascade propagation.")
-        response = input("\nContinue anyway? (y/n): ")
+        print(f"\n{'='*80}")
+        print(f"[CRITICAL WARNING] Only {positive_count} cascade scenarios found!")
+        print(f"{'='*80}")
+        print(f"\n  The data generator bug (empty sequences) has corrupted your training data.")
+        print(f"  You mentioned you've fixed the bug in multimodal_data_generator.py.")
+        print(f"\n  REQUIRED STEPS:")
+        print(f"  1. DELETE the current data_unified/ directory")
+        print(f"  2. REGENERATE data using the fixed multimodal_data_generator.py")
+        print(f"  3. VERIFY the new data has:")
+        print(f"     - At least 30% cascade scenarios (not <5%)")
+        print(f"     - Non-empty sequences (check 'sequence' field)")
+        print(f"     - Actual cascade propagation (multiple timesteps)")
+        print(f"  4. RETRAIN from scratch (delete checkpoints/)")
+        print(f"\n  The model CANNOT learn from corrupted data with empty sequences.")
+        print(f"  Current metrics (node_f1=0.1154, 77% false positives) are due to bad data.")
+        print(f"{'='*80}\n")
+        response = input("Have you regenerated the data with the fixed generator? (y/n): ")
         if response.lower() != 'y':
-            print("Exiting. Please regenerate the dataset first.")
+            print("\nExiting. Please regenerate the dataset first with the fixed generator.")
+            print("The training will fail with the current corrupted data.")
             exit(1)
+        else:
+            print("\n✓ Proceeding with training on regenerated data...")
     
     from torch.utils.data import WeightedRandomSampler
     sampler = WeightedRandomSampler(

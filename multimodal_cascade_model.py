@@ -34,7 +34,7 @@ class EnvironmentalEmbedding(nn.Module):
     """Embedding network for environmental data (φ_env)."""
     
     def __init__(self, satellite_channels: int = 12, weather_features: int = 80,
-                 threat_features: int = 7, embedding_dim: int = 128):
+                 threat_features: int = 6, embedding_dim: int = 128):
         super(EnvironmentalEmbedding, self).__init__()
         
         # Satellite imagery CNN
@@ -56,7 +56,7 @@ class EnvironmentalEmbedding(nn.Module):
         self.threat_encoder = nn.Sequential(
             nn.Linear(threat_features, 32),
             nn.ReLU(),
-            nn.Dropout(0.3),  # Added dropout
+            nn.Dropout(0.3),
             nn.Linear(32, 32)
         )
         
@@ -64,7 +64,7 @@ class EnvironmentalEmbedding(nn.Module):
         self.fusion = nn.Sequential(
             nn.Linear(32 + 32 + 32, embedding_dim),
             nn.ReLU(),
-            nn.Dropout(0.3),  # Added dropout
+            nn.Dropout(0.3),
             nn.LayerNorm(embedding_dim)
         )
     
@@ -84,8 +84,14 @@ class EnvironmentalEmbedding(nn.Module):
                 sat_features_list.append(sat_feat)
             sat_features = torch.stack(sat_features_list, dim=1)  # [B, T, N, 32]
             
-            # weather_sequence: [B, T, N, 80] -> reshape to [B*N, T, 80] for LSTM
-            weather_reshaped = weather_sequence.permute(0, 2, 1, 3).reshape(B * N, T, 80)  # [B*N, T, 80]
+            # weather_sequence can be [B, T, N, 80] (expected) or [B, T, N, H, W] (5D from data generator)
+            if weather_sequence.dim() == 5:
+                # 5D input: [B, T, N, H, W] -> flatten spatial dimensions to [B, T, N, H*W]
+                B_w, T_w, N_w, H_w, W_w = weather_sequence.shape
+                weather_sequence = weather_sequence.reshape(B_w, T_w, N_w, H_w * W_w)
+            
+            # Now weather_sequence is guaranteed to be [B, T, N, features]
+            weather_reshaped = weather_sequence.permute(0, 2, 1, 3).reshape(B * N, T, -1)  # [B*N, T, features]
             weather_output, _ = self.weather_lstm(weather_reshaped)  # [B*N, T, 32]
             weather_features = weather_output.reshape(B, N, T, 32).permute(0, 2, 1, 3)  # [B, T, N, 32]
             
@@ -106,8 +112,14 @@ class EnvironmentalEmbedding(nn.Module):
             sat_flat = satellite_data.reshape(B * N, *satellite_data.shape[2:])
             sat_features = self.satellite_cnn(sat_flat).reshape(B, N, 32)
             
-            # weather_sequence: [B, N, 80] -> reshape to [B*N, 1, 80] for LSTM
-            weather_flat = weather_sequence.reshape(B * N, 1, 80)  # [B*N, 1, 80]
+            # weather_sequence can be [B, N, 80] (expected) or [B, N, H, W] (4D from data generator)
+            if weather_sequence.dim() == 4:
+                # 4D input: [B, N, H, W] -> flatten spatial dimensions to [B, N, H*W]
+                B_w, N_w, H_w, W_w = weather_sequence.shape
+                weather_sequence = weather_sequence.reshape(B_w, N_w, H_w * W_w)
+            
+            # weather_sequence: [B, N, features] -> reshape to [B*N, 1, features] for LSTM
+            weather_flat = weather_sequence.reshape(B * N, 1, -1)  # [B*N, 1, features]
             weather_output, _ = self.weather_lstm(weather_flat)  # [B*N, 1, 32]
             weather_features = weather_output.squeeze(1).reshape(B, N, 32)  # [B, N, 32]
             
@@ -122,34 +134,34 @@ class EnvironmentalEmbedding(nn.Module):
 class InfrastructureEmbedding(nn.Module):
     """Embedding network for infrastructure data (φ_infra)."""
     
-    def __init__(self, scada_features: int = 7, pmu_features: int = 3,
-                 equipment_features: int = 4, embedding_dim: int = 128):
+    def __init__(self, scada_features: int = 15, pmu_features: int = 8,  # Changed from 3 to 8 to match actual PMU data
+                 equipment_features: int = 10, embedding_dim: int = 128):  # Changed from 4 to 10 to match actual equipment data
         super(InfrastructureEmbedding, self).__init__()
         
         self.scada_encoder = nn.Sequential(
-            nn.Linear(scada_features, 64),
+            nn.Linear(scada_features, 64),  # Now accepts 15 features
             nn.ReLU(),
-            nn.Dropout(0.3),  # Added dropout
+            nn.Dropout(0.3),
             nn.Linear(64, 64)
         )
         
         self.pmu_projection = nn.Sequential(
-            nn.Linear(pmu_features, 32),
+            nn.Linear(pmu_features, 32),  # Now accepts 8 PMU features instead of 3
             nn.ReLU(),
-            nn.Dropout(0.3),  # Added dropout
+            nn.Dropout(0.3),
             nn.Linear(32, 32)
         )
         
         self.equipment_encoder = nn.Sequential(
-            nn.Linear(equipment_features, 32),
+            nn.Linear(equipment_features, 32),  # Now accepts 10 equipment features instead of 4
             nn.ReLU(),
-            nn.Dropout(0.3)  # Added dropout
+            nn.Dropout(0.3)
         )
         
         self.fusion = nn.Sequential(
             nn.Linear(64 + 32 + 32, embedding_dim),
             nn.ReLU(),
-            nn.Dropout(0.3),  # Added dropout
+            nn.Dropout(0.3),
             nn.LayerNorm(embedding_dim)
         )
     
