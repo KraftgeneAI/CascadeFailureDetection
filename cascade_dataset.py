@@ -1,15 +1,9 @@
 """
-IMPROVED Memory-efficient dataset loader for pre-generated cascade failure data.
+Memory-efficient dataset loader for pre-generated cascade failure/normal data.
 Handles BOTH old flat array format AND new sequence format.
 
-WITH PHYSICS-INFORMED NORMALIZATION
-====================================
-CRITICAL FIX:
-- Added base_mva and base_frequency to __init__.
-- Added _normalize_power and _normalize_frequency methods.
-- Modified _process_sequence_format to apply normalization to SCADA, PMU,
-  and edge_attr data before stacking. This fixes the fatal
-  "training-serving skew" bug.
+Author: Kraftgene AI Inc. (R&D)
+Date: October 2025
 """
 
 import torch

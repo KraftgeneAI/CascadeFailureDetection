@@ -1,22 +1,6 @@
 """
 Cascade Failure Prediction Model Inference Script 
 ============================================================
-Improved version with proper normalization, temporal processing, 
-and alignment with the trained model's capabilities.
-
-Key improvements:
-- [FIX] Correctly loads edge_index from topology file (converts numpy to tensor).
-- [FIX] Correctly infers num_nodes from topology file's adjacency_matrix shape.
-- [CRITICAL] Implements full temporal sequence processing, enabling the model's LSTM 
-  architecture as described in the paper [cite: 327, 331-335].
-- [CRITICAL] Loads the dynamic 'cascade_threshold' and 'node_threshold' from the
-  saved model checkpoint instead of using hardcoded values.
-- [FIX] Uses the correct 'node_threshold' for identifying high-risk nodes.
-- [CLEANUP] Removed redundant 'graph_properties' logic not used by the model during inference.
-- Applies same normalization as dataset loader (power, frequency, capacity)
-- Denormalizes outputs to physical units for interpretability
-- Full alignment with paper requirements
-
 Author: Kraftgene AI Inc.
 Date: October 2025
 """

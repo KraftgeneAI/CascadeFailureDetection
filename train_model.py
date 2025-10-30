@@ -1,14 +1,8 @@
 """
-IMPROVED Training Script for Cascade Prediction Model
+Training Script for Cascade Prediction Model
 ======================================================
-Fixes:
-1. Replaces the incorrect, heuristic-based PhysicsInformedLoss.
-2. Merges the correct, physics-based loss calculations (power flow, capacity, voltage)
-   from multimodal_cascade_model.py.
-3. Retains the essential Focal Loss and pos_weight for class imbalance.
-4. Retains the heuristic-based frequency loss, as the physics-based one
-   was incompatible with the data structure.
-5. Cleans up imports and structure.
+Author: Kraftgene AI Inc. (R&D)
+Date: October 2025
 """
 
 import torch
