@@ -50,7 +50,7 @@ class EnvironmentalEmbedding(nn.Module):
         )
         
         # Weather temporal processing
-        self.weather_lstm = nn.LSTM(weather_features, 32, num_layers=1, batch_first=True, dropout=0.3)  # Increased dropout
+        self.weather_lstm = nn.LSTM(weather_features, 32, num_layers=2, batch_first=True, dropout=0.3)
         
         # Threat encoder
         self.threat_encoder = nn.Sequential(
