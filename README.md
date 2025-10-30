@@ -139,7 +139,7 @@ The system uses a unified architecture combining:
 
 ## License
 
-This project is licensed under Mixed License.
+This project is licensed under dual License.
 
 ## Contributing
 
