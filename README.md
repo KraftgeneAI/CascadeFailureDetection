@@ -1,6 +1,6 @@
 # AI-Driven Predictive Cascade Failure Analysis
 
-A deep learning framework for predicting cascading failures in electrical power grids 15-35 minutes before they occur. This system employs a multi-modal Graph Neural Network (GNN) that fuses infrastructure data, environmental data, and robotic sensor data to build a holistic view of the grid.
+We present a Graph Neural Network (GNN) architecture for predictive cascade failure analysis in electrical power grids, capable of forecasting events 15–35 minutes prior to occurrence. This system achieves a holistic view by fusing multi-modal environmental and infrastructure data. This specific implementation focuses on validating the core GNN and its physics-informed learning (PIL) constraints, serving as a robust proof-of-concept for the full production-scale data integration pipeline developed in our research.
 
 ## Overview
 
