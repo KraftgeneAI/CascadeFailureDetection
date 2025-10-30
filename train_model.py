@@ -41,7 +41,7 @@ class PhysicsInformedLoss(nn.Module):
         self.lambda_powerflow = lambda_powerflow
         self.lambda_capacity = lambda_capacity
         self.lambda_stability = lambda_stability
-        self.lambda_frequency = 0.15  # Increased from 0.05 to make frequency loss contribute
+        self.lambda_frequency = lambda_frequency  # This will be set by the Trainer
         self.lambda_reactive = lambda_reactive
         self.pos_weight = pos_weight
         self.focal_alpha = focal_alpha
@@ -53,7 +53,7 @@ class PhysicsInformedLoss(nn.Module):
         
         self.power_base = 100.0
         self.freq_nominal = 60.0
-        self.voltage_nominal = 1.0
+        self.voltage_nominal = 10
         self.reactive_base = 100.0
     
     def focal_loss(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
@@ -132,15 +132,10 @@ class PhysicsInformedLoss(nn.Module):
         # Reshape targets back to [B, N] to detect cascades per sample
         targets_reshaped = targets_flat.reshape(B, N)
         has_cascade = (targets_reshaped.sum(dim=1) > 0).float()  # [B] - 1.0 if cascade, 0.0 if normal
-        cascade_ratio = has_cascade.mean().item()  # Fraction of batch with cascades
         
         if graph_properties and len(graph_properties) > 0:
             if 'voltages' in predictions and 'conductance' in graph_properties:
                 predicted_voltages = predictions['voltages']  # [B, N, 1]
-                
-                # During cascades, voltages should DROP (0.85-0.95 p.u.)
-                # During normal operation, voltages should be near 1.0 p.u.
-                # Penalize the model for predicting stable voltages during cascades
                 
                 # Expand has_cascade to match voltage shape: [B] -> [B, N, 1]
                 has_cascade_expanded = has_cascade.view(B, 1, 1).expand_as(predicted_voltages)
@@ -151,7 +146,9 @@ class PhysicsInformedLoss(nn.Module):
                 
                 # Penalize deviation from expected voltage
                 L_voltage = torch.mean((predicted_voltages - expected_voltage) ** 2)
-                total_loss += self.lambda_powerflow * L_voltage
+                
+                # --- This is the fix you correctly identified ---
+                total_loss += self.lambda_stability * L_voltage
                 loss_components['voltage'] = L_voltage.item()
             elif 'voltages' not in predictions and 'voltage' not in self._warned_missing_outputs:
                 print("\n[WARNING] Model does not output 'voltages' - voltage physics constraint disabled")
@@ -191,9 +188,6 @@ class PhysicsInformedLoss(nn.Module):
                     elif thermal_limits.shape != predicted_flows.shape:
                         thermal_limits = thermal_limits.expand_as(predicted_flows)
                 
-                # During cascades, line flows SHOULD violate limits (overloading)
-                # Penalize the model for predicting low flows during cascades
-                
                 # Expand has_cascade to match flow shape: [B] -> [B, E]
                 E = predicted_flows.shape[1]
                 has_cascade_expanded = has_cascade.view(B, 1).expand(B, E)
@@ -205,8 +199,6 @@ class PhysicsInformedLoss(nn.Module):
                 
                 # Penalize deviation from expected flows
                 flow_deviation = torch.abs(predicted_flows) - expected_flows
-                # Only penalize if predicted flows are LOWER than expected during cascades
-                # or HIGHER than expected during normal operation
                 violations = F.relu(flow_deviation * (2 * has_cascade_expanded - 1))
                 violations_pu = violations / (thermal_limits + 1e-6)
                 L_capacity = torch.mean(violations_pu ** 2)
@@ -224,9 +216,6 @@ class PhysicsInformedLoss(nn.Module):
                     predicted_freq_pu = predicted_freq / self.freq_nominal
                 else:
                     predicted_freq_pu = predicted_freq
-                
-                # During cascades, frequency should DEVIATE (0.98-1.02 p.u.)
-                # During normal, frequency should be near 1.0 p.u.
                 
                 # Expand has_cascade to match frequency shape
                 has_cascade_expanded = has_cascade.view(B, 1, 1).expand_as(predicted_freq_pu)
@@ -276,11 +265,13 @@ class Trainer:
         self.output_dir = output_dir
         self.max_grad_norm = max_grad_norm
         self.use_amp = use_amp
+        self.model_outputs_logits = model_outputs_logits  # Store this
         
         self.scaler = torch.cuda.amp.GradScaler() if use_amp else None
         
         os.makedirs(output_dir, exist_ok=True)
         
+        # --- FIX: Initialize ALL history keys ---
         self.history = {
             'train_loss': [],
             'val_loss': [],
@@ -302,27 +293,143 @@ class Trainer:
             'val_node_recall': [],
             'learning_rate': []
         }
+        # --- END FIX ---
         
+        # --- NEW: Dynamic Loss Weight Calibration ---
+        print("\n" + "="*80)
+        print("STARTING DYNAMIC LOSS WEIGHT CALIBRATION")
+        print("="*80)
+        # Calibrate weights *before* initializing the final criterion
+        calibrated_lambdas = self._calibrate_loss_weights()
+        print("="*80)
+        print("CALIBRATION COMPLETE")
+        print("="*80 + "\n")
+        
+        # --- MODIFIED: Use calibrated weights ---
         self.criterion = PhysicsInformedLoss(
-            lambda_powerflow=0.1,    # Power balance constraint
-            lambda_capacity=0.001,     # Thermal limit violations
-            lambda_frequency=0.5,    # Frequency stability (critical for cascades)
-            lambda_reactive=0.05,    # Reactive power balance
+            lambda_powerflow=calibrated_lambdas['lambda_powerflow'],
+            lambda_capacity=calibrated_lambdas['lambda_capacity'],
+            lambda_stability=calibrated_lambdas['lambda_stability'],
+            lambda_frequency=calibrated_lambdas['lambda_frequency'],
+            lambda_reactive=calibrated_lambdas.get('lambda_reactive', 0.05), # Use .get for safety
+            
             pos_weight=20.0,         # Keep this - handles class imbalance
             focal_alpha=0.25,        # Keep this
             focal_gamma=2.0,         # Keep this
             label_smoothing=0.1,     # Keep this
             use_logits=model_outputs_logits
         )
+        print("\n✓ PhysicsInformedLoss initialized with dynamically calibrated weights.")
+        # --- End MODIFIED ---
         
         self.start_epoch = 0
         self.best_val_loss = float('inf')
         
-        self.cascade_threshold = 0.7  # Increased from 0.30 to 0.60 to handle high probability predictions
-        self.node_threshold = 0.7     # Increased from 0.35 to 0.65 to drastically reduce false positives
+        self.cascade_threshold = 0.55
+        self.node_threshold = 0.55
         self.best_val_f1 = 0.0
         
         self._model_validated = False
+
+    def _calibrate_loss_weights(self, num_batches=20) -> Dict[str, float]:
+        """
+        Run a few batches to find the average raw loss for each component
+        and compute balancing weights.
+        """
+        print(f"Running loss calibration for {num_batches} batches...")
+        self.model.eval() # Set model to eval mode
+        
+        # Use a "dummy" criterion with all weights at 1.0 to get raw loss magnitudes
+        dummy_criterion = PhysicsInformedLoss(
+            lambda_powerflow=1.0, lambda_capacity=1.0,
+            lambda_stability=1.0, lambda_frequency=1.0,
+            lambda_reactive=1.0, 
+            use_logits=self.model_outputs_logits
+        )
+        
+        loss_sums = {}
+        total_batches = 0
+        
+        with torch.no_grad(): # No gradients needed
+            for i, batch in enumerate(self.train_loader):
+                if i >= num_batches:
+                    break
+                
+                # Move batch to device
+                batch_device = {}
+                for k, v in batch.items():
+                    if k == 'graph_properties':
+                        batch_device[k] = {
+                            prop_k: prop_v.to(self.device) if isinstance(prop_v, torch.Tensor) else prop_v
+                            for prop_k, prop_v in v.items()
+                        }
+                    elif isinstance(v, torch.Tensor):
+                        batch_device[k] = v.to(self.device)
+                    else:
+                        batch_device[k] = v
+                
+                # Forward pass
+                outputs = self.model(batch_device, return_sequence=True)
+                graph_properties = batch_device.get('graph_properties', {})
+                
+                # Get loss components (all weighted at 1.0)
+                _, loss_components = dummy_criterion(
+                    outputs, 
+                    {'failure_label': batch_device['node_failure_labels'].reshape(-1)},
+                    graph_properties
+                )
+                
+                # Accumulate
+                for key, val in loss_components.items():
+                    if not np.isnan(val) and not np.isinf(val):
+                        loss_sums[key] = loss_sums.get(key, 0.0) + val
+                total_batches += 1
+
+        if total_batches == 0:
+            print("[ERROR] Calibration failed: No data loaded.")
+            return { # Return some defaults
+                'lambda_powerflow': 1.0, 'lambda_capacity': 1.0,
+                'lambda_stability': 1.0, 'lambda_frequency': 1.0,
+                'lambda_reactive': 0.05
+            }
+        
+        # Calculate averages
+        avg_losses = {key: val / total_batches for key, val in loss_sums.items()}
+        
+        print("  Average raw loss components (unweighted):")
+        for key, val in avg_losses.items():
+            print(f"    {key}: {val:.6f}")
+            
+        # Use 'prediction' loss as the target magnitude
+        target_magnitude = avg_losses.get('prediction', 0.1)
+        if target_magnitude < 1e-6: target_magnitude = 0.1 # Safety floor
+        
+        print(f"\n  Target magnitude (from prediction loss): {target_magnitude:.6f}")
+        
+        # Calculate lambdas to match the target magnitude
+        calibrated_lambdas = {
+            # lambda = target / (raw_loss + epsilon)
+            'lambda_stability': target_magnitude / (avg_losses.get('voltage', target_magnitude) + 1e-9),
+            'lambda_powerflow': target_magnitude / (avg_losses.get('powerflow', target_magnitude) + 1e-9),
+            'lambda_capacity': target_magnitude / (avg_losses.get('capacity', target_magnitude) + 1e-9),
+            'lambda_frequency': target_magnitude / (avg_losses.get('frequency', target_magnitude) + 1e-9),
+            'lambda_reactive': target_magnitude / (avg_losses.get('reactive', target_magnitude) + 1e-9)
+        }
+        
+        print("\n  Calibrated lambda weights:")
+        max_lambda = 1e6 # Cap weights to prevent explosion
+        for key, val in calibrated_lambdas.items():
+            # Cap the weights to a reasonable maximum
+            val = min(val, max_lambda)
+            calibrated_lambdas[key] = val
+            
+            component_name = key.split('_')[1]
+            if component_name == 'stability': component_name = 'voltage'
+            raw_loss = avg_losses.get(component_name, 0)
+            print(f"    {key}: {val:10.2f}  (Weighted Target: {val * raw_loss:.4f})")
+            
+        self.model.train() # Put model back in train mode
+        return calibrated_lambdas
     
     def load_checkpoint(self, checkpoint_path: str):
         """Load checkpoint to resume training."""
@@ -867,7 +974,7 @@ if __name__ == "__main__":
     DATA_DIR = "data"
     OUTPUT_DIR = "checkpoints"
     BATCH_SIZE = 4  # Reduced from 8 to 4 for memory efficiency
-    NUM_EPOCHS = 30
+    NUM_EPOCHS = 50
     LEARNING_RATE = 0.005  # Increased from 0.003 to 0.005 to address small gradients (0.0077)
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     MAX_GRAD_NORM = 10.0  # Increased from 5.0 to 10.0 to allow larger gradient updates
@@ -980,6 +1087,7 @@ if __name__ == "__main__":
     print(f"  Trainable parameters: {trainable_params:,}")
     
     # Initialize trainer
+    # This will now run the calibration automatically
     trainer = Trainer(
         model=model,
         train_loader=train_loader,

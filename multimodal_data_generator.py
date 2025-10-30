@@ -724,8 +724,7 @@ class PhysicsBasedGridSimulator:
         # Thermal dynamics
         for node in range(self.num_nodes):
             heat_in = heat_generation[node]
-            heat_out = (self.cooling_effectiveness[node] * 
-                       (self.equipment_temperatures[node] - ambient_temp) / 
+            heat_out = (self.cooling_effectiveness[node] * (self.equipment_temperatures[node] - ambient_temp) / 
                        (self.thermal_time_constant[node] * 60))
             
             dT_dt = (heat_in - heat_out) / self.thermal_capacity[node]
@@ -1579,7 +1578,7 @@ def main():
     parser.add_argument('--cascade', type=int, default=400, help='Number of cascade scenarios')
     parser.add_argument('--grid-size', type=int, default=118, help='Number of nodes in grid')
     parser.add_argument('--sequence-length', type=int, default=60, help='Sequence length (timesteps)')
-    parser.add_argument('--batch-size', type=int, default=50, help='Batch size for streaming')
+    parser.add_argument('--batch-size', type=int, default=30, help='Batch size for streaming')
     parser.add_argument('--output-dir', type=str, default='data', help='Output directory')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--topology-file', type=str, default=None, help='Path to grid topology pickle file')
@@ -1592,9 +1591,9 @@ def main():
     assert abs(args.train_ratio + args.val_ratio + args.test_ratio - 1.0) < 1e-6, \
         "Train/val/test ratios must sum to 1.0"
     
-    train_dir = Path(args.output_dir) / 'train_batches'
-    val_dir = Path(args.output_dir) / 'val_batches'
-    test_dir = Path(args.output_dir) / 'test_batches'
+    train_dir = Path(args.output_dir) / 'train' # Changed from 'train_batches'
+    val_dir = Path(args.output_dir) / 'val'     # Changed from 'val_batches'
+    test_dir = Path(args.output_dir) / 'test'   # Changed from 'test_batches'
     
     train_dir.mkdir(parents=True, exist_ok=True)
     val_dir.mkdir(parents=True, exist_ok=True)
@@ -1616,91 +1615,112 @@ def main():
         with open(os.path.join(args.output_dir, 'grid_topology.pkl'), 'wb') as f:
             pickle.dump(topology_data, f)
     
-    print(f"\n{'='*80}")
-    print(f"GENERATING {args.normal} NORMAL SCENARIOS (no cascades)")
-    print(f"{'='*80}")
-    normal_scenarios = []
-    for i in range(args.normal):
-        print(f"\n--- Generating Normal Scenario {i+1}/{args.normal} ---")
-        stress_level = np.random.uniform(0.5, 0.85)
-        
-        scenario_data = simulator._generate_scenario_data(
-            stress_level=stress_level,
-            sequence_length=args.sequence_length,
-            is_cascade=False
-        )
-        
-        if scenario_data is not None:
-            normal_scenarios.append(scenario_data)
-        else:
-            print(f"  Skipping normal scenario {i+1} (rejected due to quality checks)")
+    # --- START: MODIFIED LOGIC FOR BATCHED GENERATION ---
+    
+    # 1. Determine scenario counts for each split
+    total_normal = args.normal
+    total_cascade = args.cascade
+    total_scenarios = total_normal + total_cascade
+    
+    if total_scenarios == 0:
+        print("No scenarios to generate (normal=0, cascade=0). Exiting.")
+        return
+
+    # Calculate precise counts for each split
+    num_train_normal = int(total_normal * args.train_ratio)
+    num_val_normal = int(total_normal * args.val_ratio)
+    num_test_normal = total_normal - num_train_normal - num_val_normal
+    
+    num_train_cascade = int(total_cascade * args.train_ratio)
+    num_val_cascade = int(total_cascade * args.val_ratio)
+    num_test_cascade = total_cascade - num_train_cascade - num_val_cascade
+
+    num_train = num_train_normal + num_train_cascade
+    num_val = num_val_normal + num_val_cascade
+    num_test = num_test_normal + num_test_cascade
     
     print(f"\n{'='*80}")
-    print(f"GENERATING {args.cascade} CASCADE SCENARIOS")
+    print(f"DATASET GENERATION PLAN")
     print(f"{'='*80}")
-    cascade_scenarios = []
-    for i in range(args.cascade):
-        print(f"\n--- Generating Cascade Scenario {i+1}/{args.cascade} ---")
-        stress_level = np.random.uniform(0.6, 0.95)
+    print(f"  Total Scenarios: {total_scenarios}")
+    print(f"    Normal:   {total_normal}")
+    print(f"    Cascade:  {total_cascade}")
+    print(f"\n  TRAIN Set: {num_train} scenarios ({num_train/total_scenarios*100:.1f}%)")
+    print(f"    Normal:   {num_train_normal}")
+    print(f"    Cascade:  {num_train_cascade}")
+    print(f"  VAL Set:   {num_val} scenarios ({num_val/total_scenarios*100:.1f}%)")
+    print(f"    Normal:   {num_val_normal}")
+    print(f"    Cascade:  {num_val_cascade}")
+    print(f"  TEST Set:  {num_test} scenarios ({num_test/total_scenarios*100:.1f}%)")
+    print(f"    Normal:   {num_test_normal}")
+    print(f"    Cascade:  {num_test_cascade}")
+    print(f"\n  Batch size: {args.batch_size} scenarios per file.")
+
+    # 2. Define helper function for batched generation
+    def generate_and_save_split_batched(
+        num_normal: int, 
+        num_cascade: int, 
+        output_dir: Path, 
+        split_name: str
+    ):
+        """Generates scenarios for a split and saves them in batches."""
+        print(f"\n{'='*80}")
+        print(f"GENERATING {split_name} SET ({num_normal} Normal, {num_cascade} Cascade)")
+        print(f"{'='*80}")
+
+        total_to_generate = num_normal + num_cascade
+        if total_to_generate == 0:
+            print(f"  No scenarios to generate for {split_name} set. Skipping.")
+            return
+
+        # Create a shuffled list of types to generate
+        types_to_gen = ['normal'] * num_normal + ['cascade'] * num_cascade
+        np.random.shuffle(types_to_gen)
         
-        scenario_data = simulator._generate_scenario_data(
-            stress_level=stress_level,
-            sequence_length=args.sequence_length,
-            is_cascade=True
-        )
+        current_batch = []
+        batch_count = 0
         
-        if scenario_data is not None:
-            cascade_scenarios.append(scenario_data)
-        else:
-            print(f"  Skipping cascade scenario {i+1} (rejected due to quality checks)")
+        for i in range(total_to_generate):
+            gen_type = types_to_gen[i]
+            is_cascade = (gen_type == 'cascade')
+            
+            print(f"\n--- Generating {split_name} scenario {i+1}/{total_to_generate} (Type: {gen_type}) ---")
+            
+            if is_cascade:
+                stress_level = np.random.uniform(0.6, 0.95)
+            else:
+                stress_level = np.random.uniform(0.5, 0.85)
+
+            scenario_data = simulator._generate_scenario_data(
+                stress_level=stress_level,
+                sequence_length=args.sequence_length,
+                is_cascade=is_cascade
+            )
+            
+            if scenario_data is not None:
+                current_batch.append(scenario_data)
+            else:
+                print(f"  Skipping {split_name} scenario {i+1} (rejected due to quality checks)")
+
+            # Save batch if full or if it's the last item
+            # We check `len(current_batch) > 0` in case the last scenario was rejected
+            if (len(current_batch) == args.batch_size or (i == total_to_generate - 1)) and len(current_batch) > 0:
+                batch_file = output_dir / f'scenarios_batch_{batch_count}.pkl'
+                with open(batch_file, 'wb') as f:
+                    pickle.dump(current_batch, f)
+                
+                print(f"\n  SAVED BATCH: {len(current_batch)} scenarios to {batch_file}")
+                batch_count += 1
+                current_batch = [] # Clear memory
+                print(f"  Memory after saving batch: {MemoryMonitor.get_memory_usage():.1f} MB")
+                gc.collect() # Force garbage collection
+
+    # 3. Generate and save each split sequentially
+    generate_and_save_split_batched(num_train_normal, num_train_cascade, train_dir, "TRAIN")
+    generate_and_save_split_batched(num_val_normal, num_val_cascade, val_dir, "VALIDATION")
+    generate_and_save_split_batched(num_test_normal, num_test_cascade, test_dir, "TEST")
     
-    all_scenarios = normal_scenarios + cascade_scenarios
-    np.random.shuffle(all_scenarios)
-    
-    print(f"\n{'='*80}")
-    print(f"DATASET SUMMARY")
-    print(f"{'='*80}")
-    print(f"  Normal scenarios: {len(normal_scenarios)}")
-    print(f"  Cascade scenarios: {len(cascade_scenarios)}")
-    print(f"  Total scenarios: {len(all_scenarios)}")
-    
-    num_scenarios = len(all_scenarios)
-    num_train = int(num_scenarios * args.train_ratio)
-    num_val = int(num_scenarios * args.val_ratio)
-    num_test = num_scenarios - num_train - num_val
-    
-    train_scenarios = all_scenarios[:num_train]
-    val_scenarios = all_scenarios[num_train:num_train+num_val]
-    test_scenarios = all_scenarios[num_train+num_val:]
-    
-    print(f"\nTRAIN/VAL/TEST SPLIT:")
-    print(f"  Training: {len(train_scenarios)} scenarios ({len(train_scenarios)/num_scenarios*100:.1f}%)")
-    print(f"  Validation: {len(val_scenarios)} scenarios ({len(val_scenarios)/num_scenarios*100:.1f}%)")
-    print(f"  Test: {len(test_scenarios)} scenarios ({len(test_scenarios)/num_scenarios*100:.1f}%)")
-    
-    print(f"\nSaving training data to {train_dir}...")
-    for i in range(0, len(train_scenarios), args.batch_size):
-        batch_data = train_scenarios[i:i+args.batch_size]
-        batch_file = train_dir / f'scenarios_batch_{i//args.batch_size}.pkl'
-        with open(batch_file, 'wb') as f:
-            pickle.dump(batch_data, f)
-        print(f"  Saved {len(batch_data)} scenarios to {batch_file}")
-    
-    print(f"\nSaving validation data to {val_dir}...")
-    for i in range(0, len(val_scenarios), args.batch_size):
-        batch_data = val_scenarios[i:i+args.batch_size]
-        batch_file = val_dir / f'scenarios_batch_{i//args.batch_size}.pkl'
-        with open(batch_file, 'wb') as f:
-            pickle.dump(batch_data, f)
-        print(f"  Saved {len(batch_data)} scenarios to {batch_file}")
-    
-    print(f"\nSaving test data to {test_dir}...")
-    for i in range(0, len(test_scenarios), args.batch_size):
-        batch_data = test_scenarios[i:i+args.batch_size]
-        batch_file = test_dir / f'scenarios_batch_{i//args.batch_size}.pkl'
-        with open(batch_file, 'wb') as f:
-            pickle.dump(batch_data, f)
-        print(f"  Saved {len(batch_data)} scenarios to {batch_file}")
+    # --- END: MODIFIED LOGIC ---
     
     print(f"\n{'='*80}")
     print("DATA GENERATION COMPLETE")
