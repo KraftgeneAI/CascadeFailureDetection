@@ -36,7 +36,7 @@ The framework is built on a four-layer architecture that processes data from ing
 Clone the repository:
 
 ```bash
-git clone https://github.com/your-username/cascade-failure-prediction.git
+git clone https://github.com/KraftgeneAI/CascadeFailureDetection.git
 cd cascade-failure-prediction
 ```
 
