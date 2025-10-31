@@ -1058,14 +1058,14 @@ if __name__ == "__main__":
         train_dataset = CascadeDataset(
             f"{DATA_DIR}/train", 
             mode='full_sequence', 
-            cache_size=10,
+            cache_size=1,
             base_mva=args.base_mva,
             base_frequency=args.base_freq
         )
         val_dataset = CascadeDataset(
             f"{DATA_DIR}/val", 
             mode='full_sequence', 
-            cache_size=5,
+            cache_size=1,
             base_mva=args.base_mva,
             base_frequency=args.base_freq
         )
@@ -1120,20 +1120,20 @@ if __name__ == "__main__":
         train_dataset,
         batch_size=BATCH_SIZE,
         sampler=sampler,
-        num_workers=2,
-        pin_memory=True,
+        num_workers=0,
+        pin_memory=False,
         collate_fn=collate_cascade_batch,
-        persistent_workers=True
+        persistent_workers=False
     )
     
     val_loader = DataLoader(
         val_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
-        num_workers=2,
-        pin_memory=True,
+        num_workers=0,
+        pin_memory=False,
         collate_fn=collate_cascade_batch,
-        persistent_workers=True
+        persistent_workers=False
     )
     
     # Initialize model
