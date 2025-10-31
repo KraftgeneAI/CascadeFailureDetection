@@ -67,7 +67,7 @@ Start training with automatic loss calibration:
 
 ```bash
 # Default training
-python train_model.py # config: learning_rate = 0.005, batch_size = 4, epoch = 50
+python train_model.py # default config: learning_rate = 0.005, batch_size = 4, epoch = 50
 # Basic training
 python train_model.py --data_dir ./data --output_dir ./checkpoints --epochs 100 --batch_size 8 --lr 0.003
 
