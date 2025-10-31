@@ -66,7 +66,16 @@ This creates 10,000 scenarios (6,000 normal, 4,000 cascade) and saves them in th
 Start training with automatic loss calibration:
 
 ```bash
-python train_model.py
+# Default training
+python train_model.py # config: learning_rate = 0.005, batch_size = 4, epoch = 50
+# Basic training
+python train_model.py --data_dir ./data --output_dir ./checkpoints --epochs 100 --batch_size 8
+
+# Adjust learning rate and other parameters
+python train_model.py --data_dir ./data --epochs 50 --batch_size 16 --lr 0.001 --grad_clip 5.0
+
+# Resume training from a checkpoint
+python train_model.py --resume
 ```
 
 The script will:

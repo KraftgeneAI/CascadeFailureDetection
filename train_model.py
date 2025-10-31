@@ -1,8 +1,24 @@
 """
 Training Script for Cascade Prediction Model
 ======================================================
-Author: Kraftgene AI Inc. (R&D)
-Date: October 2025
+This script trains the UnifiedCascadePredictionModel using data generated
+by multimodal_data_generator.py. It incorporates:
+- Command-line arguments for hyperparameters.
+- Automatic GPU (CUDA) detection.
+- Weighted sampling to handle class imbalance.
+- A merged physics-informed focal loss function.
+- Dynamic loss weight calibration.
+- Checkpointing and metrics logging.
+
+Usage:
+    # Basic training
+    python train_model.py --data_dir ./data --output_dir ./checkpoints --epochs 100 --batch_size 8
+
+    # Adjust learning rate and other parameters
+    python train_model.py --data_dir ./data --epochs 50 --batch_size 16 --lr 0.001 --grad_clip 5.0
+
+    # Resume training from a checkpoint
+    python train_model.py --resume
 """
 
 import torch
@@ -17,9 +33,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import sys
 from pathlib import Path
+import argparse # Import argparse
 
 # Add parent directory to path for imports
-# (Ensures model and dataset can be found)
 sys.path.append(str(Path(__file__).resolve().parent))
 
 try:
@@ -117,6 +133,8 @@ class PhysicsInformedLoss(nn.Module):
             if prop.shape == shape:
                 return prop
             # Fallback for shape mismatch (e.g., during calibration with B=1)
+            if prop.numel() == shape[1]:
+                 return prop.unsqueeze(0).unsqueeze(-1).expand(batch_size, -1, 1)
             return prop.expand(batch_size, num_edges, 1)
 
         conductance = prep_prop(conductance, (batch_size, num_edges, 1))
@@ -132,10 +150,6 @@ class PhysicsInformedLoss(nn.Module):
         P_ij = V_i * V_j * (conductance * torch.cos(theta_ij) + susceptance * torch.sin(theta_ij))
         P_ij_squeezed = P_ij.squeeze(-1)  # [B, E]
         
-        P_calc = torch.zeros(batch_size, num_nodes, 1, device=voltages.device)
-
-        # Use index_add_ for efficient aggregation
-        # This requires flattening batch and node dimensions
         P_calc_flat = torch.zeros(batch_size * num_nodes, device=voltages.device)
         
         # Create batched indices
@@ -160,8 +174,11 @@ class PhysicsInformedLoss(nn.Module):
         """
         Compute capacity constraint violations.
         """
+        batch_size = line_flows.shape[0]
+        num_edges = line_flows.shape[1]
+
         if thermal_limits.dim() == 1: # [E]
-            thermal_limits = thermal_limits.unsqueeze(0).unsqueeze(-1)
+            thermal_limits = thermal_limits.unsqueeze(0).unsqueeze(-1).expand(batch_size, -1, 1)
         elif thermal_limits.dim() == 2: # [B, E]
             thermal_limits = thermal_limits.unsqueeze(-1)
         
@@ -208,7 +225,9 @@ class PhysicsInformedLoss(nn.Module):
         def get_prop(key):
             if graph_properties and key in graph_properties:
                 return graph_properties[key]
-            # print(f"Warning: {key} not in graph_properties")
+            if key not in self._warned_missing_outputs:
+                # print(f"Warning: {key} not in graph_properties for loss calc.")
+                self._warned_missing_outputs.add(key)
             return None
 
         # 1. Power Flow Loss
@@ -258,7 +277,7 @@ class PhysicsInformedLoss(nn.Module):
             
             has_cascade_expanded = has_cascade.view(B, 1, 1).expand_as(predicted_freq_pu)
             
-            # Expected frequency during cascade: 0.99 p.u. (1% drop)
+            # Expected frequency during cascade: 0.99 p.u. (e.g., 59.4 Hz / 60 Hz)
             # Expected frequency during normal: 1.0 p.u.
             expected_freq = 1.0 - 0.01 * has_cascade_expanded
             
@@ -306,7 +325,7 @@ class Trainer:
         self.use_amp = use_amp
         self.model_outputs_logits = model_outputs_logits
         
-        self.scaler = torch.cuda.amp.GradScaler() if use_amp else None
+        self.scaler = torch.cuda.amp.GradScaler() if use_amp and self.device.type == 'cuda' else None
         
         os.makedirs(output_dir, exist_ok=True)
         
@@ -333,10 +352,10 @@ class Trainer:
         
         # --- MODIFIED: Use calibrated weights with the NEW merged loss class ---
         self.criterion = PhysicsInformedLoss(
-            lambda_powerflow=calibrated_lambdas['lambda_powerflow'],
-            lambda_capacity=calibrated_lambdas['lambda_capacity'],
-            lambda_stability=calibrated_lambdas['voltage'], # Calibrator uses 'voltage'
-            lambda_frequency=calibrated_lambdas['lambda_frequency'],
+            lambda_powerflow=calibrated_lambdas.get('lambda_powerflow', 0.1),
+            lambda_capacity=calibrated_lambdas.get('lambda_capacity', 0.1),
+            lambda_stability=calibrated_lambdas.get('voltage', 0.001), # Calibrator uses 'voltage'
+            lambda_frequency=calibrated_lambdas.get('lambda_frequency', 0.1),
             
             pos_weight=20.0,
             focal_alpha=0.25,
@@ -391,6 +410,11 @@ class Trainer:
                     else:
                         batch_device[k] = v
                 
+                # Stop if batch is empty
+                if 'node_failure_labels' not in batch_device:
+                    print("  Warning: Empty batch encountered during calibration.")
+                    continue
+
                 outputs = self.model(batch_device, return_sequence=True)
                 
                 # --- This is the key part ---
@@ -413,8 +437,8 @@ class Trainer:
         if total_batches == 0:
             print("[ERROR] Calibration failed: No data loaded.")
             return {
-                'lambda_powerflow': 1.0, 'lambda_capacity': 1.0,
-                'lambda_stability': 1.0, 'lambda_frequency': 1.0
+                'lambda_powerflow': 0.1, 'lambda_capacity': 0.1,
+                'voltage': 0.001, 'lambda_frequency': 0.1
             }
         
         avg_losses = {key: val / total_batches for key, val in loss_sums.items()}
@@ -494,6 +518,10 @@ class Trainer:
                 else:
                     batch_device[k] = v
             
+            # Check for empty batch (can happen with small datasets)
+            if 'node_failure_labels' not in batch_device:
+                continue
+
             self.optimizer.zero_grad()
             
             # --- Prepare graph_properties for the new loss function ---
@@ -502,7 +530,7 @@ class Trainer:
                 graph_properties['edge_index'] = batch_device['edge_index']
             # --- End modification ---
             
-            if self.use_amp:
+            if self.use_amp and self.scaler is not None:
                 with torch.cuda.amp.autocast():
                     outputs = self.model(batch_device, return_sequence=True)
                     
@@ -512,7 +540,7 @@ class Trainer:
                     
                     loss, loss_components = self.criterion(
                         outputs, 
-                        {'failure_label': batch_device['node_failure_labels'].reshape(-1)},
+                        {'failure_label': batch_device['node_failure_labels']}, # Pass [B,N] labels
                         graph_properties
                     )
                 
@@ -531,7 +559,7 @@ class Trainer:
                 
                 loss, loss_components = self.criterion(
                     outputs, 
-                    {'failure_label': batch_device['node_failure_labels'].reshape(-1)},
+                    {'failure_label': batch_device['node_failure_labels']}, # Pass [B,N] labels
                     graph_properties
                 )
                 
@@ -542,10 +570,10 @@ class Trainer:
             
             total_loss += loss.item()
             
-            for comp_name, comp_value in loss_component_sums.items():
+            for comp_name, comp_value in loss_components.items():
                 loss_component_sums[comp_name] = loss_component_sums.get(comp_name, 0.0) + comp_value
             
-            # --- Metrics Calculation (unchanged) ---
+            # --- Metrics Calculation ---
             node_probs = outputs['failure_probability'].squeeze(-1) # [B, N]
             cascade_prob = node_probs.max(dim=1)[0] # [B]
             
@@ -566,9 +594,8 @@ class Trainer:
             node_fn += ((node_pred == 0) & (node_labels == 1)).sum().item()
             
             if batch_idx % 20 == 0:
-                print(f"\n[DEBUG Batch {batch_idx}]")
-                print(f"  Loss components: {', '.join([f'{k}={v:.4f}' for k, v in loss_components.items()])}")
-                print(f"  Grad norm: {grad_norm:.4f}")
+                loss_str = ", ".join([f'{k}={v:.4f}' for k, v in loss_components.items()])
+                pbar.set_description(f"Training (Loss: {loss.item():.4f}, Grad: {grad_norm:.2f}, Comp: [{loss_str}])")
             
             cascade_precision = cascade_tp / (cascade_tp + cascade_fp + 1e-7)
             cascade_recall = cascade_tp / (cascade_tp + cascade_fn + 1e-7)
@@ -587,6 +614,7 @@ class Trainer:
             })
         
         # Compute final epoch metrics
+        avg_loss = total_loss / (len(self.train_loader) + 1e-7)
         cascade_precision = cascade_tp / (cascade_tp + cascade_fp + 1e-7)
         cascade_recall = cascade_tp / (cascade_tp + cascade_fn + 1e-7)
         cascade_f1 = 2 * cascade_precision * cascade_recall / (cascade_precision + cascade_recall + 1e-7)
@@ -603,11 +631,11 @@ class Trainer:
         if loss_component_sums:
             print(f"  Average loss components:")
             for comp_name, comp_sum in loss_component_sums.items():
-                avg_comp = comp_sum / len(self.train_loader)
+                avg_comp = comp_sum / (len(self.train_loader) + 1e-7)
                 print(f"    {comp_name}: {avg_comp:.6f}")
         
         return {
-            'loss': total_loss / len(self.train_loader),
+            'loss': avg_loss,
             'cascade_acc': cascade_acc, 'cascade_f1': cascade_f1,
             'cascade_precision': cascade_precision, 'cascade_recall': cascade_recall,
             'node_acc': node_acc, 'node_f1': node_f1,
@@ -691,6 +719,10 @@ class Trainer:
                     else:
                         batch_device[k] = v
                 
+                # Check for empty batch
+                if 'node_failure_labels' not in batch_device:
+                    continue
+
                 # --- Prepare graph_properties for the new loss function ---
                 graph_properties = batch_device.get('graph_properties', {})
                 if 'edge_index' not in graph_properties:
@@ -701,7 +733,7 @@ class Trainer:
                 
                 loss, _ = self.criterion(
                     outputs,
-                    {'failure_label': batch_device['node_failure_labels'].reshape(-1)},
+                    {'failure_label': batch_device['node_failure_labels']}, # Pass [B,N] labels
                     graph_properties
                 )
                 
@@ -737,6 +769,7 @@ class Trainer:
                 })
         
         # Compute final validation metrics
+        avg_loss = total_loss / (len(self.val_loader) + 1e-7)
         cascade_precision = cascade_tp / (cascade_tp + cascade_fp + 1e-7)
         cascade_recall = cascade_tp / (cascade_tp + cascade_fn + 1e-7)
         cascade_f1 = 2 * cascade_precision * cascade_recall / (cascade_precision + cascade_recall + 1e-7)
@@ -748,7 +781,7 @@ class Trainer:
         node_acc = (node_tp + node_tn) / (node_tp + node_tn + node_fp + node_fn + 1e-7)
         
         return {
-            'loss': total_loss / len(self.val_loader),
+            'loss': avg_loss,
             'cascade_acc': cascade_acc, 'cascade_f1': cascade_f1,
             'cascade_precision': cascade_precision, 'cascade_recall': cascade_recall,
             'node_acc': node_acc, 'node_f1': node_f1,
@@ -958,21 +991,53 @@ class Trainer:
 
 if __name__ == "__main__":
     
+    # --- ADDED: Argument Parser ---
+    parser = argparse.ArgumentParser(description="Train Cascade Prediction Model")
+    parser.add_argument('--data_dir', type=str, default="data", 
+                        help="Root directory containing train/val/test data folders")
+    parser.add_argument('--output_dir', type=str, default="checkpoints", 
+                        help="Directory to save checkpoints and logs")
+    parser.add_argument('--epochs', type=int, default=50, 
+                        help="Number of epochs to train")
+    parser.add_argument('--batch_size', type=int, default=4, 
+                        help="Training and validation batch size")
+    parser.add_argument('--lr', type=float, default=0.005, 
+                        help="Initial learning rate")
+    parser.add_argument('--grad_clip', type=float, default=10.0, 
+                        help="Max gradient norm for clipping")
+    parser.add_argument('--patience', type=int, default=10, 
+                        help="Epochs for early stopping patience")
+    parser.add_argument('--resume', action='store_true', 
+                        help="Resume training from latest_checkpoint.pth")
+    parser.add_argument('--base_mva', type=float, default=100.0,
+                        help="Base MVA for physics normalization")
+    parser.add_argument('--base_freq', type=float, default=60.0,
+                        help="Base frequency (Hz) for physics normalization")
+
+    args = parser.parse_args()
+    # --- END: Argument Parser ---
+    
+    
     print("="*80)
     print("CASCADE FAILURE PREDICTION - TRAINING SCRIPT (IMPROVED)")
     print("="*80)
     
+    # --- CHANGED: Use args for configuration ---
     # Configuration
-    DATA_DIR = "data"
-    OUTPUT_DIR = "checkpoints"
-    BATCH_SIZE = 4
-    NUM_EPOCHS = 50
-    LEARNING_RATE = 0.005
+    DATA_DIR = args.data_dir
+    OUTPUT_DIR = args.output_dir
+    BATCH_SIZE = args.batch_size
+    NUM_EPOCHS = args.epochs
+    LEARNING_RATE = args.lr
+    MAX_GRAD_NORM = args.grad_clip
+    EARLY_STOPPING_PATIENCE = args.patience
+    
+    # --- CHANGED: Auto-detect device ---
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    MAX_GRAD_NORM = 10.0
-    USE_AMP = torch.cuda.is_available()
+    USE_AMP = (DEVICE.type == 'cuda')
+    
     # Model's 'failure_prob_head' ends in Sigmoid, so it outputs probabilities.
-    MODEL_OUTPUTS_LOGITS = False
+    MODEL_OUTPUTS_LOGITS = False 
     
     print(f"\nConfiguration:")
     print(f"  Data directory: {DATA_DIR}")
@@ -981,19 +1046,33 @@ if __name__ == "__main__":
     print(f"  Epochs: {NUM_EPOCHS}")
     print(f"  Learning rate: {LEARNING_RATE}")
     print(f"  Device: {DEVICE}")
+    if not torch.cuda.is_available():
+        print("  (WARNING: CUDA (GPU) not available, training will be slow on CPU.)")
     print(f"  Gradient clipping: {MAX_GRAD_NORM}")
     print(f"  Mixed precision: {USE_AMP}")
-    print(f"  Model outputs logits: {MODEL_OUTPUTS_LOGITS}")
+    print(f"  Resume training: {args.resume}")
     
     print(f"\nLoading datasets...")
-
+    # --- Pass normalization constants to Dataset ---
     try:
-        train_dataset = CascadeDataset(f"{DATA_DIR}/train_batches", mode='full_sequence', cache_size=10)
-        val_dataset = CascadeDataset(f"{DATA_DIR}/val_batches", mode='full_sequence', cache_size=5)
+        train_dataset = CascadeDataset(
+            f"{DATA_DIR}/train", 
+            mode='full_sequence', 
+            cache_size=10,
+            base_mva=args.base_mva,
+            base_frequency=args.base_freq
+        )
+        val_dataset = CascadeDataset(
+            f"{DATA_DIR}/val", 
+            mode='full_sequence', 
+            cache_size=5,
+            base_mva=args.base_mva,
+            base_frequency=args.base_freq
+        )
     except ValueError as e:
         print(f"\n[ERROR] Failed to load dataset: {e}")
         print("Please ensure you have run multimodal_data_generator.py to create the data")
-        print("in 'data/train' and 'data/val' directories.")
+        print(f"in '{DATA_DIR}/train' and '{DATA_DIR}/val' directories.")
         sys.exit(1)
 
     print(f"  Training samples: {len(train_dataset)}")
@@ -1087,16 +1166,14 @@ if __name__ == "__main__":
     )
     
     checkpoint_path = f"{OUTPUT_DIR}/latest_checkpoint.pth"
-    if os.path.exists(checkpoint_path):
-        resume = input(f"\nFound checkpoint at {checkpoint_path}. Resume training? (y/n): ")
-        if resume.lower() == 'y':
-            trainer.load_checkpoint(checkpoint_path)
+    if args.resume and os.path.exists(checkpoint_path):
+        trainer.load_checkpoint(checkpoint_path)
     
     # Train
     print(f"\n{'='*80}")
     print("STARTING TRAINING")
     print(f"{'='*80}\n")
     
-    trainer.train(num_epochs=NUM_EPOCHS, early_stopping_patience=10)
+    trainer.train(num_epochs=NUM_EPOCHS, early_stopping_patience=EARLY_STOPPING_PATIENCE)
     
     print("\nTraining completed successfully!")

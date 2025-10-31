@@ -1,6 +1,7 @@
 """
 Cascade Failure Prediction Model Inference Script 
 ============================================================
+
 Author: Kraftgene AI Inc.
 Date: October 2025
 """
@@ -14,9 +15,10 @@ from typing import Dict, List, Optional, Tuple
 import argparse
 from datetime import datetime
 import glob
+import time  # Added for timing
+import sys
 
 # Ensure the model class is importable
-import sys
 try:
     from multimodal_cascade_model import UnifiedCascadePredictionModel
 except ImportError:
@@ -65,12 +67,20 @@ class CascadePredictor:
             topology = pickle.load(f)
             
             # --- FIX 1 (AttributeError): Convert numpy array to torch tensor ---
-            edge_index_numpy = topology['edge_index']
-            self.edge_index = torch.from_numpy(edge_index_numpy).long().to(self.device)
+            if not isinstance(topology['edge_index'], torch.Tensor):
+                edge_index_numpy = topology['edge_index']
+                self.edge_index = torch.from_numpy(edge_index_numpy).long().to(self.device)
+            else:
+                self.edge_index = topology['edge_index'].to(self.device)
             # --- END FIX 1 ---
 
             # --- FIX 2 (KeyError): Infer num_nodes from adjacency_matrix shape ---
-            self.num_nodes = topology['adjacency_matrix'].shape[0]
+            if 'num_nodes' in topology:
+                self.num_nodes = topology['num_nodes']
+            elif 'adjacency_matrix' in topology:
+                self.num_nodes = topology['adjacency_matrix'].shape[0]
+            else:
+                raise KeyError("Could not determine num_nodes from topology file. Missing 'num_nodes' and 'adjacency_matrix' keys.")
             # --- END FIX 2 ---
             
             self.topology = topology
@@ -80,8 +90,8 @@ class CascadePredictor:
         checkpoint = torch.load(model_path, map_location=self.device)
         
         # --- IMPROVEMENT: Load thresholds from checkpoint ---
-        self.cascade_threshold = checkpoint.get('cascade_threshold', 0.5) # Use 0.5 as a safer default
-        self.node_threshold = checkpoint.get('node_threshold', 0.5) # Use 0.5 as a safer default
+        self.cascade_threshold = checkpoint.get('cascade_threshold', 0.5)
+        self.node_threshold = checkpoint.get('node_threshold', 0.5)
         # --- END IMPROVEMENT ---
         
         # Initialize model architecture
@@ -165,10 +175,13 @@ class CascadePredictor:
                 raise ValueError(f"No batch files found in {data_path}")
             
             for batch_file in batch_files:
-                with open(batch_file, 'rb') as f:
-                    batch_data = pickle.load(f)
-                    for scenario in batch_data:
-                        yield scenario
+                try:
+                    with open(batch_file, 'rb') as f:
+                        batch_data = pickle.load(f)
+                        for scenario in batch_data:
+                            yield scenario
+                except (IOError, pickle.UnpicklingError) as e:
+                    print(f"Warning: Could not read batch file {batch_file}: {e}")
         else:
             raise ValueError(f"Data path {data_path} is neither a file nor a directory")
     
@@ -242,32 +255,17 @@ class CascadePredictor:
         # --- End Helper ---
 
         # Define expected default shapes (based on model and generator)
-        # Note: These shapes are *per-node* or *per-item* as generator stacks them
-        sat_shape = (self.num_nodes, 12, 16, 16) # From generator _generate_correlated_environmental_data
-        
-        # Weather shape: generator saves as (N, 10, 8) but data loader expects (N, 80)
-        # The multimodal_cascade_model.py's EnvironmentalEmbedding expects (N, 80)
-        # Let's adjust to match the model's expectation
+        sat_shape = (self.num_nodes, 12, 16, 16)
         weather_shape_raw = (self.num_nodes, 10, 8)
-        weather_shape_model = (self.num_nodes, 80) # 10*8 = 80
         
-        threat_shape = (self.num_nodes, 6) # From generator
-        
-        # From generator _generate_scenario_data (15 features)
-        # But model's InfrastructureEmbedding expects 15
-        scada_shape = (self.num_nodes, 15) 
-        
-        # From generator _generate_scenario_data (8 features)
-        # Model's InfrastructureEmbedding expects 8
+        threat_shape = (self.num_nodes, 6)
+        scada_shape = (self.num_nodes, 15)
         pmu_shape = (self.num_nodes, 8)
-        
-        # From generator _generate_scenario_data (10 features)
-        # Model's InfrastructureEmbedding expects 10
         equip_shape = (self.num_nodes, 10)
         
-        vis_shape = (self.num_nodes, 3, 32, 32) # From generator _generate_correlated_robotic_data
-        therm_shape = (self.num_nodes, 1, 32, 32) # From generator
-        sensor_shape = (self.num_nodes, 12) # From generator
+        vis_shape = (self.num_nodes, 3, 32, 32)
+        therm_shape = (self.num_nodes, 1, 32, 32)
+        sensor_shape = (self.num_nodes, 12)
         
         # Get edge_attr from last step or scenario root
         edge_attr_data = sequence[-1].get('edge_attr')
@@ -275,7 +273,7 @@ class CascadePredictor:
             edge_attr_data = scenario.get('edge_attr')
         
         num_edges = self.edge_index.shape[1]
-        edge_shape = (num_edges, 5) # From generator _generate_scenario_data
+        edge_shape = (num_edges, 5)
         
         if edge_attr_data is None:
             edge_attr = np.zeros(edge_shape, dtype=np.float32)
@@ -290,7 +288,6 @@ class CascadePredictor:
         # Handle weather sequence shape mismatch
         weather_sequence_raw = np.stack([safe_get_or_default(ts, 'weather_sequence', weather_shape_raw)
                                          for ts in sequence])
-        # Reshape from [T, N, 10, 8] -> [T, N, 80] to match model
         weather_sequence = weather_sequence_raw.reshape(
             weather_sequence_raw.shape[0], self.num_nodes, -1
         )
@@ -302,8 +299,6 @@ class CascadePredictor:
         scada_sequence = []
         for ts in sequence:
             scada_data = safe_get_or_default(ts, 'scada_data', scada_shape)
-            # Normalize power columns (2=gen, 3=reac_gen, 4=load, 5=reac_load)
-            # Based on multimodal_data_generator.py
             if scada_data.shape[1] >= 6:
                 scada_data[:, 2] = self._normalize_power(scada_data[:, 2]) # generation
                 scada_data[:, 3] = self._normalize_power(scada_data[:, 3]) # reactive_generation
@@ -316,7 +311,6 @@ class CascadePredictor:
         pmu_sequence = []
         for ts in sequence:
             pmu_data = safe_get_or_default(ts, 'pmu_sequence', pmu_shape)
-            # Normalize frequency (column 5 in generator's PMU data)
             if pmu_data.shape[1] >= 6:
                 pmu_data[:, 5] = self._normalize_frequency(pmu_data[:, 5])
             pmu_sequence.append(pmu_data)
@@ -392,7 +386,6 @@ class CascadePredictor:
 
             if use_temporal:
                 # Pass the full sequence with Batch dimension: [B, T, ...]
-                # .unsqueeze(0) adds the batch dimension (B=1)
                 batch['satellite_data'] = safe_tensor_convert(env['satellite_sequence'], 'satellite_data').unsqueeze(0).to(self.device)
                 batch['weather_sequence'] = safe_tensor_convert(env['weather_sequence'], 'weather_sequence').unsqueeze(0).to(self.device)
                 batch['threat_indicators'] = safe_tensor_convert(env['threat_sequence'], 'threat_indicators').unsqueeze(0).to(self.device)
@@ -402,12 +395,10 @@ class CascadePredictor:
                 batch['visual_data'] = safe_tensor_convert(robot['visual_sequence'], 'visual_data').unsqueeze(0).to(self.device)
                 batch['thermal_data'] = safe_tensor_convert(robot['thermal_sequence'], 'thermal_data').unsqueeze(0).to(self.device)
                 batch['sensor_data'] = safe_tensor_convert(robot['sensor_sequence'], 'sensor_data').unsqueeze(0).to(self.device)
-                # Edge attributes are [B, E, F], so unsqueeze(0) is correct
                 batch['edge_attr'] = safe_tensor_convert(infra['edge_features'], 'edge_attr').unsqueeze(0).to(self.device)
             
             else:
                 # Pass only the last timestep: [B, N, ...] or [B, C, H, W] etc.
-                # .unsqueeze(0) adds the batch dimension (B=1)
                 batch['satellite_data'] = safe_tensor_convert(env['satellite_sequence'][-1], 'satellite_data').unsqueeze(0).to(self.device)
                 batch['weather_sequence'] = safe_tensor_convert(env['weather_sequence'][-1], 'weather_sequence').unsqueeze(0).to(self.device)
                 batch['threat_indicators'] = safe_tensor_convert(env['threat_sequence'][-1], 'threat_indicators').unsqueeze(0).to(self.device)
@@ -417,33 +408,22 @@ class CascadePredictor:
                 batch['visual_data'] = safe_tensor_convert(robot['visual_sequence'][-1], 'visual_data').unsqueeze(0).to(self.device)
                 batch['thermal_data'] = safe_tensor_convert(robot['thermal_sequence'][-1], 'thermal_data').unsqueeze(0).to(self.device)
                 batch['sensor_data'] = safe_tensor_convert(robot['sensor_sequence'][-1], 'sensor_data').unsqueeze(0).to(self.device)
-                # Edge attributes are [B, E, F], so unsqueeze(0) is correct
                 batch['edge_attr'] = safe_tensor_convert(infra['edge_features'], 'edge_attr').unsqueeze(0).to(self.device)
             
             # --- END CRITICAL IMPROVEMENT ---
             
-            # The model's forward pass does not use return_sequence
             outputs = self.model(batch) 
             
-            # Extract predictions
-            # Model outputs logits if trained with PhysicsInformedLoss(use_logits=True)
-            # But the provided train_model.py sets MODEL_OUTPUTS_LOGITS = False
-            # And the model's failure_prob_head ends in nn.Sigmoid()
-            # Therefore, outputs['failure_probability'] is already a probability.
             node_failure_prob = outputs['failure_probability'].squeeze(0).squeeze(-1).cpu().numpy()
             
-            # Squeeze all outputs to remove batch dim
-            failure_timing_raw = outputs.get('failure_timing') # This might be per-edge
+            failure_timing_raw = outputs.get('failure_timing')
             if failure_timing_raw is None:
                  failure_timing_raw = outputs.get('cascade_timing', torch.zeros(1, self.num_nodes, 1))
 
-            # Handle edge-based vs node-based timing
             if failure_timing_raw.shape[1] == self.edge_index.shape[1]:
-                # Edge-based timing (from relay_model)
                 src, dst = self.edge_index.cpu().numpy()
                 failure_timing_edge = failure_timing_raw.squeeze(0).squeeze(-1).cpu().numpy()
                 failure_timing_node = np.full(self.num_nodes, -1.0)
-                # Assign earliest edge failure time to each node
                 for i in range(self.edge_index.shape[1]):
                     s, d = src[i], dst[i]
                     t = failure_timing_edge[i]
@@ -452,7 +432,6 @@ class CascadePredictor:
                     if failure_timing_node[d] == -1.0 or t < failure_timing_node[d]:
                         failure_timing_node[d] = t
             else:
-                # Node-based timing
                 failure_timing_node = failure_timing_raw.squeeze(0).squeeze(-1).cpu().numpy()
 
             
@@ -480,22 +459,19 @@ class CascadePredictor:
             cascade_prob = float(np.max(node_failure_prob))
             cascade_detected = bool(cascade_prob > self.cascade_threshold)
             
-            # --- IMPROVEMENT: Use self.node_threshold ---
             high_risk_nodes_mask = node_failure_prob > self.node_threshold
             
             if cascade_detected and np.any(high_risk_nodes_mask):
                 failure_times = failure_timing_node[high_risk_nodes_mask]
-                # Filter out any unassigned times (-1)
                 valid_failure_times = failure_times[failure_times >= 0]
                 if valid_failure_times.size > 0:
                     time_to_cascade_value = float(np.min(valid_failure_times))
                 else:
-                    time_to_cascade_value = -1.0 # No valid timing found
+                    time_to_cascade_value = -1.0
             else:
                 time_to_cascade_value = -1.0
             
             high_risk_nodes = np.where(high_risk_nodes_mask)[0].tolist()
-            # --- END IMPROVEMENT ---
             
             node_risks = [(i, float(node_failure_prob[i])) for i in range(self.num_nodes)]
             node_risks.sort(key=lambda x: x[1], reverse=True)
@@ -549,13 +525,13 @@ class CascadePredictor:
                         'public_safety': float(aggregated_risk_scores[5]),
                         'urgency': float(aggregated_risk_scores[6])
                     },
-                    'per_node': per_node_risks
+                    'per_node': per_node_risks # Still include for JSON, just won't print
                 },
                 'system_state': {
                     'voltages_pu': voltages_pu.tolist(),
                     'angles_rad': angles_rad.tolist(),
-                    'line_flows_mw': line_flows_mw.tolist(),  # Denormalized to MW
-                    'line_flows_pu': line_flows_pu.tolist(),  # Also keep per-unit
+                    'line_flows_mw': line_flows_mw.tolist(),
+                    'line_flows_pu': line_flows_pu.tolist(),
                     'frequency_hz': float(frequency_hz.item()) if frequency_hz.size == 1 else float(frequency_hz[0]),
                     'frequency_pu': float(frequency_pu.item()) if frequency_pu.size == 1 else float(frequency_pu[0])
                 },
@@ -573,12 +549,10 @@ class CascadePredictor:
         current_idx = 0
         for scenario in self.load_scenarios_streaming(data_path):
             if current_idx == scenario_idx:
-                # --- REMOVED graph_properties ---
-                temporal_data = self.extract_temporal_sequences(scenario)
                 
-                # Make prediction
+                # Extract data and make prediction
+                temporal_data = self.extract_temporal_sequences(scenario)
                 prediction = self.predict(temporal_data, use_temporal=use_temporal)
-                # --- END REMOVED ---
                 
                 # Add ground truth if available
                 if 'metadata' in scenario:
@@ -590,18 +564,17 @@ class CascadePredictor:
                     elif not isinstance(failed_nodes, list):
                         failed_nodes = [failed_nodes] if failed_nodes is not None else []
                     
-                    time_to_cascade = metadata.get('time_to_cascade', -1)
-                    if isinstance(time_to_cascade, np.ndarray):
-                        time_to_cascade = float(time_to_cascade.flatten()[0]) if time_to_cascade.size > 0 else -1.0
-                    elif isinstance(time_to_cascade, (np.floating, np.integer)):
-                        time_to_cascade = float(time_to_cascade)
-                    elif time_to_cascade is None:
-                        time_to_cascade = -1.0
+                    # Extract time from metadata
+                    cascade_start_time = metadata.get('cascade_start_time', -1)
+                    failure_times = metadata.get('failure_times', [])
+                    actual_time_to_cascade = -1.0
+                    if cascade_start_time != -1 and failure_times:
+                        actual_time_to_cascade = float(np.min(failure_times))
                     
                     prediction['ground_truth'] = {
                         'is_cascade': bool(metadata.get('is_cascade', False)),
                         'failed_nodes': [int(x) for x in failed_nodes],
-                        'time_to_cascade': float(time_to_cascade)
+                        'time_to_cascade': actual_time_to_cascade
                     }
                 
                 return prediction
@@ -631,11 +604,10 @@ class CascadePredictor:
                 print(f"  Processed {processed + 1}/{num_scenarios}")
             
             try:
-                # --- REMOVED graph_properties ---
                 temporal_data = self.extract_temporal_sequences(scenario)
                 pred = self.predict(temporal_data, use_temporal=use_temporal)
-                # --- END REMOVED ---
                 
+                # Add ground truth
                 if 'metadata' in scenario:
                     metadata = scenario['metadata']
                     
@@ -645,18 +617,17 @@ class CascadePredictor:
                     elif not isinstance(failed_nodes, list):
                         failed_nodes = [failed_nodes] if failed_nodes is not None else []
                     
-                    time_to_cascade = metadata.get('time_to_cascade', -1)
-                    if isinstance(time_to_cascade, np.ndarray):
-                        time_to_cascade = float(time_to_cascade.flatten()[0]) if time_to_cascade.size > 0 else -1.0
-                    elif isinstance(time_to_cascade, (np.floating, np.integer)):
-                        time_to_cascade = float(time_to_cascade)
-                    elif time_to_cascade is None:
-                        time_to_cascade = -1.0
+                    cascade_start_time = metadata.get('cascade_start_time', -1)
+                    failure_times = metadata.get('failure_times', [])
+                    actual_time_to_cascade = -1.0
+                    if cascade_start_time != -1 and failure_times:
+                        actual_time_to_cascade = float(np.min(failure_times))
                     
                     pred['ground_truth'] = {
                         'is_cascade': bool(metadata.get('is_cascade', False)),
                         'failed_nodes': [int(x) for x in failed_nodes],
-                        'time_to_cascade': float(time_to_cascade)
+                        'time_to_cascade': actual_time_to_cascade,
+                        'scenario_id': processed # Add scenario ID for tracking
                     }
                 
                 predictions.append(pred)
@@ -666,7 +637,7 @@ class CascadePredictor:
                 import traceback
                 print(f"  Error processing scenario {processed}: {e}")
                 print(f"  Traceback: {traceback.format_exc()}")
-                processed += 1
+                processed += 1 # Increment even if error to avoid infinite loop
         
         print(f"✓ Completed processing {len(predictions)} scenarios")
         return predictions
@@ -734,6 +705,151 @@ class CascadePredictor:
         
         return metrics
 
+# ============================================================================
+# NEW: User-Friendly Report Functions
+# ============================================================================
+
+def print_single_prediction_report(prediction: Dict, inference_time: float, cascade_threshold: float, node_threshold: float):
+    """Prints a clear, user-friendly report for a single prediction."""
+    
+    print("\n" + "=" * 80)
+    print("PREDICTION RESULTS (Scenario Analysis)")
+    print("=" * 80)
+    
+    gt = prediction.get('ground_truth', {})
+    actual_cascade = gt.get('is_cascade', False)
+    predicted_cascade = prediction['cascade_detected']
+    
+    # --- 1. Overall Verdict ---
+    print(f"Inference Time: {inference_time:.4f} seconds\n")
+    print("--- 1. Overall Verdict ---")
+    if predicted_cascade and actual_cascade:
+        print("✅ Correctly detected a cascade.")
+    elif not predicted_cascade and not actual_cascade:
+        print("✅ Correctly identified a normal scenario.")
+    elif not predicted_cascade and actual_cascade:
+        print("❌ FALSE NEGATIVE (Missed Cascade)")
+    elif predicted_cascade and not actual_cascade:
+        print("⚠️ FALSE POSITIVE (False Alarm)")
+
+    print(f"Prediction: {predicted_cascade} (Prob: {prediction['cascade_probability']:.3f} / Thresh: {cascade_threshold:.3f})")
+    print(f"Ground Truth: {actual_cascade}")
+
+    # --- 2. Node-Level Analysis ---
+    if actual_cascade or predicted_cascade:
+        print("\n--- 2. Node-Level Analysis ---")
+        predicted_nodes = set(prediction['high_risk_nodes'])
+        actual_nodes = set(gt.get('failed_nodes', []))
+        
+        tp_nodes = len(predicted_nodes.intersection(actual_nodes))
+        fp_nodes = len(predicted_nodes.difference(actual_nodes))
+        fn_nodes = len(actual_nodes.difference(predicted_nodes))
+        
+        print(f"Predicted Nodes at Risk: {len(predicted_nodes)} (Thresh: {node_threshold:.3f})")
+        print(f"Actual Failed Nodes:     {len(actual_nodes)}")
+        print(f"  - Correctly Identified (TP): {tp_nodes}")
+        print(f"  - Missed Nodes (FN):         {fn_nodes}")
+        print(f"  - False Alarms (FP):         {fp_nodes}")
+
+    # --- 3. Timing Analysis ---
+    if actual_cascade or predicted_cascade:
+        print("\n--- 3. Time-to-Cascade Analysis ---")
+        pred_time = prediction['time_to_cascade_minutes']
+        actual_time = gt.get('time_to_cascade', -1.0)
+        
+        if pred_time == -1 and actual_time == -1:
+            print("  - No timing information available.")
+        else:
+            print(f"  - Predicted Lead Time: {pred_time:.2f} minutes")
+            print(f"  - Actual Lead Time:    {actual_time:.2f} minutes")
+
+    # --- 4. Critical Information ---
+    print("\n--- 4. Critical Information ---")
+    print(f"System Frequency: {prediction['system_state']['frequency_hz']:.2f} Hz")
+    print(f"Voltage Range:    [{np.min(prediction['system_state']['voltages_pu']):.3f}, "
+          f"{np.max(prediction['system_state']['voltages_pu']):.3f}] p.u.")
+    
+    print("\nTop 5 High-Risk Nodes:")
+    if not prediction['top_10_risk_nodes']:
+        print("  - None")
+    for node_info in prediction['top_10_risk_nodes'][:5]:
+        print(f"  - Node {node_info['node_id']}: {node_info['failure_probability']:.4f}")
+    
+    print("\nAggregated Risk Assessment (7-Dimensions):")
+    risk = prediction['risk_assessment']['aggregated']
+    print(f"  - Threat: {risk['threat_severity']:.3f} | Vulnerability: {risk['vulnerability']:.3f} | Impact: {risk['operational_impact']:.3f}")
+    print(f"  - Cascade Prob: {risk['cascade_probability']:.3f} | Response: {risk['response_complexity']:.3f} | Safety: {risk['public_safety']:.3f}")
+    
+    print("=" * 80 + "\n")
+
+
+def print_batch_report(predictions: List[Dict], metrics: Dict, total_time: float):
+    """Prints a clear, user-friendly report for a batch prediction run."""
+    
+    print("\n" + "=" * 80)
+    print("BATCH PREDICTION REPORT")
+    print("=" * 80)
+
+    # --- 1. Performance Summary ---
+    print("--- 1. Performance Summary ---")
+    print(f"Total Scenarios: {metrics.get('total_scenarios', 0)}")
+    print(f"Accuracy:        {metrics.get('accuracy', 0):.4f}")
+    print(f"Precision:       {metrics.get('precision', 0):.4f}")
+    print(f"Recall:          {metrics.get('recall', 0):.4f}")
+    print(f"F1 Score:        {metrics.get('f1_score', 0):.4f}")
+    print(f"False Positive Rate: {metrics.get('false_positive_rate', 0):.4f}")
+
+    # --- 2. Timing Summary ---
+    print("\n--- 2. Timing Summary ---")
+    avg_time = total_time / len(predictions) if predictions else 0
+    print(f"Total Inference Time: {total_time:.2f} seconds")
+    print(f"Avg. Time per Scenario: {avg_time:.4f} seconds")
+    print(f"Time-to-Cascade MAE: {metrics.get('time_to_cascade_mae', 0):.2f} minutes")
+    
+    # --- 3. Critical Events Summary ---
+    print("\n--- 3. Critical Events Summary ---")
+    true_positives = []
+    false_positives = []
+    false_negatives = []
+    
+    for i, pred in enumerate(predictions):
+        # Use the scenario_id from ground_truth if available, otherwise just use index
+        scenario_id = pred.get('ground_truth', {}).get('scenario_id', i)
+        gt_cascade = pred.get('ground_truth', {}).get('is_cascade', False)
+        pred_cascade = pred['cascade_detected']
+        
+        if pred_cascade and gt_cascade:
+            true_positives.append(scenario_id)
+        elif pred_cascade and not gt_cascade:
+            false_positives.append(scenario_id)
+        elif not pred_cascade and gt_cascade:
+            false_negatives.append(scenario_id)
+    
+    # False Negatives (Most Important)
+    if not false_negatives:
+        print("✅ False Negatives (Missed Cascades): 0")
+    else:
+        print(f"❌ False Negatives (Missed Cascades): {len(false_negatives)}")
+        print(f"   - Scenario IDs: {false_negatives}")
+
+    # False Positives
+    if not false_positives:
+        print("✅ False Positives (False Alarms): 0")
+    else:
+        print(f"⚠️ False Positives (False Alarms): {len(false_positives)}")
+        print(f"   - Scenario IDs: {false_positives}")
+    
+    # True Positives
+    print(f"✅ True Positives (Detected Cascades): {len(true_positives)}")
+    if true_positives:
+        print(f"   - Scenario IDs (first 20): {true_positives[:20]}{'...' if len(true_positives) > 20 else ''}")
+        
+    print("=" * 80 + "\n")
+
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
 
 def main():
     """Main inference function."""
@@ -741,19 +857,18 @@ def main():
     parser.add_argument("--model_path", type=str, required=True, help="Path to model checkpoint")
     parser.add_argument("--topology_path", type=str, default="data/grid_topology.pkl", 
                        help="Path to topology file")
-    parser.add_argument("--data_path", type=str, default="data/test_batches", 
-                       help="Path to test data file or directory (default: data/test_batches)")
+    parser.add_argument("--data_path", type=str, default="data/test", 
+                       help="Path to test data file or directory (default: data/test)")
     parser.add_argument("--scenario_idx", type=int, default=0, 
                        help="Scenario index for single prediction")
-    parser.add_argument("--batch", action="store_true", help="Run batch prediction")
+    parser.add_argument("--batch", action="store_true", help="Run batch prediction on all scenarios in data_path")
     parser.add_argument("--max_scenarios", type=int, default=None, 
                        help="Max scenarios for batch prediction")
     parser.add_argument("--output", type=str, default="predictions.json", 
                        help="Output file for predictions")
     parser.add_argument("--device", type=str, 
-                       default="cuda" if torch.cuda.is_available() else "cpu", 
-                       help="Device")
-    # Removed cascade_threshold argument, as it's now loaded from the model
+                       default=None, 
+                       help="Device (e.g., 'cuda', 'cpu'). Autodetects if not set.")
     parser.add_argument("--base_mva", type=float, default=100.0,
                        help="Base MVA for power normalization (default: 100.0)")
     parser.add_argument("--base_frequency", type=float, default=60.0,
@@ -763,12 +878,24 @@ def main():
     
     args = parser.parse_args()
     
-    # Initialize predictor with normalization parameters
+    # --- Device Selection ---
+    if args.device:
+        DEVICE = torch.device(args.device)
+    else:
+        DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    if not torch.cuda.is_available() and DEVICE.type == 'cuda':
+        print("WARNING: CUDA not available, falling back to CPU.")
+        DEVICE = torch.device("cpu")
+    
+    print(f"Using device: {DEVICE}")
+    
+    # Initialize predictor
+    global predictor # Make predictor global so helper functions can see thresholds
     predictor = CascadePredictor(
         model_path=args.model_path,
         topology_path=args.topology_path,
-        device=args.device,
-        # cascade_threshold is now loaded internally
+        device=DEVICE,
         base_mva=args.base_mva,
         base_frequency=args.base_frequency
     )
@@ -780,80 +907,61 @@ def main():
     use_temporal = not args.no_temporal
     
     if args.batch:
+        # --- Batch Prediction Mode ---
+        start_time = time.time()
         predictions = predictor.batch_predict(
             args.data_path, 
             args.max_scenarios,
             use_temporal=use_temporal
         )
+        total_time = time.time() - start_time
         
+        if not predictions:
+            print("No predictions were generated. Exiting.")
+            return
+
         metrics = predictor.evaluate_predictions(predictions)
         
-        print("\n" + "=" * 80)
-        print("EVALUATION RESULTS")
-        print("=" * 80)
-        print(f"Total scenarios: {metrics.get('total_scenarios', 0)}")
-        print(f"Accuracy: {metrics.get('accuracy', 0):.4f}")
-        print(f"Precision: {metrics.get('precision', 0):.4f}")
-        print(f"Recall: {metrics.get('recall', 0):.4f}")
-        print(f"F1 Score: {metrics.get('f1_score', 0):.4f}")
-        print(f"False Positive Rate: {metrics.get('false_positive_rate', 0):.4f}")
-        print(f"Time-to-Cascade MAE: {metrics.get('time_to_cascade_mae', 0):.2f} minutes")
-        print(f"Time-to-Cascade Median Error: {metrics.get('time_to_cascade_median_error', 0):.2f} minutes")
-        print("=" * 80 + "\n")
+        # Print the new user-friendly batch report
+        print_batch_report(predictions, metrics, total_time)
         
+        # Save the full data to JSON for deep analysis
         results = {
-            'predictions': predictions,
-            'metrics': metrics
+            'metrics': metrics,
+            'predictions': predictions
         }
         with open(args.output, 'w') as f:
             json.dump(results, f, indent=2, cls=NumpyEncoder)
-        print(f"Results saved to {args.output}")
+        print(f"Full batch results saved to {args.output}")
     
     else:
-        prediction = predictor.predict_from_file(
-            args.data_path, 
-            args.scenario_idx,
-            use_temporal=use_temporal
-        )
-        
-        print("\n" + "=" * 80)
-        print("PREDICTION RESULTS")
-        print("=" * 80)
-        print(f"Temporal Processing: {'ENABLED (Full Sequence)' if use_temporal else 'DISABLED (Last Timestep)'}")
-        print(f"Cascade Detected: {prediction['cascade_detected']}")
-        print(f"Cascade Probability: {prediction['cascade_probability']:.4f} (Threshold: {predictor.cascade_threshold:.4f})")
-        print(f"Time to Cascade: {prediction['time_to_cascade_minutes']:.2f} minutes")
-        print(f"Nodes at Risk: {prediction['total_nodes_at_risk']} (Threshold: {predictor.node_threshold:.4f})")
-        
-        print("\nTop 10 High-Risk Nodes:")
-        for node_info in prediction['top_10_risk_nodes']:
-            print(f"  Node {node_info['node_id']}: {node_info['failure_probability']:.4f}")
-        
-        print("\nSystem State:")
-        print(f"  Frequency: {prediction['system_state']['frequency_hz']:.2f} Hz")
-        print(f"  Voltage Range: [{np.min(prediction['system_state']['voltages_pu']):.3f}, "
-              f"{np.max(prediction['system_state']['voltages_pu']):.3f}] p.u.")
-        print(f"  Line Flow Range: [{np.min(prediction['system_state']['line_flows_mw']):.1f}, "
-              f"{np.max(prediction['system_state']['line_flows_mw']):.1f}] MW")
-        
-        print("\nCascade Propagation Path (Predicted):")
-        if not prediction['cascade_path']:
-            print("  No propagation path predicted.")
-        for step in prediction['cascade_path'][:5]:
-            print(f"  Node {step['node_id']} fails at {step['time_minutes']:.2f} minutes")
-        
-        if 'ground_truth' in prediction:
-            gt = prediction['ground_truth']
-            print("\nGround Truth:")
-            print(f"  Actual Cascade: {gt['is_cascade']}")
-            print(f"  Actual Failed Nodes: {len(gt.get('failed_nodes', []))}")
-            print(f"  Actual Time: {gt.get('time_to_cascade', -1):.2f} minutes")
-        
-        print("=" * 80 + "\n")
-        
-        with open(args.output, 'w') as f:
-            json.dump(prediction, f, indent=2, cls=NumpyEncoder)
-        print(f"Prediction saved to {args.output}")
+        # --- Single Prediction Mode ---
+        try:
+            start_time = time.time()
+            prediction = predictor.predict_from_file(
+                args.data_path, 
+                args.scenario_idx,
+                use_temporal=use_temporal
+            )
+            inference_time = time.time() - start_time
+            
+            # Print the new user-friendly single report
+            print_single_prediction_report(
+                prediction, 
+                inference_time,
+                predictor.cascade_threshold,
+                predictor.node_threshold
+            )
+
+            # Save the full data to JSON
+            with open(args.output, 'w') as f:
+                json.dump(prediction, f, indent=2, cls=NumpyEncoder)
+            print(f"Full prediction details saved to {args.output}")
+            
+        except ValueError as e:
+            print(f"\nError: {e}")
+            print(f"Could not load scenario index {args.scenario_idx}.")
+            print("Please ensure the index is valid and the data path is correct.")
 
 
 if __name__ == "__main__":
