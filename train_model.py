@@ -447,27 +447,43 @@ class Trainer:
         for key, val in avg_losses.items():
             print(f"    {key}: {val:.6f}")
             
+        # ====================================================================
+        # START: NEW BALANCING LOGIC (Based on user's best idea)
+        # ====================================================================
+        
         target_magnitude = avg_losses.get('prediction', 0.1)
-        if target_magnitude < 1e-6: target_magnitude = 0.1
-        
+        # Ensure target_magnitude is not zero to prevent division by zero
+        if target_magnitude < 1e-9: target_magnitude = 1e-9 
         print(f"\n  Target magnitude (from prediction loss): {target_magnitude:.6f}")
+
+        physics_loss_keys = ['powerflow', 'capacity', 'voltage', 'frequency']
+        calibrated_lambdas = {}
         
-        calibrated_lambdas = {
-            'lambda_powerflow': target_magnitude / (avg_losses.get('powerflow', target_magnitude) + 1e-9),
-            'lambda_capacity': target_magnitude / (avg_losses.get('capacity', target_magnitude) + 1e-9),
-            'voltage': target_magnitude / (avg_losses.get('voltage', target_magnitude) + 1e-9),
-            'lambda_frequency': target_magnitude / (avg_losses.get('frequency', target_magnitude) + 1e-9),
-        }
+        print("\n  Calibrating lambda weights (Target-Value Strategy):")
         
-        print("\n  Calibrated lambda weights:")
-        max_lambda = 1e6
-        for key, val in calibrated_lambdas.items():
-            val = min(val, max_lambda)
-            calibrated_lambdas[key] = val
+        for key in physics_loss_keys:
+            raw_loss = avg_losses.get(key, 0.0)
             
-            component_name = key.split('_')[-1] # powerflow, capacity, voltage, frequency
-            raw_loss = avg_losses.get(component_name, 0)
-            print(f"    {key}: {val:10.2f}  (Weighted Target: {val * raw_loss:.4f})")
+            # This is your logic:
+            # If the raw loss is near zero, we calculate its lambda
+            # as if its value was the target_magnitude.
+            if raw_loss < 1e-6:
+                denominator = target_magnitude 
+                # This makes lambda_val = target_magnitude / target_magnitude = 1.0
+            else:
+                denominator = raw_loss
+            
+            lambda_val = target_magnitude / denominator
+            
+            # Handle the 'lambda_' prefix for the criterion's keys
+            lambda_key = f"lambda_{key}" if key != 'voltage' else 'voltage'
+            calibrated_lambdas[lambda_key] = lambda_val
+            
+            print(f"    {lambda_key}: {lambda_val:10.4f}  (Raw Loss: {raw_loss:.6f}, Denom: {denominator:.6f}, Initial Weighted Loss: {lambda_val * raw_loss:.4f})")
+        
+        # ====================================================================
+        # END: NEW BALANCING LOGIC
+        # ====================================================================
             
         self.model.train()
         return calibrated_lambdas
@@ -573,30 +589,34 @@ class Trainer:
             for comp_name, comp_value in loss_components.items():
                 loss_component_sums[comp_name] = loss_component_sums.get(comp_name, 0.0) + comp_value
             
-            # --- Metrics Calculation ---
-            node_probs = outputs['failure_probability'].squeeze(-1) # [B, N]
-            cascade_prob = node_probs.max(dim=1)[0] # [B]
+            # ====================================================================
+            # START: NEW TQDM DISPLAY LOGIC (Based on user's feedback)
+            # ====================================================================
             
-            cascade_pred = (cascade_prob > self.cascade_threshold).float()
-            cascade_labels = (batch_device['node_failure_labels'].max(dim=1)[0] > 0.5).float()
+            # 1. Set a simple description that won't overflow
+            pbar.set_description(f"Training (Loss: {loss.item():.4f}, Grad: {grad_norm:.2f})")
             
-            cascade_tp += ((cascade_pred == 1) & (cascade_labels == 1)).sum().item()
-            cascade_fp += ((cascade_pred == 1) & (cascade_labels == 0)).sum().item()
-            cascade_tn += ((cascade_pred == 0) & (cascade_labels == 0)).sum().item()
-            cascade_fn += ((cascade_pred == 0) & (cascade_labels == 1)).sum().item()
+            # --- Metrics Calculation (moved up for postfix) ---
+            node_probs_current = outputs['failure_probability'].squeeze(-1) # [B, N]
+            node_pred_current = (node_probs_current > self.node_threshold).float() # [B, N]
+            node_labels_current = batch_device['node_failure_labels']  # [B, N]
             
-            node_pred = (node_probs > self.node_threshold).float() # [B, N]
-            node_labels = batch_device['node_failure_labels']  # [B, N]
+            cascade_prob_current = node_probs_current.max(dim=1)[0] # [B]
+            cascade_pred_current = (cascade_prob_current > self.cascade_threshold).float()
+            cascade_labels_current = (node_labels_current.max(dim=1)[0] > 0.5).float()
             
-            node_tp += ((node_pred == 1) & (node_labels == 1)).sum().item()
-            node_fp += ((node_pred == 1) & (node_labels == 0)).sum().item()
-            node_tn += ((node_pred == 0) & (node_labels == 0)).sum().item()
-            node_fn += ((node_pred == 0) & (node_labels == 1)).sum().item()
+            # Update totals
+            cascade_tp += ((cascade_pred_current == 1) & (cascade_labels_current == 1)).sum().item()
+            cascade_fp += ((cascade_pred_current == 1) & (cascade_labels_current == 0)).sum().item()
+            cascade_tn += ((cascade_pred_current == 0) & (cascade_labels_current == 0)).sum().item()
+            cascade_fn += ((cascade_pred_current == 0) & (cascade_labels_current == 1)).sum().item()
             
-            if batch_idx % 20 == 0:
-                loss_str = ", ".join([f'{k}={v:.4f}' for k, v in loss_components.items()])
-                pbar.set_description(f"Training (Loss: {loss.item():.4f}, Grad: {grad_norm:.2f}, Comp: [{loss_str}])")
-            
+            node_tp += ((node_pred_current == 1) & (node_labels_current == 1)).sum().item()
+            node_fp += ((node_pred_current == 1) & (node_labels_current == 0)).sum().item()
+            node_tn += ((node_pred_current == 0) & (node_labels_current == 0)).sum().item()
+            node_fn += ((node_pred_current == 0) & (node_labels_current == 1)).sum().item()
+
+            # Calculate running metrics for display
             cascade_precision = cascade_tp / (cascade_tp + cascade_fp + 1e-7)
             cascade_recall = cascade_tp / (cascade_tp + cascade_fn + 1e-7)
             cascade_f1 = 2 * cascade_precision * cascade_recall / (cascade_precision + cascade_recall + 1e-7)
@@ -605,14 +625,22 @@ class Trainer:
             node_recall = node_tp / (node_tp + node_fn + 1e-7)
             node_f1 = 2 * node_precision * node_recall / (node_precision + node_recall + 1e-7)
             
+            # 2. Set a clean, ultra-compact postfix that will fit on one line
             pbar.set_postfix({
-                'loss': f"{loss.item():.4f}",
-                'casc_f1': f"{cascade_f1:.4f}",
-                'node_f1': f"{node_f1:.4f}",
-                'casc_rec': f"{cascade_recall:.4f}",
-                'node_rec': f"{node_recall:.4f}",
+                'cF1': f"{cascade_f1:.3f}",
+                'cR': f"{cascade_recall:.3f}",
+                'nF1': f"{node_f1:.3f}",
+                'pL': f"{loss_components.get('prediction', 0):.3f}",
+                'pwL': f"{loss_components.get('powerflow', 0):.2f}",
+                'cpL': f"{loss_components.get('capacity', 0):.2f}",
+                'vL': f"{loss_components.get('voltage', 0):.2f}",
+                'fL': f"{loss_components.get('frequency', 0):.2f}",
             })
-        
+            
+            # ====================================================================
+            # END: NEW TQDM DISPLAY LOGIC
+            # ====================================================================
+
         # Compute final epoch metrics
         avg_loss = total_loss / (len(self.train_loader) + 1e-7)
         cascade_precision = cascade_tp / (cascade_tp + cascade_fp + 1e-7)
@@ -1055,20 +1083,26 @@ if __name__ == "__main__":
     print(f"\nLoading datasets...")
     # --- Pass normalization constants to Dataset ---
     try:
+        # ====================================================================
+        # START: MEMORY FIX (cache_size=1)
+        # ====================================================================
         train_dataset = CascadeDataset(
             f"{DATA_DIR}/train", 
             mode='full_sequence', 
-            cache_size=1,
+            cache_size=1, # <-- FIX: Only keep 1 file in memory
             base_mva=args.base_mva,
             base_frequency=args.base_freq
         )
         val_dataset = CascadeDataset(
             f"{DATA_DIR}/val", 
             mode='full_sequence', 
-            cache_size=1,
+            cache_size=1, # <-- FIX: Only keep 1 file in memory
             base_mva=args.base_mva,
             base_frequency=args.base_freq
         )
+        # ====================================================================
+        # END: MEMORY FIX
+        # ====================================================================
     except ValueError as e:
         print(f"\n[ERROR] Failed to load dataset: {e}")
         print("Please ensure you have run multimodal_data_generator.py to create the data")
@@ -1116,25 +1150,31 @@ if __name__ == "__main__":
         replacement=True
     )
     
+    # ====================================================================
+    # START: MEMORY FIX (num_workers=0)
+    # ====================================================================
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
         sampler=sampler,
-        num_workers=0,
-        pin_memory=False,
+        num_workers=0,          # <-- FIX: Use main thread, no workers
+        pin_memory=False,       # <-- FIX: Fixes warning, not needed for CPU
         collate_fn=collate_cascade_batch,
-        persistent_workers=False
+        persistent_workers=False  # <-- FIX: Required when num_workers=0
     )
     
     val_loader = DataLoader(
         val_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
-        num_workers=0,
-        pin_memory=False,
+        num_workers=0,          # <-- FIX: Use main thread, no workers
+        pin_memory=False,       # <-- FIX: Fixes warning, not needed for CPU
         collate_fn=collate_cascade_batch,
-        persistent_workers=False
+        persistent_workers=False  # <-- FIX: Required when num_workers=0
     )
+    # ====================================================================
+    # END: MEMORY FIX
+    # ====================================================================
     
     # Initialize model
     print(f"\nInitializing model...")
