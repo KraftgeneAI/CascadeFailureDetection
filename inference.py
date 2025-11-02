@@ -988,7 +988,7 @@ def main():
 
             # Save the full data to JSON
             with open(args.output, 'w') as f:
-                json.dump(prediction, f, indent=2, cls=NipEncoder)
+                json.dump(prediction, f, indent=2, cls=NumpyEncoder)
             print(f"Full prediction details saved to {args.output}")
             
         except ValueError as e:
