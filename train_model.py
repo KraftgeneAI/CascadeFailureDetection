@@ -58,15 +58,15 @@ class PhysicsInformedLoss(nn.Module):
     - Focal Loss (from train_model.py) for class imbalance.
     - REAL Physics Constraints (from multimodal_cascade_model.py) for power flow,
       capacity, and voltage stability.
-    - Heuristic Frequency Loss (from train_model.py) as the physics-based
-      version was incompatible with the data pipeline.
+    - ***NEW: Physics-based frequency loss using the swing equation.***
     """
     
     def __init__(self, lambda_powerflow: float = 0.1, lambda_capacity: float = 0.1,
                  lambda_stability: float = 0.001, lambda_frequency: float = 0.1,
                  lambda_reactive: float = 0.1, 
                  pos_weight: float = 10.0, focal_alpha: float = 0.25, focal_gamma: float = 2.0,
-                 label_smoothing: float = 0.15, use_logits: bool = False):
+                 label_smoothing: float = 0.15, use_logits: bool = False,
+                 base_mva: float = 100.0, base_freq: float = 60.0):
         super(PhysicsInformedLoss, self).__init__()
         
         self.lambda_powerflow = lambda_powerflow
@@ -85,8 +85,8 @@ class PhysicsInformedLoss(nn.Module):
         self._warned_missing_outputs = set()
         
         # Constants for physics (can be overridden by graph_properties if available)
-        self.power_base = 100.0
-        self.freq_nominal = 60.0
+        self.power_base = base_mva
+        self.freq_nominal = base_freq
 
     # --- Focal Loss (from original train_model.py) ---
     def focal_loss(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
@@ -196,6 +196,49 @@ class PhysicsInformedLoss(nn.Module):
         high_violations = F.relu(voltages - voltage_max)
         return torch.mean(low_violations ** 2 + high_violations ** 2)
 
+    # ====================================================================
+    # START: NEW PHYSICS-BASED FREQUENCY LOSS
+    # ====================================================================
+    def frequency_loss(self, predicted_freq_Hz: torch.Tensor, 
+                       power_injection_pu: torch.Tensor,
+                       nominal_freq_Hz: float = 60.0,
+                       total_inertia_H: float = 5.0) -> torch.Tensor:
+        """
+        Compute REAL physics-based frequency loss using the swing equation.
+        Converts predicted Hz and p.u. power imbalance to a common p.u. space.
+        
+        Args:
+            predicted_freq_Hz: Model's predicted frequency [B, 1, 1] (in Hz)
+            power_injection_pu: Net power injection at each node [B, N] (in p.u.)
+            nominal_freq_Hz: System nominal frequency (e.g., 60.0)
+            total_inertia_H: Heuristic system inertia constant (H) in seconds.
+        """
+        
+        # 1. Convert predicted Hz to p.u.
+        # predicted_freq_Hz is [B, 1, 1]
+        predicted_freq_pu = predicted_freq_Hz / nominal_freq_Hz
+        
+        # 2. Calculate total system power imbalance (p.u.)
+        # power_injection_pu is [B, N], sum over nodes (dim=1)
+        # Result is [B]
+        system_power_imbalance_pu = torch.sum(power_injection_pu, dim=1)
+        
+        # 3. Simplified Swing Equation (steady-state deviation)
+        # d_f_pu = P_imbalance_pu / (2 * H_total)
+        # P_imbalance is [B], H is scalar. Result is [B]
+        expected_freq_deviation_pu = system_power_imbalance_pu / (2 * total_inertia_H)
+        
+        # 4. Calculate expected p.u. frequency
+        # expected_freq = 1.0 p.u. + deviation
+        # Reshape deviation to match predicted_freq_pu [B, 1, 1]
+        expected_freq_pu = 1.0 + expected_freq_deviation_pu.view(-1, 1, 1)
+        
+        # 5. Compute MSE loss in p.u. space
+        return F.mse_loss(predicted_freq_pu, expected_freq_pu)
+    # ====================================================================
+    # END: NEW PHYSICS-BASED FREQUENCY LOSS
+    # ====================================================================
+
     # --- Merged Forward Pass ---
     def forward(self, predictions: Dict[str, torch.Tensor],
                 targets: Dict[str, torch.Tensor],
@@ -265,26 +308,30 @@ class PhysicsInformedLoss(nn.Module):
             total_loss += self.lambda_stability * L_stability
             loss_components['voltage'] = L_stability.item()
 
-        # 4. Frequency Loss (Heuristic)
-        if 'frequency' in predictions:
-            targets_reshaped = targets_flat.reshape(B, N)
-            has_cascade = (targets_reshaped.sum(dim=1) > 0).float()  # [B]
+        # ====================================================================
+        # START: REPLACED HEURISTIC WITH PHYSICS-BASED LOSS
+        # ====================================================================
+        # 4. Frequency Loss (PHYSICS-BASED)
+        if 'frequency' in predictions and get_prop('power_injection') is not None:
             
-            predicted_freq = predictions['frequency']  # [B, 1, 1]
+            predicted_freq_Hz = predictions['frequency']  # [B, 1, 1] (in Hz)
             
-            # Data loader should normalize frequency, so model predicts p.u. (around 1.0)
-            predicted_freq_pu = predicted_freq
+            # power_injection is [B, N] from data loader (already p.u.)
+            power_injection_pu = get_prop('power_injection')
             
-            has_cascade_expanded = has_cascade.view(B, 1, 1).expand_as(predicted_freq_pu)
+            L_frequency = self.frequency_loss(
+                predicted_freq_Hz,
+                power_injection_pu,
+                nominal_freq_Hz=self.freq_nominal,
+                total_inertia_H=5.0 # Heuristic system inertia
+            )
             
-            # Expected frequency during cascade: 0.99 p.u. (e.g., 59.4 Hz / 60 Hz)
-            # Expected frequency during normal: 1.0 p.u.
-            expected_freq = 1.0 - 0.01 * has_cascade_expanded
-            
-            L_frequency = torch.mean((predicted_freq_pu - expected_freq) ** 2)
             L_frequency = torch.clamp(L_frequency, 0.0, 10.0)
             total_loss += self.lambda_frequency * L_frequency
             loss_components['frequency'] = L_frequency.item()
+        # ====================================================================
+        # END: REPLACEMENT
+        # ====================================================================
         
         return total_loss, loss_components
 
@@ -306,7 +353,9 @@ class Trainer:
         output_dir: str = "checkpoints",
         max_grad_norm: float = 5.0,
         use_amp: bool = False,
-        model_outputs_logits: bool = False
+        model_outputs_logits: bool = False,
+        base_mva: float = 100.0,    # Added for loss
+        base_freq: float = 60.0     # Added for loss
     ):
         self.model = model
         self.train_loader = train_loader
@@ -325,13 +374,11 @@ class Trainer:
         self.use_amp = use_amp
         self.model_outputs_logits = model_outputs_logits
         
-        # ====================================================================
-        # START: FIX FOR `FutureWarning` (GradScaler)
-        # ====================================================================
+        # Pass base mva/freq to loss
+        self.base_mva = base_mva
+        self.base_freq = base_freq
+        
         self.scaler = torch.amp.GradScaler('cuda') if use_amp and self.device.type == 'cuda' else None
-        # ====================================================================
-        # END: FIX FOR `FutureWarning`
-        # ====================================================================
         
         os.makedirs(output_dir, exist_ok=True)
         
@@ -367,7 +414,9 @@ class Trainer:
             focal_alpha=0.25,
             focal_gamma=2.0,
             label_smoothing=0.1,
-            use_logits=model_outputs_logits
+            use_logits=model_outputs_logits,
+            base_mva=self.base_mva,
+            base_freq=self.base_freq
         )
         print("\n✓ PhysicsInformedLoss (Merged) initialized with dynamically calibrated weights.")
         
@@ -393,7 +442,9 @@ class Trainer:
             lambda_powerflow=1.0, lambda_capacity=1.0,
             lambda_stability=1.0, lambda_frequency=1.0,
             lambda_reactive=1.0, 
-            use_logits=self.model_outputs_logits
+            use_logits=self.model_outputs_logits,
+            base_mva=self.base_mva,
+            base_freq=self.base_freq
         )
         
         loss_sums = {}
@@ -553,13 +604,7 @@ class Trainer:
             # --- End modification ---
             
             if self.use_amp and self.scaler is not None:
-                # ====================================================================
-                # START: FIX FOR `FutureWarning` (autocast)
-                # ====================================================================
                 with torch.amp.autocast('cuda'):
-                # ====================================================================
-                # END: FIX FOR `FutureWarning`
-                # ====================================================================
                     outputs = self.model(batch_device, return_sequence=True)
                     
                     if not self._model_validated:
@@ -1095,26 +1140,20 @@ if __name__ == "__main__":
     print(f"\nLoading datasets...")
     # --- Pass normalization constants to Dataset ---
     try:
-        # ====================================================================
-        # START: MEMORY FIX (cache_size=1)
-        # ====================================================================
         train_dataset = CascadeDataset(
             f"{DATA_DIR}/train", 
             mode='full_sequence', 
-            cache_size=1, # <-- FIX: Only keep 1 file in memory
+            cache_size=1, # Only keep 1 file in memory
             base_mva=args.base_mva,
             base_frequency=args.base_freq
         )
         val_dataset = CascadeDataset(
             f"{DATA_DIR}/val", 
             mode='full_sequence', 
-            cache_size=1, # <-- FIX: Only keep 1 file in memory
+            cache_size=1, # Only keep 1 file in memory
             base_mva=args.base_mva,
             base_frequency=args.base_freq
         )
-        # ====================================================================
-        # END: MEMORY FIX
-        # ====================================================================
     except ValueError as e:
         print(f"\n[ERROR] Failed to load dataset: {e}")
         print("Please ensure you have run multimodal_data_generator.py to create the data")
@@ -1162,31 +1201,25 @@ if __name__ == "__main__":
         replacement=True
     )
     
-    # ====================================================================
-    # START: MEMORY FIX (num_workers=0)
-    # ====================================================================
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
         sampler=sampler,
-        num_workers=0,          # <-- FIX: Use main thread, no workers
-        pin_memory=False,       # <-- FIX: Fixes warning, not needed for CPU
+        num_workers=0,
+        pin_memory=False,
         collate_fn=collate_cascade_batch,
-        persistent_workers=False  # <-- FIX: Required when num_workers=0
+        persistent_workers=False
     )
     
     val_loader = DataLoader(
         val_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
-        num_workers=0,          # <-- FIX: Use main thread, no workers
-        pin_memory=False,       # <-- FIX: Fixes warning, not needed for CPU
+        num_workers=0,
+        pin_memory=False,
         collate_fn=collate_cascade_batch,
-        persistent_workers=False  # <-- FIX: Required when num_workers=0
+        persistent_workers=False
     )
-    # ====================================================================
-    # END: MEMORY FIX
-    # ====================================================================
     
     # Initialize model
     print(f"\nInitializing model...")
@@ -1214,7 +1247,9 @@ if __name__ == "__main__":
         output_dir=OUTPUT_DIR,
         max_grad_norm=MAX_GRAD_NORM,
         use_amp=USE_AMP,
-        model_outputs_logits=MODEL_OUTPUTS_LOGITS
+        model_outputs_logits=MODEL_OUTPUTS_LOGITS,
+        base_mva=args.base_mva,
+        base_freq=args.base_freq
     )
     
     checkpoint_path = f"{OUTPUT_DIR}/latest_checkpoint.pth"
