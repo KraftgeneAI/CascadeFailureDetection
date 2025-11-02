@@ -51,6 +51,13 @@ class MemoryMonitor:
 class PhysicsBasedGridSimulator:
     """
     Rule-based power grid simulator with CONSISTENT PATTERNS.
+    
+    --- ADVANCED FEATURES ---
+    1.  Partial Failure: Nodes can enter a "Damaged" state (partial failure)
+        which does not propagate a cascade, simulating a cascade "fizzling out".
+        The final "node_label" for the model remains 0 for this state.
+    2.  Directed Propagation: Cascade propagation is directed (e.g., A -> B,
+        but not B -> A), respecting the grid hierarchy (Gen -> Sub -> Load).
     """
     
     def __init__(self, num_nodes: int = 118, seed: int = 42, topology_file: str = None):
@@ -84,7 +91,7 @@ class PhysicsBasedGridSimulator:
         
         print(f"Initialized grid: {self.num_nodes} nodes, {self.num_edges} edges")
         print(f"  Node failure rules: loading, voltage, temperature, frequency thresholds")
-        print(f"  Cascade propagation: graph-based (A→B→C)")
+        print(f"  Cascade propagation: graph-based (A->B->C)")
     
     def _generate_realistic_topology(self) -> np.ndarray:
         """Generate realistic meshed grid topology."""
@@ -158,7 +165,7 @@ class PhysicsBasedGridSimulator:
         Initialize node properties and FAILURE RULES.
         These are the patterns the model will learn!
         """
-        # Node types
+        # Node types: 0=Load, 1=Generator, 2=Substation
         self.node_types = np.zeros(self.num_nodes, dtype=int)
         num_generators = int(self.num_nodes * 0.22)
         gen_indices = np.random.choice(self.num_nodes, num_generators, replace=False)
@@ -192,17 +199,23 @@ class PhysicsBasedGridSimulator:
             else:
                 self.base_load[i] = np.random.uniform(30, 200)
         
+        # --- MODIFIED: Added Partial Failure (Damage) Thresholds ---
         # Loading threshold: node fails if loading > threshold
         self.loading_failure_threshold = np.random.uniform(1.05, 1.15, self.num_nodes)
+        self.loading_damage_threshold = self.loading_failure_threshold - np.random.uniform(0.05, 0.1) # e.g., 1.0
         
         # Voltage threshold: node fails if voltage < threshold
         self.voltage_failure_threshold = np.random.uniform(0.88, 0.92, self.num_nodes)
+        self.voltage_damage_threshold = self.voltage_failure_threshold + np.random.uniform(0.03, 0.05) # e.g., 0.95
         
         # Temperature threshold: node fails if temperature > threshold
         self.temperature_failure_threshold = np.random.uniform(85, 95, self.num_nodes)
+        self.temperature_damage_threshold = self.temperature_failure_threshold - np.random.uniform(10, 15) # e.g., 75-80
         
         # Frequency threshold: node fails if frequency < threshold
         self.frequency_failure_threshold = np.random.uniform(58.5, 59.2, self.num_nodes)
+        self.frequency_damage_threshold = self.frequency_failure_threshold + np.random.uniform(0.3, 0.5) # e.g., 59.5
+        # --- END MODIFIED ---
         
         # Equipment age and condition
         self.equipment_age = np.random.uniform(0, 40, self.num_nodes)
@@ -217,11 +230,11 @@ class PhysicsBasedGridSimulator:
         self.cooling_effectiveness = np.random.uniform(0.7, 1.0, self.num_nodes)
         self.equipment_temperatures = np.full(self.num_nodes, 25.0)
         
-        print(f"  Defined failure thresholds:")
-        print(f"    Loading: {self.loading_failure_threshold.mean():.2f} ± {self.loading_failure_threshold.std():.2f}")
-        print(f"    Voltage: {self.voltage_failure_threshold.mean():.2f} ± {self.voltage_failure_threshold.std():.2f}")
-        print(f"    Temperature: {self.temperature_failure_threshold.mean():.1f} ± {self.temperature_failure_threshold.std():.1f}°C")
-        print(f"    Frequency: {self.frequency_failure_threshold.mean():.2f} ± {self.frequency_failure_threshold.std():.2f} Hz")
+        print(f"  Defined failure thresholds (Damage / Failure):")
+        print(f"    Loading: {self.loading_damage_threshold.mean():.2f} / {self.loading_failure_threshold.mean():.2f}")
+        print(f"    Voltage: {self.voltage_damage_threshold.mean():.2f} / {self.voltage_failure_threshold.mean():.2f}")
+        print(f"    Temperature: {self.temperature_damage_threshold.mean():.1f}°C / {self.temperature_failure_threshold.mean():.1f}°C")
+        print(f"    Frequency: {self.frequency_damage_threshold.mean():.2f} Hz / {self.frequency_failure_threshold.mean():.2f} Hz")
     
     def _initialize_edge_features_and_cascade_rules(self):
         """
@@ -253,12 +266,41 @@ class PhysicsBasedGridSimulator:
         # Higher weight = stronger cascade effect
         self.cascade_propagation_weight = np.random.uniform(0.6, 0.9, self.num_edges)
         
-        # Build adjacency list for fast cascade propagation
+        # --- MODIFIED: Implement directed cascade propagation (A->B but not B->A) ---
+        print("  Building DIRECTED cascade propagation graph (Gen -> Sub -> Load)")
         self.adjacency_list = [[] for _ in range(self.num_nodes)]
+        node_types = self.node_types # 0=Load, 1=Gen, 2=Sub
+        
         for i in range(self.num_edges):
             s, d = int(src[i]), int(dst[i])
-            self.adjacency_list[s].append((d, i, self.cascade_propagation_weight[i]))
-            self.adjacency_list[d].append((s, i, self.cascade_propagation_weight[i]))
+            s_type, d_type = node_types[s], node_types[d]
+            weight = self.cascade_propagation_weight[i]
+
+            # Helper function to add a directed edge
+            def add_edge(u, v, edge_idx, prop_weight):
+                self.adjacency_list[u].append((v, edge_idx, prop_weight))
+
+            # Logic: Power flows "downhill" from Gen(1) to Sub(2) to Load(0)
+            # Peers (same type) can cascade in both directions
+            if s_type == d_type:
+                add_edge(s, d, i, weight)
+                add_edge(d, s, i, weight)
+            
+            # Gen(1) -> Sub(2)
+            elif s_type == 1 and d_type == 2: add_edge(s, d, i, weight)
+            elif s_type == 2 and d_type == 1: add_edge(d, s, i, weight) # Allow Sub -> Gen (e.g., fault propagation)
+
+            # Gen(1) -> Load(0)
+            elif s_type == 1 and d_type == 0: add_edge(s, d, i, weight)
+            elif s_type == 0 and d_type == 1: pass # Load failure does not propagate to Gen
+
+            # Sub(2) -> Load(0)
+            elif s_type == 2 and d_type == 0: add_edge(s, d, i, weight)
+            elif s_type == 0 and d_type == 2: pass # Load failure does not propagate to Sub
+        
+        total_directed_paths = sum(len(paths) for paths in self.adjacency_list)
+        print(f"    Total directed propagation paths: {total_directed_paths} (vs {self.num_edges * 2} if undirected)")
+        # --- END MODIFIED ---
         
         print(f"  Cascade propagation weights: {self.cascade_propagation_weight.mean():.2f} ± {self.cascade_propagation_weight.std():.2f}")
     
@@ -344,7 +386,7 @@ class PhysicsBasedGridSimulator:
         self.zone1_reach = self.line_reactance * 0.85  # Zone 1: 85% of line (instantaneous)
         self.zone2_reach = self.line_reactance * 1.20  # Zone 2: 120% of line (0.3-0.5s delay)
         
-        # Differential relay settings for nodes (instantaneous for internal<bos> faults)
+        # Differential relay settings for nodes (instantaneous for internal faults)
         self.diff_relay_pickup = np.random.uniform(0.2, 0.4, self.num_nodes)  # 20-40% differential current
         
         self.uv_relay_pickup = np.random.uniform(0.93, 0.96, self.num_nodes)  # 93-96% voltage
@@ -740,31 +782,44 @@ class PhysicsBasedGridSimulator:
         
         return self.equipment_temperatures.copy()
     
-    def _check_node_failure(
+    # --- MODIFIED: Renamed and updated to 3-state logic ---
+    def _check_node_state(
         self,
         node_idx: int,
         loading: float,
         voltage: float,
         temperature: float,
         frequency: float
-    ) -> Tuple[bool, str]:
+    ) -> Tuple[int, str]:
         """
-        Check if a node should fail based on RULES.
-        Returns: (should_fail, reason)
+        Check node state based on RULES.
+        Returns: (state, reason)
+          0: OK
+          1: Damaged (Partial Failure, does not propagate)
+          2: Failed (Full Failure, propagates)
         """
+        # Check for critical failures first
         if loading > self.loading_failure_threshold[node_idx]:
-            return True, "loading"
-        
+            return 2, "loading"
         if voltage < self.voltage_failure_threshold[node_idx]:
-            return True, "voltage"
-        
+            return 2, "voltage"
         if temperature > self.temperature_failure_threshold[node_idx]:
-            return True, "temperature"
-        
+            return 2, "temperature"
         if frequency < self.frequency_failure_threshold[node_idx]:
-            return True, "frequency"
+            return 2, "frequency"
         
-        return False, "none"
+        # Check for non-propagating damage (partial failure)
+        if loading > self.loading_damage_threshold[node_idx]:
+            return 1, "loading_damage"
+        if voltage < self.voltage_damage_threshold[node_idx]:
+            return 1, "voltage_damage"
+        if temperature > self.temperature_damage_threshold[node_idx]:
+            return 1, "temp_damage"
+        if frequency < self.frequency_damage_threshold[node_idx]:
+            return 1, "freq_damage"
+
+        return 0, "none"
+    # --- END MODIFIED ---
     
     def _propagate_cascade(
         self,
@@ -787,6 +842,7 @@ class PhysicsBasedGridSimulator:
         while queue:
             current_node, current_time, accumulated_stress = queue.pop(0)
             
+            # --- MODIFIED: Uses DIRECTED adjacency_list ---
             for neighbor, edge_idx, propagation_weight in self.adjacency_list[current_node]:
                 if neighbor in visited:
                     continue
@@ -797,7 +853,8 @@ class PhysicsBasedGridSimulator:
                 neighbor_voltage = current_voltage[neighbor] * (1.0 - stress_multiplier * 0.15)
                 neighbor_temperature = current_temperature[neighbor] + stress_multiplier * 25
                 
-                should_fail, reason = self._check_node_failure(
+                # --- MODIFIED: Handle 3-state failure (OK, Damaged, Failed) ---
+                failure_state, reason = self._check_node_state( # Renamed function
                     neighbor,
                     neighbor_loading,
                     neighbor_voltage,
@@ -805,7 +862,7 @@ class PhysicsBasedGridSimulator:
                     current_frequency
                 )
                 
-                if should_fail:
+                if failure_state == 2: # 2 = Full Failure
                     failure_time = current_time + np.random.uniform(1.0, 3.0)
                     failure_sequence.append((neighbor, failure_time, reason))
                     failed_nodes.add(neighbor)
@@ -814,8 +871,14 @@ class PhysicsBasedGridSimulator:
                     queue.append((neighbor, failure_time, stress_multiplier * 0.8))
                     
                     print(f"    [CASCADE] Node {current_node} → Node {neighbor} (reason: {reason}, time: {failure_time:.1f}s)")
-                else:
+                
+                elif failure_state == 1: # 1 = Partial Failure (Damaged)
+                    print(f"    [PARTIAL] Node {current_node} → Node {neighbor} DAMAGED (reason: {reason}, time: {current_time:.1f}s) - Cascade stops here.")
+                    visited.add(neighbor) # Mark as visited so it's not processed again
+                
+                else: # 0 = OK
                     visited.add(neighbor)
+                # --- END MODIFIED ---
         
         return failure_sequence
     
@@ -837,9 +900,19 @@ class PhysicsBasedGridSimulator:
         
         cascade_start_time = int(sequence_length * np.random.uniform(0.65, 0.85))
         
+        # --- MODIFIED: Trigger from a high-power node (Gen or Sub) ---
         node_degrees = np.array([len(self.adjacency_list[i]) for i in range(self.num_nodes)])
-        high_degree_nodes = np.where(node_degrees > np.percentile(node_degrees, 60))[0]
-        initial_trigger_node = np.random.choice(high_degree_nodes)
+        high_power_nodes = np.where(self.node_types > 0)[0] # Generators (1) or Substations (2)
+        
+        if len(high_power_nodes) > 0:
+            # Prefer high-power nodes with high-degree (high connectivity)
+            high_power_degrees = node_degrees[high_power_nodes]
+            trigger_probs = high_power_degrees / (high_power_degrees.sum() + 1e-6)
+            initial_trigger_node = np.random.choice(high_power_nodes, p=trigger_probs)
+        else:
+            # Fallback if no Gen/Sub nodes
+            initial_trigger_node = np.random.choice(self.num_nodes)
+        # --- END MODIFIED ---
         
         load_multiplier = 0.7 + stress_level * 0.4
         load = self.base_load * load_multiplier
@@ -861,6 +934,7 @@ class PhysicsBasedGridSimulator:
         
         failure_type = np.random.choice(['loading', 'voltage', 'temperature', 'frequency', 'environmental'])
         
+        # --- MODIFIED: Force trigger to be a FULL failure, not partial ---
         if failure_type == 'loading':
             node_loading[initial_trigger_node] = self.loading_failure_threshold[initial_trigger_node] * np.random.uniform(1.05, 1.15)
             reason = "loading"
@@ -899,7 +973,8 @@ class PhysicsBasedGridSimulator:
                 node_loading[initial_trigger_node] = self.loading_failure_threshold[initial_trigger_node] * np.random.uniform(1.05, 1.15)
                 reason = "loading"
                 print(f"  [TRIGGER] Node {initial_trigger_node} - Extreme cold: Loading {node_loading[initial_trigger_node]:.3f} > {self.loading_failure_threshold[initial_trigger_node]:.3f}")
-        
+        # --- END MODIFIED ---
+
         failure_sequence = self._propagate_cascade_controlled(
             [initial_trigger_node],
             node_loading,
@@ -941,6 +1016,7 @@ class PhysicsBasedGridSimulator:
         while queue and len(failed_nodes) < target_num_failures:
             current_node, current_time, accumulated_stress, priority = queue.pop(0)
             
+            # --- MODIFIED: Uses DIRECTED adjacency_list ---
             for neighbor, edge_idx, propagation_weight in self.adjacency_list[current_node]:
                 if neighbor in visited:
                     continue
@@ -951,7 +1027,8 @@ class PhysicsBasedGridSimulator:
                 neighbor_voltage = current_voltage[neighbor] * (1.0 - stress_multiplier * 0.15)
                 neighbor_temperature = current_temperature[neighbor] + stress_multiplier * 25
                 
-                should_fail, reason = self._check_node_failure(
+                # --- MODIFIED: Handle 3-state failure (OK, Damaged, Failed) ---
+                failure_state, reason = self._check_node_state( # Renamed function
                     neighbor,
                     neighbor_loading,
                     neighbor_voltage,
@@ -959,12 +1036,25 @@ class PhysicsBasedGridSimulator:
                     current_frequency
                 )
                 
-                if should_fail:
+                if failure_state == 2: # 2 = Full Failure
                     failure_priority = stress_multiplier
                     failure_time = current_time + np.random.uniform(1.0, 3.0)
                     
                     failure_candidates.append((neighbor, failure_time, reason, failure_priority, stress_multiplier))
                     visited.add(neighbor)
+                
+                elif failure_state == 1: # 1 = Partial Failure (Damaged)
+                    # The node is damaged, but it does NOT propagate the cascade.
+                    # We log it, but don't add it to the failure candidates.
+                    # This creates a "partial failure" scenario.
+                    print(f"    [PARTIAL] Node {current_node} → Node {neighbor} DAMAGED (reason: {reason}, time: {current_time:.1f}s, stress: {stress_multiplier:.2f}) - Cascade stops here.")
+                    visited.add(neighbor) # Mark as visited so it's not processed again
+                
+                # If failure_state == 0 (OK), do nothing, but don't mark as visited
+                # so another path might trigger it. (Correction: mark as visited to avoid re-check in this step)
+                else:
+                    visited.add(neighbor)
+                # --- END MODIFIED ---
         
         failure_candidates.sort(key=lambda x: x[3], reverse=True)
         
@@ -974,7 +1064,7 @@ class PhysicsBasedGridSimulator:
         for neighbor, failure_time, reason, priority, stress_multiplier in selected_failures:
             failure_sequence.append((neighbor, failure_time, reason))
             failed_nodes.add(neighbor)
-            print(f"    [CASCADE] Node {neighbor} fails (reason: {reason}, time: {failure_time:.1f}s, stress: {stress_multiplier:.2f})")
+            print(f"    [CASCADE] Node {current_node} → Node {neighbor} FAILS (reason: {reason}, time: {failure_time:.1f}s, stress: {stress_multiplier:.2f})")
         
         return failure_sequence
 
@@ -1574,11 +1664,11 @@ class PhysicsBasedGridSimulator:
 def main():
     """Main function to generate dataset."""
     parser = argparse.ArgumentParser(description='Generate multi-modal cascade failure dataset')
-    parser.add_argument('--normal', type=int, default=600, help='Number of normal scenarios')
-    parser.add_argument('--cascade', type=int, default=400, help='Number of cascade scenarios')
+    parser.add_argument('--normal', type=int, default=1000, help='Number of normal scenarios')
+    parser.add_argument('--cascade', type=int, default=1000, help='Number of cascade scenarios')
     parser.add_argument('--grid-size', type=int, default=118, help='Number of nodes in grid')
     parser.add_argument('--sequence-length', type=int, default=60, help='Sequence length (timesteps)')
-    parser.add_argument('--batch-size', type=int, default=30, help='Batch size for streaming')
+    parser.add_argument('--batch-size', type=int, default=50, help='Batch size for streaming')
     parser.add_argument('--output-dir', type=str, default='data', help='Output directory')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--topology-file', type=str, default=None, help='Path to grid topology pickle file')
@@ -1705,7 +1795,7 @@ def main():
             # Save batch if full or if it's the last item
             # We check `len(current_batch) > 0` in case the last scenario was rejected
             if (len(current_batch) == args.batch_size or (i == total_to_generate - 1)) and len(current_batch) > 0:
-                batch_file = output_dir / f'scenarios_batch_{batch_count}.pkl'
+                batch_file = output_dir / f'batch_{batch_count}.pkl'
                 with open(batch_file, 'wb') as f:
                     pickle.dump(current_batch, f)
                 

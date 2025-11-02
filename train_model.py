@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple
 import json
 import os
 import matplotlib.pyplot as plt
@@ -64,7 +64,7 @@ class PhysicsInformedLoss(nn.Module):
     
     def __init__(self, lambda_powerflow: float = 0.1, lambda_capacity: float = 0.1,
                  lambda_stability: float = 0.001, lambda_frequency: float = 0.1,
-                 lambda_reactive: float = 0.1, # Kept for compatibility, though not used by new physics
+                 lambda_reactive: float = 0.1, 
                  pos_weight: float = 10.0, focal_alpha: float = 0.25, focal_gamma: float = 2.0,
                  label_smoothing: float = 0.15, use_logits: bool = False):
         super(PhysicsInformedLoss, self).__init__()
@@ -73,7 +73,7 @@ class PhysicsInformedLoss(nn.Module):
         self.lambda_capacity = lambda_capacity
         self.lambda_stability = lambda_stability
         self.lambda_frequency = lambda_frequency
-        self.lambda_reactive = lambda_reactive # Unused by new physics, but kept
+        self.lambda_reactive = lambda_reactive 
         
         # Focal Loss & Imbalance parameters
         self.pos_weight = pos_weight
@@ -325,7 +325,13 @@ class Trainer:
         self.use_amp = use_amp
         self.model_outputs_logits = model_outputs_logits
         
-        self.scaler = torch.cuda.amp.GradScaler() if use_amp and self.device.type == 'cuda' else None
+        # ====================================================================
+        # START: FIX FOR `FutureWarning` (GradScaler)
+        # ====================================================================
+        self.scaler = torch.amp.GradScaler('cuda') if use_amp and self.device.type == 'cuda' else None
+        # ====================================================================
+        # END: FIX FOR `FutureWarning`
+        # ====================================================================
         
         os.makedirs(output_dir, exist_ok=True)
         
@@ -464,7 +470,7 @@ class Trainer:
         for key in physics_loss_keys:
             raw_loss = avg_losses.get(key, 0.0)
             
-            # This is your logic:
+            # This is the logic:
             # If the raw loss is near zero, we calculate its lambda
             # as if its value was the target_magnitude.
             if raw_loss < 1e-6:
@@ -547,7 +553,13 @@ class Trainer:
             # --- End modification ---
             
             if self.use_amp and self.scaler is not None:
-                with torch.cuda.amp.autocast():
+                # ====================================================================
+                # START: FIX FOR `FutureWarning` (autocast)
+                # ====================================================================
+                with torch.amp.autocast('cuda'):
+                # ====================================================================
+                # END: FIX FOR `FutureWarning`
+                # ====================================================================
                     outputs = self.model(batch_device, return_sequence=True)
                     
                     if not self._model_validated:
@@ -926,7 +938,7 @@ class Trainer:
         print(f"  Training history saved to: {self.output_dir}/training_history.json")
         print(f"  Training curves saved to: {self.output_dir}/training_curves.png")
         print(f"  Best model saved to: {self.output_dir}/best_model.pth")
-        print(f"{'='*80}\n")
+        print(f"{'='*80}")
     
     def save_history(self):
         history_path = f"{self.output_dir}/training_history.json"
@@ -1137,7 +1149,7 @@ if __name__ == "__main__":
     print(f"  Negative samples: {negative_count} ({negative_count/len(train_dataset)*100:.1f}%)")
     print(f"  Oversampling ratio: 20:1 (positive:negative)")
     
-    if positive_count < 10:
+    if positive_count < 10 and len(train_dataset) > 0: # Added check for > 0
         print(f"\n{'='*80}")
         print(f"[CRITICAL WARNING] Only {positive_count} cascade scenarios found!")
         print("  This is not enough data to train the model.")
