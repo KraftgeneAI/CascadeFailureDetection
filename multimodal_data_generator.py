@@ -24,8 +24,6 @@ import torch
 import pickle
 from pathlib import Path
 from typing import Dict, Tuple, List, Optional
-import json
-from datetime import datetime
 import gc
 import psutil
 import warnings
@@ -488,7 +486,6 @@ class PhysicsBasedGridSimulator:
     
     def _initialize_protection_settings(self):
         """Initialize deterministic protection relay settings."""
-        src, dst = self.edge_index
         
         self.oc_relay_pickup = np.random.uniform(1.00, 1.10, self.num_edges)  # Trip at 100-110% loading
         
@@ -1417,7 +1414,6 @@ class PhysicsBasedGridSimulator:
             # ====================================================================
             
             # Create dummy values for the missing AC-only outputs for compatibility
-            reactive_line_flows = line_flows * 0.33 
             reactive_generation = generation * 0.33
 
             num_failed = len(failed_nodes_t)
@@ -1578,11 +1574,11 @@ class PhysicsBasedGridSimulator:
 def main():
     """Main function to generate dataset."""
     parser = argparse.ArgumentParser(description='Generate multi-modal cascade failure dataset')
-    parser.add_argument('--normal', type=int, default=1000, help='Number of normal scenarios')
-    parser.add_argument('--cascade', type=int, default=1000, help='Number of cascade scenarios')
+    parser.add_argument('--normal', type=int, default=50, help='Number of normal scenarios')
+    parser.add_argument('--cascade', type=int, default=50, help='Number of cascade scenarios')
     parser.add_argument('--grid-size', type=int, default=118, help='Number of nodes in grid')
-    parser.add_argument('--sequence-length', type=int, default=60, help='Sequence length (timesteps)')
-    parser.add_argument('--batch-size', type=int, default=50, help='Number of scenarios to save in each .pkl file')
+    parser.add_argument('--sequence-length', type=int, default=30, help='Sequence length (timesteps)')
+    parser.add_argument('--batch-size', type=int, default=20, help='Number of scenarios to save in each .pkl file')
     parser.add_argument('--output-dir', type=str, default='data', help='Output directory')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--topology-file', type=str, default=None, help='Path to grid topology pickle file')

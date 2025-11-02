@@ -58,7 +58,7 @@ class PhysicsInformedLoss(nn.Module):
     - Focal Loss (from train_model.py) for class imbalance.
     - REAL Physics Constraints (from multimodal_cascade_model.py) for power flow,
       capacity, and voltage stability.
-    - ***NEW: Physics-based frequency loss using the swing equation.***
+    - Physics-based frequency loss using the swing equation.***
     """
     
     def __init__(self, lambda_powerflow: float = 0.1, lambda_capacity: float = 0.1,
@@ -197,7 +197,7 @@ class PhysicsInformedLoss(nn.Module):
         return torch.mean(low_violations ** 2 + high_violations ** 2)
 
     # ====================================================================
-    # START: NEW PHYSICS-BASED FREQUENCY LOSS
+    # START: PHYSICS-BASED FREQUENCY LOSS
     # ====================================================================
     def frequency_loss(self, predicted_freq_Hz: torch.Tensor, 
                        power_injection_pu: torch.Tensor,
@@ -236,7 +236,7 @@ class PhysicsInformedLoss(nn.Module):
         # 5. Compute MSE loss in p.u. space
         return F.mse_loss(predicted_freq_pu, expected_freq_pu)
     # ====================================================================
-    # END: NEW PHYSICS-BASED FREQUENCY LOSS
+    # END: PHYSICS-BASED FREQUENCY LOSS
     # ====================================================================
 
     # --- Merged Forward Pass ---
@@ -505,7 +505,7 @@ class Trainer:
             print(f"    {key}: {val:.6f}")
             
         # ====================================================================
-        # START: NEW BALANCING LOGIC (Based on user's best idea)
+        # START: BALANCING LOGIC
         # ====================================================================
         
         target_magnitude = avg_losses.get('prediction', 0.1)
@@ -539,7 +539,7 @@ class Trainer:
             print(f"    {lambda_key}: {lambda_val:10.4f}  (Raw Loss: {raw_loss:.6f}, Denom: {denominator:.6f}, Initial Weighted Loss: {lambda_val * raw_loss:.4f})")
         
         # ====================================================================
-        # END: NEW BALANCING LOGIC
+        # END: BALANCING LOGIC
         # ====================================================================
             
         self.model.train()
@@ -647,7 +647,7 @@ class Trainer:
                 loss_component_sums[comp_name] = loss_component_sums.get(comp_name, 0.0) + comp_value
             
             # ====================================================================
-            # START: NEW TQDM DISPLAY LOGIC (Based on user's feedback)
+            # START: TQDM DISPLAY LOGIC
             # ====================================================================
             
             # 1. Set a simple description that won't overflow
@@ -695,7 +695,7 @@ class Trainer:
             })
             
             # ====================================================================
-            # END: NEW TQDM DISPLAY LOGIC
+            # END: TQDM DISPLAY LOGIC
             # ====================================================================
 
         # Compute final epoch metrics

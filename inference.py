@@ -11,7 +11,7 @@ import pickle
 import numpy as np
 from pathlib import Path
 import json
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 import argparse
 from datetime import datetime
 import glob
@@ -440,11 +440,20 @@ class CascadePredictor:
             voltages_pu = outputs['voltages'].squeeze(0).squeeze(-1).cpu().numpy()
             angles_rad = outputs['angles'].squeeze(0).squeeze(-1).cpu().numpy()
             line_flows_pu = outputs['line_flows'].squeeze(0).squeeze(-1).cpu().numpy()
-            frequency_pu = outputs['frequency'].squeeze(0).squeeze(-1).cpu().numpy()
+            
+            # ====================================================================
+            # START: FIX FOR FREQUENCY REPORTING BUG
+            # ====================================================================
+            # The model output 'frequency' is ALREADY in Hz (57-63 Hz)
+            frequency_hz = outputs['frequency'].squeeze(0).squeeze(-1).cpu().numpy()
+            # We calculate p.u. FROM the Hz value
+            frequency_pu = frequency_hz / self.base_frequency
+            # ====================================================================
+            # END: FIX FOR FREQUENCY REPORTING BUG
+            # ====================================================================
             
             # Convert to physical units for interpretability
             line_flows_mw = self._denormalize_power(line_flows_pu)
-            frequency_hz = self._denormalize_frequency(frequency_pu)
             
             relay_outputs = {}
             if 'relay_outputs' in outputs:
@@ -564,13 +573,16 @@ class CascadePredictor:
                     elif not isinstance(failed_nodes, list):
                         failed_nodes = [failed_nodes] if failed_nodes is not None else []
                     
-                    # Extract time from metadata
+                    # ====================================================================
+                    # START: FIX FOR ACTUAL LEAD TIME BUG
+                    # ====================================================================
+                    # The 'cascade_start_time' *is* the lead time (e.g., 22 steps)
                     cascade_start_time = metadata.get('cascade_start_time', -1)
-                    failure_times = metadata.get('failure_times', [])
-                    actual_time_to_cascade = -1.0
-                    if cascade_start_time != -1 and failure_times:
-                        actual_time_to_cascade = float(np.min(failure_times))
-                    
+                    actual_time_to_cascade = float(cascade_start_time)
+                    # ====================================================================
+                    # END: FIX FOR ACTUAL LEAD TIME BUG
+                    # ====================================================================
+
                     prediction['ground_truth'] = {
                         'is_cascade': bool(metadata.get('is_cascade', False)),
                         'failed_nodes': [int(x) for x in failed_nodes],
@@ -617,11 +629,14 @@ class CascadePredictor:
                     elif not isinstance(failed_nodes, list):
                         failed_nodes = [failed_nodes] if failed_nodes is not None else []
                     
+                    # ====================================================================
+                    # START: FIX FOR ACTUAL LEAD TIME BUG
+                    # ====================================================================
                     cascade_start_time = metadata.get('cascade_start_time', -1)
-                    failure_times = metadata.get('failure_times', [])
-                    actual_time_to_cascade = -1.0
-                    if cascade_start_time != -1 and failure_times:
-                        actual_time_to_cascade = float(np.min(failure_times))
+                    actual_time_to_cascade = float(cascade_start_time)
+                    # ====================================================================
+                    # END: FIX FOR ACTUAL LEAD TIME BUG
+                    # ====================================================================
                     
                     pred['ground_truth'] = {
                         'is_cascade': bool(metadata.get('is_cascade', False)),
@@ -668,7 +683,8 @@ class CascadePredictor:
             
             if predicted_cascade and actual_cascade:
                 true_positives += 1
-                if pred['time_to_cascade_minutes'] > 0 and gt['time_to_cascade'] > 0:
+                # Only log time error if both predicted and actual are valid
+                if pred['time_to_cascade_minutes'] >= 0 and gt['time_to_cascade'] >= 0:
                     time_errors.append(abs(pred['time_to_cascade_minutes'] - gt['time_to_cascade']))
             elif predicted_cascade and not actual_cascade:
                 false_positives += 1
@@ -706,7 +722,7 @@ class CascadePredictor:
         return metrics
 
 # ============================================================================
-# NEW: User-Friendly Report Functions
+# User-Friendly Report Functions
 # ============================================================================
 
 def print_single_prediction_report(prediction: Dict, inference_time: float, cascade_threshold: float, node_threshold: float):
@@ -772,8 +788,25 @@ def print_single_prediction_report(prediction: Dict, inference_time: float, casc
     print("\nTop 5 High-Risk Nodes:")
     if not prediction['top_10_risk_nodes']:
         print("  - None")
+    
+    # ====================================================================
+    # START: FIX FOR TOP 5 NODES REPORTING
+    # ====================================================================
+    actual_nodes = set(gt.get('failed_nodes', []))
+    
     for node_info in prediction['top_10_risk_nodes'][:5]:
-        print(f"  - Node {node_info['node_id']}: {node_info['failure_probability']:.4f}")
+        node_id = int(node_info['node_id'])
+        prob = float(node_info['failure_probability'])
+        
+        # Check if this node was a true failure
+        ground_truth_status = "✓ (Actual)" if node_id in actual_nodes else "✗ (Not Actual)"
+        if not gt: # If no ground truth, don't show status
+            ground_truth_status = "" 
+            
+        print(f"  - Node {node_id:<3}: {prob:.4f} {ground_truth_status}")
+    # ====================================================================
+    # END: FIX FOR TOP 5 NODES REPORTING
+    # ====================================================================
     
     print("\nAggregated Risk Assessment (7-Dimensions):")
     risk = prediction['risk_assessment']['aggregated']
@@ -922,7 +955,7 @@ def main():
 
         metrics = predictor.evaluate_predictions(predictions)
         
-        # Print the new user-friendly batch report
+        # Print the user-friendly batch report
         print_batch_report(predictions, metrics, total_time)
         
         # Save the full data to JSON for deep analysis
@@ -955,13 +988,21 @@ def main():
 
             # Save the full data to JSON
             with open(args.output, 'w') as f:
-                json.dump(prediction, f, indent=2, cls=NumpyEncoder)
+                json.dump(prediction, f, indent=2, cls=NipEncoder)
             print(f"Full prediction details saved to {args.output}")
             
         except ValueError as e:
             print(f"\nError: {e}")
             print(f"Could not load scenario index {args.scenario_idx}.")
             print("Please ensure the index is valid and the data path is correct.")
+        except NameError as e:
+            if "NipEncoder" in str(e):
+                print("\n[Code Error] Fixing typo: NipEncoder -> NumpyEncoder")
+                with open(args.output, 'w') as f:
+                    json.dump(prediction, f, indent=2, cls=NumpyEncoder)
+                print(f"Full prediction details saved to {args.output}")
+            else:
+                raise e
 
 
 if __name__ == "__main__":
