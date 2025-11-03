@@ -7,9 +7,6 @@ Generates data based on CONSISTENT RULES that the model can learn:
 - Cascade propagation (which nodes fail when another fails?)
 - Temporal patterns (gradual degradation before failure)
 
-*** MODIFIED: Using simplified NON-LINEAR (e.g., y=ax^2+bx+c) power flow ***
-*** for speed, stability, and more realistic patterns.       ***
-
 The model learns to recognize:
 1. When node properties violate thresholds → node fails
 2. When node A fails → connected nodes B, C, D fail (based on edges)
