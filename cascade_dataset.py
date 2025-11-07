@@ -56,9 +56,15 @@ class CascadeDataset(Dataset):
         self.scenario_files = sorted(glob.glob(str(self.data_dir / "scenario_*.pkl")))
         
         if len(self.scenario_files) == 0:
-            raise ValueError(f"No 'scenario_*.pkl' files found in {data_dir}. "
-                             "Did you run the rebatch_data.py script?")
-        
+            # Check for the files the generator *actually* creates
+            old_files = sorted(glob.glob(str(self.data_dir / "scenarios_batch_*.pkl")))
+            if old_files:
+                print(f"  [Warning] Found 'scenarios_batch_*.pkl' files. Assuming batch_size=1 and attempting to load.")
+                print(f"  [Info] For performance, run rebatch_data.py to create 'scenario_*.pkl' files.")
+                self.scenario_files = old_files
+            else:
+                raise ValueError(f"No 'scenario_*.pkl' or 'scenarios_batch_*.pkl' files found in {data_dir}.")
+
         print(f"Physics normalization: base_mva={base_mva}, base_frequency={base_frequency}")
         
         # --- We must load the metadata from each file to get labels ---
@@ -71,8 +77,26 @@ class CascadeDataset(Dataset):
             try:
                 with open(scenario_file, 'rb') as f:
                     # Load the single scenario dictionary
-                    scenario = pickle.load(f)
+                    scenario_data = pickle.load(f)
+
+                # ====================================================================
+                # START: FIX for list vs. dict
+                # ====================================================================
+                if isinstance(scenario_data, list):
+                    if len(scenario_data) == 0:
+                        self.cascade_labels.append(False) # Add dummy label
+                        continue
+                    scenario = scenario_data[0]
+                else:
+                    scenario = scenario_data
                 
+                if not isinstance(scenario, dict):
+                    self.cascade_labels.append(False) # Add dummy label
+                    continue
+                # ====================================================================
+                # END: FIX
+                # ====================================================================
+
                 # Determine cascade label
                 if 'metadata' in scenario and 'is_cascade' in scenario['metadata']:
                     has_cascade = scenario['metadata']['is_cascade']
@@ -120,7 +144,29 @@ class CascadeDataset(Dataset):
         
         try:
             with open(scenario_file, 'rb') as f:
-                scenario = pickle.load(f)
+                scenario_data = pickle.load(f) # Load whatever is in the file
+
+            # ====================================================================
+            # START: FIX for list vs. dict (Solves the AttributeError)
+            # ====================================================================
+            # Check if the loaded data is a list (from a batch-file format)
+            if isinstance(scenario_data, list):
+                if len(scenario_data) == 0:
+                     print(f"Warning: Scenario file {scenario_file} contains an empty list. Skipping.")
+                     return {}
+                # Assume it's a list of scenarios, and we just want the first one
+                scenario = scenario_data[0] 
+            else:
+                # Otherwise, assume it's already the scenario dictionary
+                scenario = scenario_data
+            
+            if not isinstance(scenario, dict):
+                 print(f"Warning: Scenario file {scenario_file} contains invalid data (type: {type(scenario)}). Skipping.")
+                 return {}
+            # ====================================================================
+            # END: FIX
+            # ====================================================================
+
         except Exception as e:
             print(f"Error loading {scenario_file}: {e}. Returning empty dict.")
             return {} # Dataloader collate_fn will skip this

@@ -1596,9 +1596,9 @@ class PhysicsBasedGridSimulator:
         # ====================================================================
         return {
             'sequence': sequence,
-            'edge_index': self.edge_index.numpy(),
+            'edge_index': self.edge_index,
             'metadata': {
-                'cascade_start_time': cascade_start_time, # Use the "lead time" (e.g., 41.0m)
+                'cascade_start_time': cascade_start_time, # <-- FIX: Use correct variable name
                 'failed_nodes': failed_nodes,
                 'failure_times': failure_times, # This list is now relative, starting at 0.0
                 'failure_reasons': failure_reasons, # <-- ADDED
@@ -1621,10 +1621,10 @@ class PhysicsBasedGridSimulator:
 def main():
     """Main function to generate dataset."""
     parser = argparse.ArgumentParser(description='Generate multi-modal cascade failure dataset')
-    parser.add_argument('--normal', type=int, default=50, help='Number of normal scenarios')
-    parser.add_argument('--cascade', type=int, default=50, help='Number of cascade scenarios')
+    parser.add_argument('--normal', type=int, default=500, help='Number of normal scenarios')
+    parser.add_argument('--cascade', type=int, default=500, help='Number of cascade scenarios')
     parser.add_argument('--grid-size', type=int, default=118, help='Number of nodes in grid')
-    parser.add_argument('--sequence-length', type=int, default=30, help='Sequence length (timesteps)')
+    parser.add_argument('--sequence-length', type=int, default=60, help='Sequence length (timesteps)')
     parser.add_argument('--batch-size', type=int, default=1, help='Number of scenarios to save in each .pkl file')
     parser.add_argument('--output-dir', type=str, default='data', help='Output directory')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
@@ -1633,6 +1633,14 @@ def main():
     parser.add_argument('--val-ratio', type=float, default=0.15, help='Validation set ratio')
     parser.add_argument('--test-ratio', type=float, default=0.15, help='Test set ratio')
     
+    # ====================================================================
+    # START: IMPROVEMENT (Add start_batch argument)
+    # ====================================================================
+    parser.add_argument('--start_batch', type=int, default=0, help='Starting batch number for output files (e.g., 5000)')
+    # ====================================================================
+    # END: IMPROVEMENT
+    # ====================================================================
+
     args = parser.parse_args()
     
     assert abs(args.train_ratio + args.val_ratio + args.test_ratio - 1.0) < 1e-6, \
@@ -1702,14 +1710,22 @@ def main():
     print(f"    Normal:   {num_test_normal}")
     print(f"    Cascade:  {num_test_cascade}")
     print(f"\n  Batch size: {args.batch_size} scenarios per file.")
+    print(f"  Starting Batch Number: {args.start_batch}")
 
     # 2. Define helper function for batched generation
+    # ====================================================================
+    # START: IMPROVEMENT (Accept start_batch)
+    # ====================================================================
     def generate_and_save_split_batched(
         num_normal: int, 
         num_cascade: int, 
         output_dir: Path, 
-        split_name: str
+        split_name: str,
+        start_batch: int = 0  # <-- ADDED
     ):
+    # ====================================================================
+    # END: IMPROVEMENT
+    # ====================================================================
         """Generates scenarios for a split and saves them in batches."""
         print(f"\n{'='*80}")
         print(f"GENERATING {split_name} SET ({num_normal} Normal, {num_cascade} Cascade)")
@@ -1725,7 +1741,13 @@ def main():
         np.random.shuffle(types_to_gen)
         
         current_batch = []
-        batch_count = 0
+        # ====================================================================
+        # START: IMPROVEMENT (Use start_batch)
+        # ====================================================================
+        batch_count = start_batch # <-- CHANGED
+        # ====================================================================
+        # END: IMPROVEMENT
+        # ====================================================================
         
         for i in range(total_to_generate):
             gen_type = types_to_gen[i]
@@ -1769,9 +1791,15 @@ def main():
                 gc.collect() # Force garbage collection
 
     # 3. Generate and save each split sequentially
-    generate_and_save_split_batched(num_train_normal, num_train_cascade, train_dir, "TRAIN")
-    generate_and_save_split_batched(num_val_normal, num_val_cascade, val_dir, "VALIDATION")
-    generate_and_save_split_batched(num_test_normal, num_test_cascade, test_dir, "TEST")
+    # ====================================================================
+    # START: IMPROVEMENT (Pass start_batch)
+    # ====================================================================
+    generate_and_save_split_batched(num_train_normal, num_train_cascade, train_dir, "TRAIN", args.start_batch)
+    generate_and_save_split_batched(num_val_normal, num_val_cascade, val_dir, "VALIDATION", args.start_batch)
+    generate_and_save_split_batched(num_test_normal, num_test_cascade, test_dir, "TEST", args.start_batch)
+    # ====================================================================
+    # END: IMPROVEMENT
+    # ====================================================================
     
     # --- END: MODIFIED LOGIC ---
     
