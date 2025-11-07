@@ -1109,12 +1109,15 @@ class PhysicsBasedGridSimulator:
         
         return failure_sequence
     
+    # ====================================================================
+    # START: IMPROVEMENT 1 (Return initial_reason)
+    # ====================================================================
     def _simulate_rule_based_cascade(
         self,
         stress_level: float,
         sequence_length: int = 60,
         target_failure_percentage: Optional[float] = None
-    ) -> Tuple[List[int], List[float], List[str], int]:
+    ) -> Tuple[List[int], List[float], List[str], int, str]: # <-- Added str for reason
         """
         Simulate cascade based on CONSISTENT RULES.
         GUARANTEED to produce a cascade with DIVERSE failure types and CONTROLLABLE severity!
@@ -1186,19 +1189,19 @@ class PhysicsBasedGridSimulator:
             env_effect = np.random.choice(['wildfire', 'storm', 'flooding', 'extreme_cold'])
             if env_effect == 'wildfire':
                 node_temperature[initial_trigger_node] = self.temperature_failure_threshold[initial_trigger_node] * np.random.uniform(1.1, 1.2)
-                reason = "temperature"
+                reason = "environmental_temp" # More specific reason
                 print(f"  [TRIGGER] Node {initial_trigger_node} - Wildfire: Temperature {node_temperature[initial_trigger_node]:.1f}°C > {self.temperature_failure_threshold[initial_trigger_node]:.1f}°C")
             elif env_effect == 'storm':
                 node_loading[initial_trigger_node] = self.loading_failure_threshold[initial_trigger_node] * np.random.uniform(1.1, 1.2)
-                reason = "loading"
+                reason = "environmental_load" # More specific reason
                 print(f"  [TRIGGER] Node {initial_trigger_node} - Storm damage: Loading {node_loading[initial_trigger_node]:.3f} > {self.loading_failure_threshold[initial_trigger_node]:.3f}")
             elif env_effect == 'flooding':
                 node_voltage[initial_trigger_node] = self.voltage_failure_threshold[initial_trigger_node] * np.random.uniform(0.8, 0.9)
-                reason = "voltage"
+                reason = "environmental_volt" # More specific reason
                 print(f"  [TRIGGER] Node {initial_trigger_node} - Flooding: Voltage {node_voltage[initial_trigger_node]:.3f} < {self.voltage_failure_threshold[initial_trigger_node]:.3f}")
             else:  # extreme_cold
                 node_loading[initial_trigger_node] = self.loading_failure_threshold[initial_trigger_node] * np.random.uniform(1.05, 1.15)
-                reason = "loading"
+                reason = "environmental_load" # More specific reason
                 print(f"  [TRIGGER] Node {initial_trigger_node} - Extreme cold: Loading {node_loading[initial_trigger_node]:.3f} > {self.loading_failure_threshold[initial_trigger_node]:.3f}")
         # --- END MODIFIED ---
 
@@ -1217,10 +1220,14 @@ class PhysicsBasedGridSimulator:
         
         print(f"  [RESULT] Cascade generated: {len(failed_nodes)}/{self.num_nodes} nodes failed ({len(failed_nodes)/self.num_nodes*100:.1f}%)")
         
-        return failed_nodes, failure_times, failure_reasons, cascade_start_time
+        return failed_nodes, failure_times, failure_reasons, cascade_start_time, reason
+    # ====================================================================
+    # END: IMPROVEMENT 1
+    # ====================================================================
+
 
     # ====================================================================
-    # START: FIX FOR CHAIN-CASCADE (Observation 1)
+    # START: IMPROVEMENT 3 (Fix Timing Gaps)
     # ====================================================================
     def _propagate_cascade_controlled(
         self,
@@ -1270,7 +1277,12 @@ class PhysicsBasedGridSimulator:
                 )
                 
                 if failure_state == 2: # 2 = Full Failure
-                    failure_time = current_time + np.random.uniform(1.0, 3.0)
+                    # --- PHYSICAL TIMING FIX ---
+                    # Replace random delay with a small, "relay-like" physical delay
+                    # e.g., 0.1 to 0.5 minutes (6 to 30 seconds)
+                    physical_delay = np.random.uniform(0.1, 0.5) 
+                    failure_time = current_time + physical_delay
+                    # --- END FIX ---
                     
                     # 1. Log this failure
                     failure_sequence.append((neighbor, failure_time, reason))
@@ -1297,7 +1309,7 @@ class PhysicsBasedGridSimulator:
         
         return failure_sequence
     # ====================================================================
-    # END: FIX FOR CHAIN-CASCADE
+    # END: IMPROVEMENT 3
     # ====================================================================
 
     # ====================================================================
@@ -1317,15 +1329,45 @@ class PhysicsBasedGridSimulator:
             Scenario data dict or None if generation failed
         """
         
+        # ====================================================================
+        # START: IMPROVEMENT 1 & 2 (Catch new outputs)
+        # ====================================================================
         if is_cascade:
-            failed_nodes, failure_times, failure_reasons, cascade_start_time = self._simulate_rule_based_cascade(
+            # Catch the new `initial_reason`
+            failed_nodes, failure_times, failure_reasons, cascade_start_time, initial_reason = self._simulate_rule_based_cascade(
                 stress_level, sequence_length
             )
             reasons_set = set(failure_reasons)
             print(f"  [CASCADE] Trigger node: {failed_nodes[0] if failed_nodes else 'N/A'}, Total failures: {len(failed_nodes)}, Reasons: {reasons_set}")
+
+            # Create ground_truth_risk vector based on initial_reason
+            # Risk vector: [Threat, Vulnerability, Impact, CascadeProb, Response, Safety, Urgency]
+            risk_vec = np.zeros(7, dtype=np.float32)
+            risk_vec[0] = stress_level # threat_severity
+            if 'loading' in initial_reason or 'temperature' in initial_reason:
+                risk_vec[1] = 0.8 # vulnerability
+                risk_vec[2] = 0.7 # operational_impact
+                risk_vec[6] = 0.7 # urgency
+            elif 'voltage' in initial_reason or 'frequency' in initial_reason:
+                risk_vec[1] = 0.7 # vulnerability
+                risk_vec[2] = 0.9 # operational_impact
+                risk_vec[6] = 0.9 # urgency
+            elif 'environmental' in initial_reason:
+                risk_vec[0] = 0.9 # threat_severity
+                risk_vec[1] = 0.6 # vulnerability
+                risk_vec[5] = 0.8 # public_safety
+            
+            risk_vec[3] = 0.5 + 0.5 * (len(failed_nodes) / self.num_nodes) # cascade_probability
+            ground_truth_risk = risk_vec
         else:
             print(f"  [NORMAL] Generating non-linear normal operation at stress level {stress_level:.2f}")
             failed_nodes, failure_times, failure_reasons, cascade_start_time = [], [], [], -1
+            initial_reason = 'none'
+            # Normal scenario has low risk
+            ground_truth_risk = np.array([stress_level * 0.5, 0.1, 0.1, 0.1, 0.2, 0.1, 0.1], dtype=np.float32)
+        # ====================================================================
+        # END: IMPROVEMENT 1 & 2
+        # ====================================================================
         
         # Build timestep to failed nodes mapping
         timestep_to_failed_nodes = {}
@@ -1549,20 +1591,28 @@ class PhysicsBasedGridSimulator:
             print(f"  [LABELS] Final timestep: {num_positive}/{self.num_nodes} nodes labeled as failed ({num_positive/self.num_nodes*100:.1f}%)")
             print(f"  [SUCCESS] Generated {len(sequence)} timesteps of quality {'cascade' if is_cascade else 'normal'} data")
         
+        # ====================================================================
+        # START: IMPROVEMENT 1 & 2 (Save new metadata)
+        # ====================================================================
         return {
             'sequence': sequence,
             'edge_index': self.edge_index.numpy(),
             'metadata': {
-                'cascade_start_time': cascade_start_time,
+                'cascade_start_time': cascade_start_time, # Use the "lead time" (e.g., 41.0m)
                 'failed_nodes': failed_nodes,
-                'failure_times': failure_times,
+                'failure_times': failure_times, # This list is now relative, starting at 0.0
+                'failure_reasons': failure_reasons, # <-- ADDED
+                'ground_truth_risk': ground_truth_risk, # <-- ADDED
                 'is_cascade': is_cascade,
-                'stress_level': base_stress_level, # Save the original target stress
+                'stress_level': base_stress_level,
                 'num_nodes': self.num_nodes,
                 'num_edges': self.num_edges,
                 'base_mva': 100.0,
             }
         }
+        # ====================================================================
+        # END: IMPROVEMENT 1 & 2
+        # ====================================================================
     # ====================================================================
     # END: BUG FIX
     # ====================================================================

@@ -10,15 +10,8 @@ by multimodal_data_generator.py. It incorporates:
 - Dynamic loss weight calibration.
 - Checkpointing and metrics logging.
 
-Usage:
-    # Basic training
-    python train_model.py --data_dir ./data --output_dir ./checkpoints --epochs 100 --batch_size 8
-
-    # Adjust learning rate and other parameters
-    python train_model.py --data_dir ./data --epochs 50 --batch_size 16 --lr 0.001 --grad_clip 5.0
-
-    # Resume training from a checkpoint
-    python train_model.py --resume
+*** IMPROVEMENT: Added loss functions for 7-D risk and cascade timing
+*** to train the model on causal path prediction.
 """
 
 import torch
@@ -59,11 +52,14 @@ class PhysicsInformedLoss(nn.Module):
     - REAL Physics Constraints (from multimodal_cascade_model.py) for power flow,
       capacity, and voltage stability.
     - Physics-based frequency loss using the swing equation.***
+    - ***IMPROVEMENT: Added Risk and Timing losses***
     """
     
     def __init__(self, lambda_powerflow: float = 0.1, lambda_capacity: float = 0.1,
                  lambda_stability: float = 0.001, lambda_frequency: float = 0.1,
                  lambda_reactive: float = 0.1, 
+                 lambda_risk: float = 0.2,       # <-- IMPROVEMENT: Added
+                 lambda_timing: float = 0.1,     # <-- IMPROVEMENT: Added
                  pos_weight: float = 10.0, focal_alpha: float = 0.25, focal_gamma: float = 2.0,
                  label_smoothing: float = 0.15, use_logits: bool = False,
                  base_mva: float = 100.0, base_freq: float = 60.0):
@@ -74,6 +70,8 @@ class PhysicsInformedLoss(nn.Module):
         self.lambda_stability = lambda_stability
         self.lambda_frequency = lambda_frequency
         self.lambda_reactive = lambda_reactive 
+        self.lambda_risk = lambda_risk       # <-- IMPROVEMENT: Added
+        self.lambda_timing = lambda_timing   # <-- IMPROVEMENT: Added
         
         # Focal Loss & Imbalance parameters
         self.pos_weight = pos_weight
@@ -239,6 +237,57 @@ class PhysicsInformedLoss(nn.Module):
     # END: PHYSICS-BASED FREQUENCY LOSS
     # ====================================================================
 
+    # ====================================================================
+    # START: IMPROVEMENT - RISK SCORE LOSS
+    # ====================================================================
+    def risk_loss(self, predicted_risk: torch.Tensor, target_risk: torch.Tensor) -> torch.Tensor:
+        """
+        Compute loss for the 7-D risk assessment.
+        Compares aggregated predicted node risk to the scenario's ground truth risk.
+        
+        Args:
+            predicted_risk: Model's per-node risk output [B, N, 7]
+            target_risk: Ground truth scenario risk vector [B, 7]
+        """
+        # Aggregate predicted risk across nodes (mean)
+        predicted_risk_agg = torch.mean(predicted_risk, dim=1) # [B, 7]
+        
+        # Use MSELoss to compare the aggregated prediction to the target
+        return F.mse_loss(predicted_risk_agg, target_risk)
+    # ====================================================================
+    # END: IMPROVEMENT - RISK SCORE LOSS
+    # ====================================================================
+
+    # ====================================================================
+    # START: IMPROVEMENT - SIMPLIFIED TIMING LOSS
+    # ====================================================================
+    def timing_loss(self, predicted_node_timing: torch.Tensor, 
+                    target_node_timing: torch.Tensor) -> torch.Tensor:
+        """
+        Compute loss for cascade timing (Node-to-Node).
+        
+        Args:
+            predicted_node_timing: Model's per-node time output [B, N, 1]
+            target_node_timing: Ground truth per-node time [B, N]
+        """
+        # Squeeze prediction to match target shape
+        predicted_node_timing = predicted_node_timing.squeeze(-1) # [B, N]
+        
+        # 1. Create mask for only nodes that *should* fail (ground truth time >= 0)
+        mask = target_node_timing >= 0.0
+        
+        if mask.sum() == 0:
+            # No cascade nodes in this batch, return zero loss
+            return torch.tensor(0.0, device=target_node_timing.device)
+            
+        # 2. Compute loss only on nodes that are part of the cascade
+        loss = F.mse_loss(predicted_node_timing[mask], target_node_timing[mask])
+        return loss
+    # ====================================================================
+    # END: IMPROVEMENT - SIMPLIFIED TIMING LOSS
+    # ====================================================================
+
+
     # --- Merged Forward Pass ---
     def forward(self, predictions: Dict[str, torch.Tensor],
                 targets: Dict[str, torch.Tensor],
@@ -333,6 +382,32 @@ class PhysicsInformedLoss(nn.Module):
         # END: REPLACEMENT
         # ====================================================================
         
+        # ====================================================================
+        # START: IMPROVEMENT - Add Risk and Timing Losses
+        # ====================================================================
+        # 5. Risk Score Loss
+        if 'risk_scores' in predictions and 'ground_truth_risk' in targets:
+            L_risk = self.risk_loss(
+                predicted_risk=predictions['risk_scores'],  # [B, N, 7]
+                target_risk=targets['ground_truth_risk']    # [B, 7]
+            )
+            total_loss += self.lambda_risk * L_risk
+            loss_components['risk'] = L_risk.item()
+
+        # 6. Timing Loss
+        # 'cascade_timing' (pred) is [B,N,1], 'cascade_timing' (target) is [B,N]
+        if 'cascade_timing' in predictions and 'cascade_timing' in targets:
+            L_timing = self.timing_loss(
+                predicted_node_timing=predictions['cascade_timing'], # [B, N, 1]
+                target_node_timing=targets['cascade_timing'],        # [B, N]
+            )
+            total_loss += self.lambda_timing * L_timing
+            loss_components['timing'] = L_timing.item()
+        # ====================================================================
+        # END: IMPROVEMENT
+        # ====================================================================
+
+        
         return total_loss, loss_components
 
 
@@ -409,6 +484,8 @@ class Trainer:
             lambda_capacity=calibrated_lambdas.get('lambda_capacity', 0.1),
             lambda_stability=calibrated_lambdas.get('voltage', 0.001), # Calibrator uses 'voltage'
             lambda_frequency=calibrated_lambdas.get('lambda_frequency', 0.1),
+            lambda_risk=calibrated_lambdas.get('lambda_risk', 0.2),       # <-- IMPROVEMENT: Added
+            lambda_timing=calibrated_lambdas.get('lambda_timing', 0.1),   # <-- IMPROVEMENT: Added
             
             pos_weight=20.0,
             focal_alpha=0.25,
@@ -442,6 +519,8 @@ class Trainer:
             lambda_powerflow=1.0, lambda_capacity=1.0,
             lambda_stability=1.0, lambda_frequency=1.0,
             lambda_reactive=1.0, 
+            lambda_risk=1.0,     # <-- IMPROVEMENT: Added
+            lambda_timing=1.0,   # <-- IMPROVEMENT: Added
             use_logits=self.model_outputs_logits,
             base_mva=self.base_mva,
             base_freq=self.base_freq
@@ -469,7 +548,6 @@ class Trainer:
                 
                 # Stop if batch is empty
                 if 'node_failure_labels' not in batch_device:
-                    print("  Warning: Empty batch encountered during calibration.")
                     continue
 
                 outputs = self.model(batch_device, return_sequence=True)
@@ -480,11 +558,19 @@ class Trainer:
                 if 'edge_index' not in graph_properties:
                     graph_properties['edge_index'] = batch_device['edge_index']
                 
+                # --- IMPROVEMENT: Pass new targets to dummy criterion ---
+                targets = {
+                    'failure_label': batch_device['node_failure_labels'],
+                    'ground_truth_risk': batch_device.get('ground_truth_risk'),
+                    'cascade_timing': batch_device.get('cascade_timing')
+                }
+
                 _, loss_components = dummy_criterion(
                     outputs, 
-                    {'failure_label': batch_device['node_failure_labels'].reshape(-1)},
+                    targets,
                     graph_properties
                 )
+                # --- END IMPROVEMENT ---
                 
                 for key, val in loss_components.items():
                     if not np.isnan(val) and not np.isinf(val):
@@ -495,7 +581,8 @@ class Trainer:
             print("[ERROR] Calibration failed: No data loaded.")
             return {
                 'lambda_powerflow': 0.1, 'lambda_capacity': 0.1,
-                'voltage': 0.001, 'lambda_frequency': 0.1
+                'voltage': 0.001, 'lambda_frequency': 0.1,
+                'lambda_risk': 0.2, 'lambda_timing': 0.1
             }
         
         avg_losses = {key: val / total_batches for key, val in loss_sums.items()}
@@ -512,8 +599,9 @@ class Trainer:
         # Ensure target_magnitude is not zero to prevent division by zero
         if target_magnitude < 1e-9: target_magnitude = 1e-9 
         print(f"\n  Target magnitude (from prediction loss): {target_magnitude:.6f}")
-
-        physics_loss_keys = ['powerflow', 'capacity', 'voltage', 'frequency']
+        
+        # --- IMPROVEMENT: Added risk and timing keys ---
+        physics_loss_keys = ['powerflow', 'capacity', 'voltage', 'frequency', 'risk', 'timing']
         calibrated_lambdas = {}
         
         print("\n  Calibrating lambda weights (Target-Value Strategy):")
@@ -533,7 +621,7 @@ class Trainer:
             lambda_val = target_magnitude / denominator
             
             # Handle the 'lambda_' prefix for the criterion's keys
-            lambda_key = f"lambda_{key}" if key != 'voltage' else 'voltage'
+            lambda_key = f"lambda_{key}" if key not in ['voltage'] else key
             calibrated_lambdas[lambda_key] = lambda_val
             
             print(f"    {lambda_key}: {lambda_val:10.4f}  (Raw Loss: {raw_loss:.6f}, Denom: {denominator:.6f}, Initial Weighted Loss: {lambda_val * raw_loss:.4f})")
@@ -603,6 +691,14 @@ class Trainer:
                 graph_properties['edge_index'] = batch_device['edge_index']
             # --- End modification ---
             
+            # --- IMPROVEMENT: Prepare all targets for the loss function ---
+            targets = {
+                'failure_label': batch_device['node_failure_labels'],
+                'ground_truth_risk': batch_device.get('ground_truth_risk'),
+                'cascade_timing': batch_device.get('cascade_timing')
+            }
+            # --- END IMPROVEMENT ---
+
             if self.use_amp and self.scaler is not None:
                 with torch.amp.autocast('cuda'):
                     outputs = self.model(batch_device, return_sequence=True)
@@ -613,7 +709,7 @@ class Trainer:
                     
                     loss, loss_components = self.criterion(
                         outputs, 
-                        {'failure_label': batch_device['node_failure_labels']}, # Pass [B,N] labels
+                        targets, # <-- Pass improved targets
                         graph_properties
                     )
                 
@@ -632,7 +728,7 @@ class Trainer:
                 
                 loss, loss_components = self.criterion(
                     outputs, 
-                    {'failure_label': batch_device['node_failure_labels']}, # Pass [B,N] labels
+                    targets, # <-- Pass improved targets
                     graph_properties
                 )
                 
@@ -683,6 +779,7 @@ class Trainer:
             node_f1 = 2 * node_precision * node_recall / (node_precision + node_recall + 1e-7)
             
             # 2. Set a clean, ultra-compact postfix that will fit on one line
+            # --- IMPROVEMENT: Added rL (Risk Loss) and tL (Timing Loss) ---
             pbar.set_postfix({
                 'cF1': f"{cascade_f1:.3f}",
                 'cR': f"{cascade_recall:.3f}",
@@ -692,6 +789,8 @@ class Trainer:
                 'cpL': f"{loss_components.get('capacity', 0):.2f}",
                 'vL': f"{loss_components.get('voltage', 0):.2f}",
                 'fL': f"{loss_components.get('frequency', 0):.2f}",
+                'rL': f"{loss_components.get('risk', 0):.3f}",
+                'tL': f"{loss_components.get('timing', 0):.3f}",
             })
             
             # ====================================================================
@@ -766,9 +865,12 @@ class Trainer:
         check_shape('angles', ('B', 'N', 1))
         check_shape('line_flows', ('B', 'E', 1))
         check_shape('frequency', ('B', 1, 1))
+        # --- IMPROVEMENT: Check new outputs ---
+        check_shape('risk_scores', ('B', 'N', 7))
+        check_shape('cascade_timing', ('B', 'N', 1)) # <-- CHANGED: Model now outputs node timing
+        # --- END IMPROVEMENT ---
 
         print("\nChecking other model outputs...")
-        check_shape('risk_scores', ('B', 'N', 7))
         check_shape('reactive_flows', ('B', 'E', 1))
 
         if 'temporal_sequence' in batch:
@@ -816,9 +918,17 @@ class Trainer:
                 
                 outputs = self.model(batch_device, return_sequence=True)
                 
+                # --- IMPROVEMENT: Prepare all targets for the loss function ---
+                targets = {
+                    'failure_label': batch_device['node_failure_labels'],
+                    'ground_truth_risk': batch_device.get('ground_truth_risk'),
+                    'cascade_timing': batch_device.get('cascade_timing')
+                }
+                # --- END IMPROVEMENT ---
+                
                 loss, _ = self.criterion(
                     outputs,
-                    {'failure_label': batch_device['node_failure_labels']}, # Pass [B,N] labels
+                    targets, # <-- Pass improved targets
                     graph_properties
                 )
                 

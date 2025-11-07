@@ -1,3 +1,14 @@
+"""
+=============================================================================
+Just a utility to disassemble cases integrated in one batch, since the new 
+data generator has already done that, no need to use this script.
+=============================================================================
+
+Author: Kraftgene AI Inc. (R&D)
+Date: November 2025
+"""
+
+
 import pickle
 from pathlib import Path
 import glob

@@ -8,9 +8,9 @@ Combines ALL features:
 4. Temporal dynamics with LSTM
 5. Seven-dimensional risk assessment
 
-
-Author: Kraftgene AI Inc. (R&D)
-Date: October 2025
+*** IMPROVEMENT: Replaced complex edge-based RelayTimingModel with a 
+*** direct node-based failure_time_head for simpler and more
+*** effective causal path prediction.
 """
 
 import torch
@@ -481,82 +481,9 @@ class TemporalGNNCell(nn.Module):
         return h_out, (h_new, c_new)
 
 
-class RelayTimingModel(nn.Module):
-    """
-    Models deterministic relay operations with inverse-time characteristics.
-    Implements IEEE inverse-time overcurrent relay curves.
-    """
-    
-    def __init__(self, hidden_dim: int):
-        super(RelayTimingModel, self).__init__()
-        
-        # Predict relay parameters
-        self.time_dial_predictor = nn.Sequential(
-            nn.Linear(hidden_dim * 2, 64),  # Changed from hidden_dim to hidden_dim * 2
-            nn.ReLU(),
-            nn.Linear(64, 1),
-            nn.Sigmoid()  # Time dial: 0-1
-        )
-        
-        self.pickup_current_predictor = nn.Sequential(
-            nn.Linear(hidden_dim * 2, 64),  # Changed from hidden_dim to hidden_dim * 2
-            nn.ReLU(),
-            nn.Linear(64, 1),
-            nn.Softplus()  # Pickup current > 0
-        )
-        
-        # Relay curve constants (IEEE standard)
-        self.register_buffer('curve_A', torch.tensor(0.14))
-        self.register_buffer('curve_B', torch.tensor(0.02))
-        self.register_buffer('curve_p', torch.tensor(0.02))
-    
-    def compute_operating_time(self, current: torch.Tensor, time_dial: torch.Tensor,
-                               pickup_current: torch.Tensor) -> torch.Tensor:
-        """
-        Compute relay operating time using inverse-time curve.
-        
-        Args:
-            current: Line current [batch_size, num_edges, 1]
-            time_dial: Time dial setting [batch_size, num_edges, 1]
-            pickup_current: Pickup current setting [batch_size, num_edges, 1]
-        
-        Returns:
-            Operating time in seconds [batch_size, num_edges, 1]
-        """
-        I_pu = current / (pickup_current + 1e-6)
-        
-        # IEEE inverse-time curve: t = TD * (A / (I^p - 1) + B)
-        operating_time = time_dial * (
-            self.curve_A / (torch.pow(I_pu, self.curve_p) - 1 + 1e-6) + self.curve_B
-        )
-        
-        # Clamp to reasonable range (0.1 to 60 seconds)
-        operating_time = torch.clamp(operating_time, 0.1, 60.0)
-        
-        return operating_time
-    
-    def forward(self, edge_embeddings: torch.Tensor, line_currents: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """
-        Predict relay parameters and operating times.
-        
-        Args:
-            edge_embeddings: Edge feature embeddings [batch_size, num_edges, hidden_dim * 2]
-            line_currents: Computed line currents [batch_size, num_edges, 1]
-        
-        Returns:
-            Dictionary with relay predictions
-        """
-        time_dial = self.time_dial_predictor(edge_embeddings)
-        pickup_current = self.pickup_current_predictor(edge_embeddings)
-        
-        operating_time = self.compute_operating_time(line_currents, time_dial, pickup_current)
-        
-        return {
-            'time_dial': time_dial,
-            'pickup_current': pickup_current,
-            'operating_time': operating_time,
-            'will_operate': (line_currents > pickup_current).float()
-        }
+# ============================================================================
+# *** REMOVED RelayTimingModel ***
+# ============================================================================
 
 
 # ============================================================================
@@ -759,8 +686,7 @@ class UnifiedCascadePredictionModel(nn.Module):
     - Physics-informed GNN with graph attention
     - Temporal dynamics with multi-layer LSTM
     - Frequency dynamics modeling
-    - Deterministic relay timing
-    - Multi-task prediction
+    - Multi-task prediction (including direct node timing)
     """
     
     def __init__(self, embedding_dim: int = 128, hidden_dim: int = 128,
@@ -820,14 +746,20 @@ class UnifiedCascadePredictionModel(nn.Module):
             nn.Sigmoid()
         )
         
+        # ====================================================================
+        # START: IMPROVEMENT - Direct Node-Timing Head
+        # ====================================================================
         self.failure_time_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
             nn.Dropout(0.4),  # Increased dropout
             nn.Linear(hidden_dim // 2, 1),
-            nn.Softplus()
+            nn.Softplus() # Ensures time is always positive
         )
-        
+        # ====================================================================
+        # END: IMPROVEMENT
+        # ====================================================================
+
         self.voltage_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
@@ -861,8 +793,13 @@ class UnifiedCascadePredictionModel(nn.Module):
             nn.Sigmoid()  # Output: 0-1, scaled to 57-63 Hz range
         )
         
-        # Relay timing model
-        self.relay_model = RelayTimingModel(hidden_dim=hidden_dim)
+        # ====================================================================
+        # START: IMPROVEMENT - Remove RelayTimingModel
+        # ====================================================================
+        # self.relay_model = RelayTimingModel(hidden_dim=hidden_dim) # <-- REMOVED
+        # ====================================================================
+        # END: IMPROVEMENT
+        # ====================================================================
         
         # Seven-dimensional risk assessment with supervision
         self.risk_head = nn.Sequential(
@@ -986,6 +923,16 @@ class UnifiedCascadePredictionModel(nn.Module):
         # Multi-task predictions
         failure_prob = self.failure_prob_head(h)
         logging.debug(f"Failure probability head output shape: {failure_prob.shape}")
+
+        # ====================================================================
+        # START: IMPROVEMENT - Use new node-timing head
+        # ====================================================================
+        # This now predicts per-node time: [B, N, 1]
+        failure_timing = self.failure_time_head(h)
+        logging.debug(f"Failure timing head output shape: {failure_timing.shape}")
+        # ====================================================================
+        # END: IMPROVEMENT
+        # ====================================================================
         
         voltages = self.voltage_head(h)  # [B, N, 1], range [0, 1], scaled to [0.9, 1.1] p.u.
         voltages = 0.9 + voltages * 0.2  # Scale from [0,1] to [0.9, 1.1] p.u.
@@ -1012,8 +959,14 @@ class UnifiedCascadePredictionModel(nn.Module):
         reactive_flows = line_flows * 0.3  # Reactive power typically 30% of active power
         logging.debug(f"Reactive flows output shape: {reactive_flows.shape}")
         
-        relay_predictions = self.relay_model(edge_features, line_flows)
-        logging.debug(f"Relay model output keys: {relay_predictions.keys()}")
+        # ====================================================================
+        # START: IMPROVEMENT - Remove relay predictions
+        # ====================================================================
+        # relay_predictions = self.relay_model(edge_features, line_flows) # <-- REMOVED
+        # logging.debug(f"Relay model output keys: {relay_predictions.keys()}")
+        # ====================================================================
+        # END: IMPROVEMENT
+        # ====================================================================
         
         risk_scores = self.risk_head(h)  # [B, N, 7]: threat_severity, vulnerability, operational_impact, 
                                           # cascade_probability, response_complexity, public_safety, urgency
@@ -1031,20 +984,15 @@ class UnifiedCascadePredictionModel(nn.Module):
         
         return {
             'failure_probability': failure_prob,
-            'failure_timing': relay_predictions['operating_time'],
-            'cascade_timing': relay_predictions['operating_time'],
+            'failure_timing': failure_timing, # <-- Use new node-timing head
+            'cascade_timing': failure_timing, # <-- Use new node-timing head
             'voltages': voltages,  # ALWAYS output voltages
             'angles': angles,      # ALWAYS output angles
             'line_flows': line_flows,  # ALWAYS output line_flows
             'reactive_flows': reactive_flows,
             'frequency': frequency,  # ALWAYS output frequency
             'risk_scores': risk_scores,
-            'relay_outputs': {
-                'time_dial': relay_predictions['time_dial'],
-                'pickup_current': relay_predictions['pickup_current'],
-                'operating_time': relay_predictions['operating_time'],
-                'will_operate': relay_predictions['will_operate']
-            },
+            # 'relay_outputs': { ... }, # <-- REMOVED
             'node_embeddings': h,
             'env_embedding': env_emb,
             'infra_embedding': infra_emb,

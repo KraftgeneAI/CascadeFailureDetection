@@ -239,6 +239,15 @@ class CascadeDataset(Dataset):
         if edge_attr.shape[1] >= 2:
             edge_attr[:, 1] = self._normalize_power(edge_attr[:, 1]) # thermal_limits
         edge_attr = to_tensor(edge_attr)
+        
+        # ====================================================================
+        # START: IMPROVEMENT (Load ground_truth_risk)
+        # ====================================================================
+        ground_truth_risk = metadata.get('ground_truth_risk', np.zeros(7, dtype=np.float32))
+        # ====================================================================
+        # END: IMPROVEMENT
+        # ====================================================================
+
 
         if self.mode == 'last_timestep':
             return {
@@ -255,6 +264,7 @@ class CascadeDataset(Dataset):
                 'edge_attr': edge_attr,
                 'node_failure_labels': label_seq[-1],
                 'cascade_timing': timing_seq[-1],
+                'ground_truth_risk': to_tensor(ground_truth_risk), # <-- ADDED
                 'graph_properties': self._extract_graph_properties(last_step, metadata, edge_attr)
             }
         
@@ -273,6 +283,7 @@ class CascadeDataset(Dataset):
                 'edge_attr': edge_attr, # Use last edge_attr
                 'node_failure_labels': label_seq[-1], # Use last label
                 'cascade_timing': timing_seq[-1], # Use last timing
+                'ground_truth_risk': to_tensor(ground_truth_risk), # <-- ADDED
                 'graph_properties': self._extract_graph_properties(last_step, metadata, edge_attr),
                 'temporal_sequence': torch.stack(scada_seq), # Use SCADA as main temporal feature
                 'sequence_length': len(sequence)
@@ -329,6 +340,14 @@ class CascadeDataset(Dataset):
             
         graph_props = self._extract_graph_properties_from_metadata(metadata, num_edges)
         
+        # ====================================================================
+        # START: IMPROVEMENT (Load ground_truth_risk)
+        # ====================================================================
+        ground_truth_risk = metadata.get('ground_truth_risk', np.zeros(7, dtype=np.float32))
+        # ====================================================================
+        # END: IMPROVEMENT
+        # ====================================================================
+
         if self.mode == 'full_sequence':
             item = {
                 'satellite_data': satellite_data,
@@ -344,6 +363,7 @@ class CascadeDataset(Dataset):
                 'edge_attr': edge_attr,
                 'node_failure_labels': to_tensor(node_failure_labels),
                 'cascade_timing': torch.zeros(num_nodes),
+                'ground_truth_risk': to_tensor(ground_truth_risk), # <-- ADDED
                 'graph_properties': graph_props,
                 'temporal_sequence': scada_data,
                 'sequence_length': T
@@ -363,6 +383,7 @@ class CascadeDataset(Dataset):
                 'edge_attr': edge_attr,
                 'node_failure_labels': to_tensor(node_failure_labels),
                 'cascade_timing': torch.zeros(num_nodes),
+                'ground_truth_risk': to_tensor(ground_truth_risk), # <-- ADDED
                 'graph_properties': graph_props
             }
         return item
