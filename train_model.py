@@ -1086,7 +1086,7 @@ if __name__ == "__main__":
                         help="Number of epochs to train")
     parser.add_argument('--batch_size', type=int, default=4, 
                         help="Training and validation batch size")
-    parser.add_argument('--lr', type=float, default=0.005, 
+    parser.add_argument('--lr', type=float, default=0.0005, 
                         help="Initial learning rate")
     parser.add_argument('--grad_clip', type=float, default=10.0, 
                         help="Max gradient norm for clipping")
