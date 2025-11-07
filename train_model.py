@@ -1143,14 +1143,12 @@ if __name__ == "__main__":
         train_dataset = CascadeDataset(
             f"{DATA_DIR}/train", 
             mode='full_sequence', 
-            cache_size=1, # Only keep 1 file in memory
             base_mva=args.base_mva,
             base_frequency=args.base_freq
         )
         val_dataset = CascadeDataset(
             f"{DATA_DIR}/val", 
             mode='full_sequence', 
-            cache_size=1, # Only keep 1 file in memory
             base_mva=args.base_mva,
             base_frequency=args.base_freq
         )

@@ -1,6 +1,10 @@
 """
 Memory-efficient dataset loader for pre-generated cascade failure/normal data.
-Handles BOTH old flat array format AND new sequence format.
+=============================================================================
+MODIFIED FOR 1-SCENARIO-PER-FILE FORMAT
+This version reads individual scenario_*.pkl files, avoiding memory-intensive
+batch files.
+=============================================================================
 
 Author: Kraftgene AI Inc. (R&D)
 Date: October 2025
@@ -14,119 +18,77 @@ from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional
 import numpy as np
 import gc
+import glob # Added glob
 
 
 class CascadeDataset(Dataset):
     """
-    Memory-efficient PyTorch Dataset with DUAL FORMAT SUPPORT.
+    Memory-efficient PyTorch Dataset for 1-scenario-per-file format.
     
-    Supports:
-    - OLD FORMAT: Flat arrays (node_features, edge_features, etc.)
-    - NEW FORMAT: Sequence of timestep dictionaries
+    - No caching needed, as each file is tiny.
+    - Loads one .pkl file per __getitem__ call.
     
-    Automatically detects format and converts to model-expected format.
     WITH PHYSICS-INFORMED NORMALIZATION for power, voltage, capacity, frequency.
     """
     
-    def __init__(self, batch_dir: str, mode: str = 'last_timestep', cache_size: int = 1,
+    def __init__(self, data_dir: str, mode: str = 'last_timestep',
                  base_mva: float = 100.0, base_frequency: float = 60.0):
         """
-        Initialize dataset from pre-generated batch files.
+        Initialize dataset from a directory of individual scenario_*.pkl files.
         
         Args:
-            batch_dir: Directory containing batch_*.pkl files
+            data_dir: Directory containing scenario_*.pkl files
             mode: 'last_timestep' or 'full_sequence'
-            cache_size: Number of batch files to keep in memory (default: 1 for memory efficiency)
             base_mva: Base MVA for per-unit normalization (default: 100.0)
             base_frequency: Base frequency in Hz for per-unit normalization (default: 60.0)
         """
-        self.batch_dir = Path(batch_dir)
+        self.data_dir = Path(data_dir)
         self.mode = mode
-        self.cache_size = cache_size
         
         # --- ADDED: Normalization constants ---
         self.base_mva = base_mva
         self.base_frequency = base_frequency
         # --- END ADDED ---
         
-        self._batch_cache = {}
-        self._cache_order = []
         
+        # Find all individual scenario files
+        print(f"Indexing scenarios from: {data_dir}")
+        self.scenario_files = sorted(glob.glob(str(self.data_dir / "scenario_*.pkl")))
         
-        # Find batch files
-        self.batch_files = sorted(self.batch_dir.glob("batch_*.pkl"))
-        if len(self.batch_files) == 0:
-            self.batch_files = sorted(self.batch_dir.glob("scenarios_batch_*.pkl"))
+        if len(self.scenario_files) == 0:
+            raise ValueError(f"No 'scenario_*.pkl' files found in {data_dir}. "
+                             "Did you run the rebatch_data.py script?")
         
-        if len(self.batch_files) == 0:
-            raise ValueError(f"No batch files found in {batch_dir}")
-        
-        print(f"Indexing scenarios from {len(self.batch_files)} batch files...")
         print(f"Physics normalization: base_mva={base_mva}, base_frequency={base_frequency}")
-        self.scenario_index = []
+        
+        # --- We must load the metadata from each file to get labels ---
+        # This is memory-intensive but necessary for weighted sampling.
+        # We will load, get label, and discard.
+        print(f"Scanning {len(self.scenario_files)} files for cascade labels...")
         self.cascade_labels = []
         
-        skipped_invalid = 0
-        
-        for batch_idx, batch_file in enumerate(self.batch_files):
+        for scenario_file in self.scenario_files:
             try:
-                with open(batch_file, 'rb') as f:
-                    batch_data = pickle.load(f)
-                    
-                if isinstance(batch_data, list):
-                    num_scenarios = len(batch_data)
-                else:
-                    # Handle case where a batch file might just be one scenario
-                    batch_data = [batch_data]
-                    num_scenarios = 1
+                with open(scenario_file, 'rb') as f:
+                    # Load the single scenario dictionary
+                    scenario = pickle.load(f)
                 
-                for scenario_idx in range(num_scenarios):
-                    scenario = batch_data[scenario_idx]
-                    
-                    # Basic validation
-                    if 'sequence' in scenario:
-                        if isinstance(scenario['sequence'], list):
-                            has_metadata = 'metadata' in scenario and isinstance(scenario['metadata'], dict)
-                            # Allow scenarios with empty sequences but valid metadata (for generator fix)
-                            if len(scenario['sequence']) > 0 or has_metadata:
-                                pass
-                            else:
-                                skipped_invalid += 1
-                                continue
-                        else:
-                            skipped_invalid += 1
-                            continue
-                    elif 'node_features' in scenario:
-                        # Old format support
-                        pass
-                    else:
-                        skipped_invalid += 1
-                        continue
-                    
-                    self.scenario_index.append((batch_idx, scenario_idx))
-                    
-                    # Determine cascade label
-                    if 'metadata' in scenario and 'is_cascade' in scenario['metadata']:
-                        has_cascade = scenario['metadata']['is_cascade']
-                    elif 'graph_state' in scenario and 'is_cascade' in scenario['graph_state']:
-                        has_cascade = scenario['graph_state']['is_cascade']
-                    elif 'sequence' in scenario and len(scenario['sequence']) > 0:
-                        last_step = scenario['sequence'][-1]
-                        has_cascade = bool(np.max(last_step.get('node_labels', np.zeros(1))) > 0.5)
-                    elif 'node_failure' in scenario:
-                        node_failure = scenario['node_failure']
-                        has_cascade = bool(np.max(node_failure) > 0.5)
-                    else:
-                        has_cascade = False # Default to False if undetectable
-                    
-                    self.cascade_labels.append(has_cascade)
+                # Determine cascade label
+                if 'metadata' in scenario and 'is_cascade' in scenario['metadata']:
+                    has_cascade = scenario['metadata']['is_cascade']
+                elif 'sequence' in scenario and len(scenario['sequence']) > 0:
+                    last_step = scenario['sequence'][-1]
+                    has_cascade = bool(np.max(last_step.get('node_labels', np.zeros(1))) > 0.5)
+                else:
+                    has_cascade = False # Default to False if undetectable
+                
+                self.cascade_labels.append(has_cascade)
+                
             except (IOError, pickle.UnpicklingError) as e:
-                print(f"Warning: Skipping corrupted or unreadable batch file: {batch_file}. Error: {e}")
-
+                print(f"Warning: Skipping corrupted or unreadable file: {scenario_file}. Error: {e}")
+                self.cascade_labels.append(False) # Add a dummy label to keep index aligned
         
-        print(f"Indexed {len(self.scenario_index)} scenarios from {len(self.batch_files)} batch files")
-        if skipped_invalid > 0:
-            print(f"  Skipped {skipped_invalid} scenarios with invalid format")
+        print(f"Indexed {len(self.scenario_files)} scenarios.")
         
         if len(self.cascade_labels) == 0:
             print(f"  [WARNING] No valid scenarios found!")
@@ -135,7 +97,7 @@ class CascadeDataset(Dataset):
             print(f"  Cascade scenarios: {positive_count} ({positive_count/len(self.cascade_labels)*100:.1f}%)")
             print(f"  Normal scenarios: {len(self.cascade_labels) - positive_count} ({(len(self.cascade_labels) - positive_count)/len(self.cascade_labels)*100:.1f}%)")
         
-        print(f"Memory-efficient mode: Loading batches on-demand (cache size: {cache_size})")
+        print(f"Ultra-memory-efficient mode: Loading 1 file per sample.")
 
     # --- ADDED: Normalization methods ---
     def _normalize_power(self, power_values: np.ndarray) -> np.ndarray:
@@ -146,42 +108,22 @@ class CascadeDataset(Dataset):
         """Normalize frequency to per-unit (divide by base_frequency)."""
         return frequency_values / self.base_frequency
     # --- END ADDED ---
-
-    def _load_batch_cached(self, batch_idx: int) -> List[Dict]:
-        """Load a batch file with LRU caching."""
-        if batch_idx in self._batch_cache:
-            self._cache_order.remove(batch_idx)
-            self._cache_order.append(batch_idx)
-            return self._batch_cache[batch_idx]
-        
-        batch_file = self.batch_files[batch_idx]
-        with open(batch_file, 'rb') as f:
-            batch_data = pickle.load(f)
-        
-        if not isinstance(batch_data, list):
-            batch_data = [batch_data]
-        
-        if self.cache_size > 0:
-            if len(self._batch_cache) >= self.cache_size:
-                oldest_idx = self._cache_order.pop(0)
-                del self._batch_cache[oldest_idx]
-                gc.collect()
-            
-            self._batch_cache[batch_idx] = batch_data
-            self._cache_order.append(batch_idx)
-        else:
-            gc.collect()
-        
-        return batch_data
+    
+    # --- REMOVED: _load_batch_cached - no longer needed ---
     
     def __len__(self) -> int:
-        return len(self.scenario_index)
+        return len(self.scenario_files)
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        """Get a single scenario with automatic format detection."""
-        batch_idx, scenario_idx = self.scenario_index[idx]
-        batch_scenarios = self._load_batch_cached(batch_idx)
-        scenario = batch_scenarios[scenario_idx]
+        """Get a single scenario by loading its individual file."""
+        scenario_file = self.scenario_files[idx]
+        
+        try:
+            with open(scenario_file, 'rb') as f:
+                scenario = pickle.load(f)
+        except Exception as e:
+            print(f"Error loading {scenario_file}: {e}. Returning empty dict.")
+            return {} # Dataloader collate_fn will skip this
         
         if 'sequence' in scenario and 'metadata' in scenario:
             sequence = scenario['sequence']
@@ -192,114 +134,13 @@ class CascadeDataset(Dataset):
             elif len(sequence) > 0:
                 return self._process_sequence_format(scenario)
             else:
-                raise ValueError(f"Scenario has empty sequence and no metadata to reconstruct labels")
-        
-        elif 'node_features' in scenario and 'node_failure' in scenario:
-            # Handle old flat array format
-            return self._process_flat_array_format(scenario)
+                print(f"Warning: Scenario {idx} has empty sequence and no metadata. Skipping.")
+                return {}
         
         else:
-            raise ValueError(f"Unknown scenario format. Keys: {scenario.keys()}. "
-                           f"Expected 'sequence'+'metadata' (NEW FORMAT) or 'node_features'+'node_failure' (OLD FORMAT)")
-    
-    def _process_flat_array_format(self, scenario: Dict) -> Dict[str, Any]:
-        """Process OLD FORMAT (flat arrays) and convert to model-expected format."""
-        # This function is kept for backward compatibility.
-        # It assumes old data was already normalized or follows a different spec.
-        # For new, physics-informed training, _process_sequence_format is key.
-        
-        def to_tensor(data):
-            if isinstance(data, torch.Tensor):
-                return data
-            elif isinstance(data, np.ndarray):
-                return torch.from_numpy(data).float()
-            else:
-                return torch.tensor(data, dtype=torch.float32)
-        
-        if 'edge_index' in scenario:
-            edge_index = to_tensor(scenario['edge_index']).long()
-        elif 'graph_state' in scenario and 'edge_index' in scenario['graph_state']:
-            edge_index = to_tensor(scenario['graph_state']['edge_index']).long()
-        elif 'graph_state' in scenario and 'adjacency_matrix' in scenario['graph_state']:
-            adjacency = scenario['graph_state']['adjacency_matrix']
-            edge_index = to_tensor(np.array(np.nonzero(adjacency))).long()
-        else:
-            raise ValueError("edge_index not found in scenario data")
-        
-        node_features = to_tensor(scenario['node_features'])
-        edge_features = to_tensor(scenario.get('edge_features', np.zeros((node_features.shape[0], edge_index.shape[1], 5))))
-        satellite_data = to_tensor(scenario['satellite_data'])
-        weather_data = to_tensor(scenario['weather_data'])
-        visual_data = to_tensor(scenario['robotic_visual_data'])
-        thermal_data = to_tensor(scenario['robotic_thermal_data'])
-        sensor_data = to_tensor(scenario['robotic_sensor_data'])
-        node_failure = to_tensor(scenario['node_failure'])
-        
-        T, N, node_feat_dim = node_features.shape
-        
-        # --- Apply normalization to flat array format as well ---
-        scada_data = node_features[..., 0:15] # Assuming scada is first 15
-        pmu_data = node_features[..., 15:23] # Assuming pmu is next 8
-        equip_data = node_features[..., 23:33] # Assuming equip is next 10
+            print(f"Warning: Scenario {idx} has unknown format. Keys: {scenario.keys()}. Skipping.")
+            return {}
 
-        # Normalize SCADA (cols 2,3,4,5)
-        scada_data[..., 2] = self._normalize_power(scada_data[..., 2])
-        scada_data[..., 3] = self._normalize_power(scada_data[..., 3])
-        scada_data[..., 4] = self._normalize_power(scada_data[..., 4])
-        scada_data[..., 5] = self._normalize_power(scada_data[..., 5])
-        
-        # Normalize PMU (col 5)
-        pmu_data[..., 5] = self._normalize_frequency(pmu_data[..., 5])
-        
-        # Normalize edge_attr (col 1)
-        edge_features[..., 1] = self._normalize_power(edge_features[..., 1])
-        # --- End normalization ---
-
-        # Re-map features based on model's expected inputs
-        # This mapping is based on inference.py's expectations
-        weather_sequence = weather_data.reshape(T, N, -1) # [T, N, 80]
-        threat_indicators = weather_sequence[..., 0:6] # Just take first 6 as proxy
-        
-        if self.mode == 'last_timestep':
-            return {
-                'satellite_data': satellite_data[-1],
-                'scada_data': scada_data[-1],
-                'weather_sequence': weather_sequence[-1],
-                'threat_indicators': threat_indicators[-1],
-                'visual_data': visual_data[-1],
-                'thermal_data': thermal_data[-1],
-                'sensor_data': sensor_data[-1],
-                'pmu_sequence': pmu_data[-1],
-                'equipment_status': equip_data[-1],
-                'edge_index': edge_index,
-                'edge_attr': edge_features[-1],
-                'node_failure_labels': node_failure[-1],
-                'cascade_timing': torch.zeros(N), # Old format doesn't have this
-                'graph_properties': self._extract_graph_properties_from_flat(scenario, -1)
-            }
-        
-        elif self.mode == 'full_sequence':
-            return {
-                'satellite_data': satellite_data,
-                'scada_data': scada_data,
-                'weather_sequence': weather_sequence,
-                'threat_indicators': threat_indicators,
-                'visual_data': visual_data,
-                'thermal_data': thermal_data,
-                'sensor_data': sensor_data,
-                'pmu_sequence': pmu_data,
-                'equipment_status': equip_data,
-                'edge_index': edge_index,
-                'edge_attr': edge_features[-1], # Use last edge_attr
-                'node_failure_labels': node_failure[-1], # Use last label
-                'cascade_timing': torch.zeros(N), # Old format doesn't have this
-                'graph_properties': self._extract_graph_properties_from_flat(scenario, -1),
-                'temporal_sequence': scada_data, # Use SCADA as main temporal feature
-                'sequence_length': T
-            }
-        
-        else:
-            raise ValueError(f"Unknown mode: {self.mode}")
     
     def _process_sequence_format(self, scenario: Dict) -> Dict[str, Any]:
         """Process NEW FORMAT (sequence of timestep dicts) WITH NORMALIZATION."""
@@ -339,7 +180,10 @@ class CascadeDataset(Dataset):
             # Handle shape mismatches by falling back to default
             if hasattr(default_val, 'shape') and hasattr(data, 'shape') and data.shape != default_val.shape:
                 if data.size == default_val.size:
-                    return data.reshape(default_val.shape)
+                    try:
+                        return data.reshape(default_val.shape)
+                    except ValueError:
+                         return default_val
                 return default_val
             return data
 
@@ -523,36 +367,6 @@ class CascadeDataset(Dataset):
             }
         return item
     
-    def _extract_graph_properties_from_flat(self, scenario: Dict, timestep_idx: int) -> Dict[str, torch.Tensor]:
-        """Extract graph properties from flat array format WITH NORMALIZATION."""
-        graph_props = {}
-        
-        if 'edge_features' in scenario:
-            edge_features = scenario['edge_features']
-            if timestep_idx < 0:
-                timestep_idx = edge_features.shape[0] + timestep_idx
-            
-            if edge_features.shape[2] >= 5:
-                # Assuming old format [react, therm, res, susc, cond]
-                graph_props['conductance'] = torch.from_numpy(edge_features[timestep_idx, :, 4]).float()
-                graph_props['susceptance'] = torch.from_numpy(edge_features[timestep_idx, :, 3]).float()
-                # Already normalized in _process_flat_array_format
-                graph_props['thermal_limits'] = torch.from_numpy(edge_features[timestep_idx, :, 1]).float()
-        
-        if 'node_features' in scenario:
-            node_features = scenario['node_features']
-            if timestep_idx < 0:
-                timestep_idx = node_features.shape[0] + timestep_idx
-            
-            # This mapping is a guess
-            generation = node_features[timestep_idx, :, 7]
-            load = node_features[timestep_idx, :, 8]
-            
-            # Already normalized
-            power_injection_pu = torch.from_numpy(generation - load).float()
-            graph_props['power_injection'] = power_injection_pu
-        
-        return graph_props
     
     def _extract_graph_properties(self, timestep_data: Dict, metadata: Dict, edge_attr: torch.Tensor) -> Dict[str, torch.Tensor]:
         """Extract graph properties for physics-informed loss WITH NORMALIZATION."""
@@ -654,11 +468,6 @@ class CascadeDataset(Dataset):
         
         return graph_props
     
-    def clear_cache(self):
-        """Clear the manual cache to free memory."""
-        self._batch_cache.clear()
-        self._cache_order.clear()
-        print("Cleared batch cache")
     
     def get_cascade_label(self, idx: int) -> bool:
         """Get cascade label without loading full data."""
@@ -666,7 +475,14 @@ class CascadeDataset(Dataset):
 
 
 def collate_cascade_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-    """Collate function for DataLoader with support for variable-length sequences."""
+    """
+    Collate function for DataLoader with support for variable-length sequences.
+    This function will now skip any empty dictionaries returned by __getitem__.
+    """
+    
+    # Filter out empty dictionaries (from loading errors)
+    batch = [item for item in batch if item]
+    
     batch_dict = {}
     if not batch:
         return batch_dict
@@ -715,8 +531,9 @@ def collate_cascade_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor
                                 graph_props_batch[prop_key] = torch.stack(props, dim=0)
                             except RuntimeError:
                                 # Handle size mismatches, e.g., if one is [186] and another is [187]
-                                print(f"Warning: Size mismatch in graph_properties key {prop_key}, collating as list.")
-                                graph_props_batch[prop_key] = props
+                                # print(f"Warning: Size mismatch in graph_properties key {prop_key}, collating as list.")
+                                # Just use the first one if they can't be stacked (e.g. edge features)
+                                graph_props_batch[prop_key] = props[0]
                         else:
                             props_array = np.array(props)
                             graph_props_batch[prop_key] = torch.from_numpy(props_array).float()
