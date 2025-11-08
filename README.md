@@ -136,6 +136,7 @@ python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 pip install torch torch_geometric numpy matplotlib scipy tqdm psutil
+```
 
 Step 1: Generate Master Topology
 First, generate the single, master grid_topology.pkl file. All data must be generated using this one file.
