@@ -1664,7 +1664,7 @@ def main():
         print(f"Saving grid topology to {args.output_dir}/grid_topology.pkl")
         topology_data = {
             'adjacency_matrix': simulator.adjacency_matrix,
-            'edge_index': simulator.edge_index.numpy(),
+            'edge_index': simulator.edge_index,
             'positions': simulator.positions
         }
         with open(os.path.join(args.output_dir, 'grid_topology.pkl'), 'wb') as f:

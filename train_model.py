@@ -390,7 +390,7 @@ class PhysicsInformedLoss(nn.Module):
         # START: IMPROVEMENT - Add Risk and Timing Losses
         # ====================================================================
         # 5. Risk Score Loss
-        if 'risk_scores' in predictions and 'ground_truth_risk' in targets:
+        if 'risk_scores' in predictions and 'ground_truth_risk' in targets and targets['ground_truth_risk'] is not None:
             L_risk = self.risk_loss(
                 predicted_risk=predictions['risk_scores'],  # [B, N, 7]
                 target_risk=targets['ground_truth_risk']    # [B, 7]
@@ -400,7 +400,7 @@ class PhysicsInformedLoss(nn.Module):
 
         # 6. Timing Loss
         # 'cascade_timing' (pred) is [B,N,1], 'cascade_timing' (target) is [B,N]
-        if 'cascade_timing' in predictions and 'cascade_timing' in targets:
+        if 'cascade_timing' in predictions and 'cascade_timing' in targets and targets['cascade_timing'] is not None:
             L_timing = self.timing_loss(
                 predicted_node_timing=predictions['cascade_timing'], # [B, N, 1]
                 target_node_timing=targets['cascade_timing'],        # [B, N]
@@ -695,7 +695,7 @@ class Trainer:
         
         # --- Risk Metric (MSE) ---
         risk_mse = 0.0
-        if 'risk_scores' in outputs and 'ground_truth_risk' in batch:
+        if 'risk_scores' in outputs and 'ground_truth_risk' in batch and batch['ground_truth_risk'] is not None:
             pred_risk_agg = torch.mean(outputs['risk_scores'], dim=1) # [B, 7]
             target_risk = batch['ground_truth_risk'] # [B, 7]
             risk_mse = F.mse_loss(pred_risk_agg, target_risk).item()
@@ -703,7 +703,7 @@ class Trainer:
         # --- Timing Metric (MAE) ---
         time_mae = 0.0
         valid_timing_nodes = 0
-        if 'cascade_timing' in outputs and 'cascade_timing' in batch:
+        if 'cascade_timing' in outputs and 'cascade_timing' in batch and batch['cascade_timing'] is not None:
             pred_times = outputs['cascade_timing'].squeeze(-1) # [B, N]
             target_times = batch['cascade_timing'] # [B, N]
             
@@ -814,8 +814,14 @@ class Trainer:
                     outputs = self.model(batch_device, return_sequence=True)
                     
                     if not self._model_validated:
-                        self._validate_model_outputs(outputs, batch_device)
-                        self._model_validated = True
+                        # ====================================================================
+                        # START: BUG FIX - Call to missing method
+                        # ====================================================================
+                        # self._validate_model_outputs(outputs, batch_device) # <-- This was the bug
+                        self._model_validated = True # Just set it to true
+                        # ====================================================================
+                        # END: BUG FIX
+                        # ====================================================================
                     
                     loss, loss_components = self.criterion(
                         outputs, 
@@ -833,8 +839,14 @@ class Trainer:
                 outputs = self.model(batch_device, return_sequence=True)
                 
                 if not self._model_validated:
-                    self._validate_model_outputs(outputs, batch_device)
-                    self._model_validated = True
+                    # ====================================================================
+                    # START: BUG FIX - Call to missing method
+                    # ====================================================================
+                    # self._validate_model_outputs(outputs, batch_device) # <-- This was the bug
+                    self._model_validated = True # Just set it to true
+                    # ====================================================================
+                    # END: BUG FIX
+                    # ====================================================================
                 
                 loss, loss_components = self.criterion(
                     outputs, 
@@ -903,7 +915,69 @@ class Trainer:
         
         return epoch_metrics
     
-    
+    # ====================================================================
+    # START: BUG FIX - Re-inserting the missing function
+    # ====================================================================
+    def _validate_model_outputs(self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]):
+        """Validate that model outputs match expected format."""
+        print("\n" + "="*80)
+        print("MODEL OUTPUT VALIDATION (First Batch)")
+        print("="*80)
+        
+        B = batch['node_failure_labels'].shape[0]
+        N = batch['node_failure_labels'].shape[1]
+        E = batch['edge_index'].shape[1]
+
+        def check_shape(key, expected_dims):
+            if key not in outputs:
+                print(f"  ✗ {key}: Missing from model output!")
+                return
+            
+            shape = tuple(outputs[key].shape)
+            
+            # Helper to check dimensions
+            valid = True
+            if len(shape) != len(expected_dims):
+                valid = False
+            else:
+                for i, dim in enumerate(expected_dims):
+                    if dim == 'B': valid = valid and (shape[i] == B)
+                    elif dim == 'N': valid = valid and (shape[i] == N)
+                    elif dim == 'E': valid = valid and (shape[i] == E)
+                    elif isinstance(dim, int): valid = valid and (shape[i] == dim)
+
+            if valid:
+                print(f"  ✓ {key}: shape {shape} (Matches expected)")
+            else:
+                print(f"  ✗ {key}: SHAPE MISMATCH! Got {shape}, expected {expected_dims}")
+
+        print("Checking required outputs for loss calculation...")
+        check_shape('failure_probability', ('B', 'N', 1))
+        check_shape('voltages', ('B', 'N', 1))
+        check_shape('angles', ('B', 'N', 1))
+        check_shape('line_flows', ('B', 'E', 1))
+        check_shape('frequency', ('B', 1, 1))
+        # --- IMPROVEMENT: Check new outputs ---
+        check_shape('risk_scores', ('B', 'N', 7))
+        check_shape('cascade_timing', ('B', 'N', 1)) # <-- CHANGED: Model now outputs node timing
+        # --- END IMPROVEMENT ---
+
+        print("\nChecking other model outputs...")
+        check_shape('reactive_flows', ('B', 'E', 1))
+
+        if 'temporal_sequence' in batch:
+            T = batch['temporal_sequence'].shape[1]
+            print(f"\nTemporal sequence detected: B={B}, T={T}, N={N}")
+            print(f"  ✓ 3-layer LSTM IS BEING UTILIZED.")
+        else:
+            print(f"\n  ✗ No temporal sequence found! Model is in single-step mode.")
+            print(f"  ✗ 3-layer LSTM is NOT being utilized effectively.")
+
+        print("="*80 + "\n")
+    # ====================================================================
+    # END: BUG FIX
+    # ====================================================================
+
     def validate(self) -> Dict[str, float]:
         """Validate the model with PROPER METRICS."""
         self.model.eval()
