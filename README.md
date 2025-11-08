@@ -166,8 +166,8 @@ python multimodal_data_generator.py --normal 3000 --cascade 2000 --output-dir da
 
 # Machine 2
 python multimodal_data_generator.py --normal 3000 --cascade 2000 --output-dir data_p2 --start_batch 5000 --topology-file grid_topology.pkl
-Then, merge the data_p1 and data_p2 train, val, and test folders.
 ```
+Then, merge the data_p1 and data_p2 train, val, and test folders.
 
 Step 3: Train the Model
 Start training with automatic loss calibration. This script will use the new timing_loss and risk_loss to train the model on the causal path.
