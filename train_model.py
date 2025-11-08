@@ -424,7 +424,7 @@ class Trainer:
         train_loader: DataLoader,
         val_loader: DataLoader,
         device: torch.device,
-        learning_rate: float = 0.003,
+        learning_rate: float = 0.0001,
         output_dir: str = "checkpoints",
         max_grad_norm: float = 5.0,
         use_amp: bool = False,
@@ -1192,11 +1192,11 @@ if __name__ == "__main__":
                         help="Root directory containing train/val/test data folders")
     parser.add_argument('--output_dir', type=str, default="checkpoints", 
                         help="Directory to save checkpoints and logs")
-    parser.add_argument('--epochs', type=int, default=50, 
+    parser.add_argument('--epochs', type=int, default=100, 
                         help="Number of epochs to train")
     parser.add_argument('--batch_size', type=int, default=4, 
                         help="Training and validation batch size")
-    parser.add_argument('--lr', type=float, default=0.0005, 
+    parser.add_argument('--lr', type=float, default=0.0001, 
                         help="Initial learning rate")
     parser.add_argument('--grad_clip', type=float, default=10.0, 
                         help="Max gradient norm for clipping")
