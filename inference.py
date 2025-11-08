@@ -768,22 +768,24 @@ def print_single_prediction_report(prediction: Dict, inference_time: float, casc
     print(f"Voltage Range:    [{np.min(prediction['system_state']['voltages_pu']):.3f}, "
           f"{np.max(prediction['system_state']['voltages_pu']):.3f}] p.u.")
     
-    print("\nTop 5 High-Risk Nodes:")
-    if not prediction['top_10_risk_nodes']:
-        print("  - None")
-    
-    actual_nodes = set(gt.get('failed_nodes', []))
-    
-    for node_info in prediction['top_10_risk_nodes'][:5]:
-        node_id = int(node_info['node_id'])
-        prob = float(node_info['failure_probability'])
+    # Only show Top 5 list if a cascade is actually predicted
+    if predicted_cascade:
+        print("\nTop 5 High-Risk Nodes:")
+        if not prediction['top_10_risk_nodes']:
+            print("  - None")
         
-        # Check if this node was a true failure
-        ground_truth_status = "✓ (Actual)" if node_id in actual_nodes else "✗ (Not Actual)"
-        if 'is_cascade' not in gt: # If no ground truth, don't show status
-            ground_truth_status = "" 
+        actual_nodes = set(gt.get('failed_nodes', []))
+        
+        for node_info in prediction['top_10_risk_nodes'][:5]:
+            node_id = int(node_info['node_id'])
+            prob = float(node_info['failure_probability'])
             
-        print(f"  - Node {node_id:<3}: {prob:.4f} {ground_truth_status}")
+            # Check if this node was a true failure
+            ground_truth_status = "✓ (Actual)" if node_id in actual_nodes else "✗ (Not Actual)"
+            if 'is_cascade' not in gt: # If no ground truth, don't show status
+                ground_truth_status = "" 
+                
+            print(f"  - Node {node_id:<3}: {prob:.4f} {ground_truth_status}")
     
     # ====================================================================
     # START: RISK ASSESSMENT FIX & SUMMARY
@@ -882,7 +884,7 @@ def print_single_prediction_report(prediction: Dict, inference_time: float, casc
     # ====================================================================
 
     print("=" * 80 + "\n")
-    
+
 def print_batch_report(predictions: List[Dict], metrics: Dict, total_time: float):
     """Prints a clear, user-friendly report for a batch prediction run."""
     

@@ -294,6 +294,24 @@ class CascadeDataset(Dataset):
         # END: IMPROVEMENT
         # ====================================================================
 
+        # ====================================================================
+        # START: BUG FIX FOR CASCADE TIMING
+        # ====================================================================
+        # Get the correct ground truth timing tensor for the loss function.
+        # This should be the timing data *at the start of the cascade*, not the end.
+        
+        cascade_start_time = metadata.get('cascade_start_time', -1)
+        is_cascade = metadata.get('is_cascade', False)
+        
+        if is_cascade and 0 <= cascade_start_time < len(timing_seq):
+            # Use the timing data from the cascade start timestep
+            correct_timing_tensor = timing_seq[cascade_start_time]
+        else:
+            # Otherwise, just use the last timestep (for normal scenarios)
+            correct_timing_tensor = timing_seq[-1]
+        # ====================================================================
+        # END: BUG FIX FOR CASCADE TIMING
+        # ====================================================================
 
         if self.mode == 'last_timestep':
             return {
@@ -309,7 +327,7 @@ class CascadeDataset(Dataset):
                 'edge_index': to_tensor(edge_index).long(),
                 'edge_attr': edge_attr,
                 'node_failure_labels': label_seq[-1],
-                'cascade_timing': timing_seq[-1],
+                'cascade_timing': correct_timing_tensor, # <-- USE THE CORRECTED TENSOR
                 'ground_truth_risk': to_tensor(ground_truth_risk), # <-- ADDED
                 'graph_properties': self._extract_graph_properties(last_step, metadata, edge_attr)
             }
@@ -328,7 +346,7 @@ class CascadeDataset(Dataset):
                 'edge_index': to_tensor(edge_index).long(),
                 'edge_attr': edge_attr, # Use last edge_attr
                 'node_failure_labels': label_seq[-1], # Use last label
-                'cascade_timing': timing_seq[-1], # Use last timing
+                'cascade_timing': correct_timing_tensor, # <-- USE THE CORRECTED TENSOR
                 'ground_truth_risk': to_tensor(ground_truth_risk), # <-- ADDED
                 'graph_properties': self._extract_graph_properties(last_step, metadata, edge_attr),
                 'temporal_sequence': torch.stack(scada_seq), # Use SCADA as main temporal feature
