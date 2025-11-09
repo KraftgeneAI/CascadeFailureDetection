@@ -1,4 +1,4 @@
-# AI-Driven Predictive Cascade Failure Analysis (beta)
+# AI-Driven Predictive Cascade Failure Analysis
 
 We present a Graph Neural Network (GNN) architecture for predictive cascade failure analysis in electrical power grids, capable of forecasting the **causal chain of failures** (e.g., `Node B -> Node A -> Node C`) minutes before they occur.
 
