@@ -1110,7 +1110,7 @@ class PhysicsBasedGridSimulator:
         return failure_sequence
     
     # ====================================================================
-    # START: IMPROVEMENT 1 (Return initial_reason)
+    # START: IMPROVEMENT 1 (Return initial_reason) - THIS FUNCTION IS NO LONGER USED
     # ====================================================================
     def _simulate_rule_based_cascade(
         self,
@@ -1119,108 +1119,10 @@ class PhysicsBasedGridSimulator:
         target_failure_percentage: Optional[float] = None
     ) -> Tuple[List[int], List[float], List[str], int, str]: # <-- Added str for reason
         """
-        Simulate cascade based on CONSISTENT RULES.
-        GUARANTEED to produce a cascade with DIVERSE failure types and CONTROLLABLE severity!
+        DEPRECATED: This function uses a "forced" trigger.
+        The new _generate_scenario_data is fully deterministic.
         """
-        if target_failure_percentage is None:
-            target_failure_percentage = np.random.choice([0.2, 0.4, 0.6, 0.8, 1.0], p=[0.2, 0.25, 0.25, 0.2, 0.1])
-        
-        target_num_failures = int(self.num_nodes * target_failure_percentage)
-        print(f"  [TARGET] Aiming for {target_num_failures}/{self.num_nodes} node failures ({target_failure_percentage*100:.0f}%)")
-        
-        cascade_start_time = int(sequence_length * np.random.uniform(0.65, 0.85))
-        
-        # --- MODIFIED: Trigger from a high-power node (Gen or Sub) ---
-        node_degrees = np.array([len(self.adjacency_list[i]) for i in range(self.num_nodes)])
-        high_power_nodes = np.where(self.node_types > 0)[0] # Generators (1) or Substations (2)
-        
-        if len(high_power_nodes) > 0:
-            # Prefer high-power nodes with high-degree (high connectivity)
-            high_power_degrees = node_degrees[high_power_nodes]
-            trigger_probs = high_power_degrees / (high_power_degrees.sum() + 1e-6)
-            initial_trigger_node = np.random.choice(high_power_nodes, p=trigger_probs)
-        else:
-            # Fallback if no Gen/Sub nodes
-            initial_trigger_node = np.random.choice(self.num_nodes)
-        # --- END MODIFIED ---
-        
-        load_multiplier = 0.7 + stress_level * 0.4
-        load = self.base_load * load_multiplier
-        
-        node_loading = np.zeros(self.num_nodes)
-        for i in range(self.num_nodes):
-            num_connections = len(self.adjacency_list[i])
-            node_loading[i] = load[i] / (self.base_load[i] + 1e-6) * (1.0 + num_connections * 0.05)
-        
-        node_voltage = 1.0 - (node_loading - 1.0) * 0.15
-        node_voltage = np.clip(node_voltage, 0.85, 1.05)
-        
-        ambient_temp = 30.0
-        node_temperature = ambient_temp + (node_loading - 0.8) * 40
-        node_temperature = np.clip(node_temperature, 25, 100)
-        
-        system_frequency = 60.0 - (node_loading.mean() - 0.9) * 5
-        system_frequency = np.clip(system_frequency, 58.0, 60.5)
-        
-        failure_type = np.random.choice(['loading', 'voltage', 'temperature', 'frequency', 'environmental'])
-        
-        # --- MODIFIED: Force trigger to be a FULL failure, not partial ---
-        if failure_type == 'loading':
-            node_loading[initial_trigger_node] = self.loading_failure_threshold[initial_trigger_node] * np.random.uniform(1.05, 1.15)
-            reason = "loading"
-            print(f"  [TRIGGER] Node {initial_trigger_node} - Loading overload: {node_loading[initial_trigger_node]:.3f} > {self.loading_failure_threshold[initial_trigger_node]:.3f}")
-            
-        elif failure_type == 'voltage':
-            node_voltage[initial_trigger_node] = self.voltage_failure_threshold[initial_trigger_node] * np.random.uniform(0.85, 0.95)
-            reason = "voltage"
-            print(f"  [TRIGGER] Node {initial_trigger_node} - Voltage collapse: {node_voltage[initial_trigger_node]:.3f} < {self.voltage_failure_threshold[initial_trigger_node]:.3f}")
-            
-        elif failure_type == 'temperature':
-            node_temperature[initial_trigger_node] = self.temperature_failure_threshold[initial_trigger_node] * np.random.uniform(1.05, 1.15)
-            reason = "temperature"
-            print(f"  [TRIGGER] Node {initial_trigger_node} - Thermal overload: {node_temperature[initial_trigger_node]:.1f}°C > {self.temperature_failure_threshold[initial_trigger_node]:.1f}°C")
-            
-        elif failure_type == 'frequency':
-            system_frequency = self.frequency_failure_threshold[initial_trigger_node] * np.random.uniform(0.95, 0.99)
-            reason = "frequency"
-            print(f"  [TRIGGER] Node {initial_trigger_node} - Frequency instability: {system_frequency:.2f} Hz < {self.frequency_failure_threshold[initial_trigger_node]:.2f} Hz")
-            
-        else:  # environmental
-            env_effect = np.random.choice(['wildfire', 'storm', 'flooding', 'extreme_cold'])
-            if env_effect == 'wildfire':
-                node_temperature[initial_trigger_node] = self.temperature_failure_threshold[initial_trigger_node] * np.random.uniform(1.1, 1.2)
-                reason = "environmental_temp" # More specific reason
-                print(f"  [TRIGGER] Node {initial_trigger_node} - Wildfire: Temperature {node_temperature[initial_trigger_node]:.1f}°C > {self.temperature_failure_threshold[initial_trigger_node]:.1f}°C")
-            elif env_effect == 'storm':
-                node_loading[initial_trigger_node] = self.loading_failure_threshold[initial_trigger_node] * np.random.uniform(1.1, 1.2)
-                reason = "environmental_load" # More specific reason
-                print(f"  [TRIGGER] Node {initial_trigger_node} - Storm damage: Loading {node_loading[initial_trigger_node]:.3f} > {self.loading_failure_threshold[initial_trigger_node]:.3f}")
-            elif env_effect == 'flooding':
-                node_voltage[initial_trigger_node] = self.voltage_failure_threshold[initial_trigger_node] * np.random.uniform(0.8, 0.9)
-                reason = "environmental_volt" # More specific reason
-                print(f"  [TRIGGER] Node {initial_trigger_node} - Flooding: Voltage {node_voltage[initial_trigger_node]:.3f} < {self.voltage_failure_threshold[initial_trigger_node]:.3f}")
-            else:  # extreme_cold
-                node_loading[initial_trigger_node] = self.loading_failure_threshold[initial_trigger_node] * np.random.uniform(1.05, 1.15)
-                reason = "environmental_load" # More specific reason
-                print(f"  [TRIGGER] Node {initial_trigger_node} - Extreme cold: Loading {node_loading[initial_trigger_node]:.3f} > {self.loading_failure_threshold[initial_trigger_node]:.3f}")
-        # --- END MODIFIED ---
-
-        failure_sequence = self._propagate_cascade_controlled(
-            [initial_trigger_node],
-            node_loading,
-            node_voltage,
-            node_temperature,
-            system_frequency,
-            target_num_failures=target_num_failures
-        )
-        
-        failed_nodes = [initial_trigger_node] + [node for node, _, _ in failure_sequence]
-        failure_times = [0.0] + [time for _, time, _ in failure_sequence]
-        failure_reasons = [reason] + [r for _, _, r in failure_sequence]
-        
-        print(f"  [RESULT] Cascade generated: {len(failed_nodes)}/{self.num_nodes} nodes failed ({len(failed_nodes)/self.num_nodes*100:.1f}%)")
-        
-        return failed_nodes, failure_times, failure_reasons, cascade_start_time, reason
+        pass
     # ====================================================================
     # END: IMPROVEMENT 1
     # ====================================================================
@@ -1313,35 +1215,115 @@ class PhysicsBasedGridSimulator:
     # ====================================================================
 
     # ====================================================================
-    # START: STABILITY FIX - Unified generation loop
+    # START: DETERMINISTIC (UN-CONFUSING) SCENARIO GENERATOR
     # ====================================================================
     def _generate_scenario_data(
         self,
         stress_level: float,
-        sequence_length: int = 30,
-        is_cascade: bool = True
+        sequence_length: int = 30
     ) -> Optional[Dict]:
         """
-        Generate a single scenario (normal or cascade) using the
-        simplified, non-linear, stable physics model for both.
+        Generate a single scenario (normal, stressed, or cascade) based
+        *deterministically* on the input stress_level.
         
         Returns:
             Scenario data dict or None if generation failed
         """
         
+        print(f"  [INPUT] Generating scenario with stress_level: {stress_level:.3f}")
+        
+        # This is the base stress level for the scenario
+        base_stress_level = stress_level
+        
+        # --- 1. Determine pre-cascade state ---
+        # We run the physics *before* the cascade to see if it fails naturally
+        
+        cascade_start_time = int(sequence_length * np.random.uniform(0.65, 0.85))
+        
+        generation = np.zeros(self.num_nodes)
+        load_values = np.zeros(self.num_nodes)
+        
+        # Ramp up to the target stress level (simulating the lead-up)
+        ramp_factor = 1.0 # Use full stress for the check
+        current_stress = base_stress_level * ramp_factor
+        
+        load_multiplier = 0.7 + current_stress * 0.4 
+        load_noise = 0.05
+        
+        load_values = self.base_load * load_multiplier * (1 + np.random.normal(0, load_noise, self.num_nodes))
+        
+        total_load = load_values.sum()
+        gen_indices = np.where(self.node_types == 1)[0]
+        total_capacity = self.gen_capacity.sum()
+        for idx in gen_indices:
+            if total_capacity > 0:
+                generation[idx] = (self.gen_capacity[idx] / total_capacity) * total_load * 1.02
+            else:
+                generation[idx] = 0
+        
+        voltages, angles, line_flows, is_stable = self._compute_simplified_power_flow(
+            generation, load_values, failed_lines=[], failed_nodes=[]
+        )
+        
+        loading_ratios = np.abs(line_flows) / (self.thermal_limits + 1e-6)
+        
+        ambient_temp_base = 25 + 10 * np.random.rand()
+        
         # ====================================================================
-        # START: IMPROVEMENT 1 & 2 (Catch new outputs)
+        # START: INDEXERROR FIX
         # ====================================================================
-        if is_cascade:
-            # Catch the new `initial_reason`
-            failed_nodes, failure_times, failure_reasons, cascade_start_time, initial_reason = self._simulate_rule_based_cascade(
-                stress_level, sequence_length
-            )
-            reasons_set = set(failure_reasons)
-            print(f"  [CASCADE] Trigger node: {failed_nodes[0] if failed_nodes else 'N/A'}, Total failures: {len(failed_nodes)}, Reasons: {reasons_set}")
+        # We must use the full thermal simulation to get per-node temps
+        # This call was missing, causing equipment_temps to be a scalar
+        self.equipment_temperatures = np.full(self.num_nodes, ambient_temp_base) # Reset temps
+        equipment_temps = self._update_thermal_dynamics(loading_ratios, ambient_temp_base, dt=1.0)
+        
+        # Calculate the per-node loading ratio array (also missing)
+        node_loading = load_values / (self.base_load + 1e-6)
+        # ====================================================================
+        # END: INDEXERROR FIX
+        # ====================================================================
 
-            # Create ground_truth_risk vector based on initial_reason
-            # Risk vector: [Threat, Vulnerability, Impact, CascadeProb, Response, Safety, Urgency]
+        current_frequency = 60.0 - (node_loading.mean() - 0.9) * 5 # Use the new node_loading array
+        current_frequency = np.clip(current_frequency, 58.0, 60.5)
+
+        # --- 2. Check for failure ---
+        initial_failed_nodes = []
+        initial_reason = "none"
+        
+        for n in range(self.num_nodes):
+            # Check for a "damage" (state 1) or "failure" (state 2)
+            state, reason = self._check_node_state(
+                n,
+                node_loading[n], # <-- Use the fixed array
+                voltages[n],
+                equipment_temps[n], # <-- Use the fixed array
+                current_frequency
+            )
+            
+            if state == 2: # State 2 is a full failure
+                initial_failed_nodes.append(n)
+                initial_reason = reason
+                # Don't break; find *all* initial failures caused by the stress
+        
+        if len(initial_failed_nodes) > 0:
+            is_cascade = True
+            # Pick just one trigger node to start the propagation
+            trigger_node = np.random.choice(initial_failed_nodes)
+            print(f"  [CASCADE] Node {trigger_node} FAILED deterministically. Reason: {initial_reason}")
+            
+            failure_sequence = self._propagate_cascade_controlled(
+                [trigger_node], # Propagate from just one
+                node_loading, # <-- Pass the fixed array
+                voltages,
+                equipment_temps, # <-- Pass the fixed array
+                current_frequency,
+                target_num_failures=int(self.num_nodes * 0.6) # Target 60%
+            )
+            
+            failed_nodes = [trigger_node] + [node for node, _, _ in failure_sequence]
+            failure_times = [0.0] + [time for _, time, _ in failure_sequence]
+            failure_reasons = [initial_reason] + [r for _, _, r in failure_sequence]
+            
             risk_vec = np.zeros(7, dtype=np.float32)
             risk_vec[0] = stress_level # threat_severity
             if 'loading' in initial_reason or 'temperature' in initial_reason:
@@ -1352,22 +1334,21 @@ class PhysicsBasedGridSimulator:
                 risk_vec[1] = 0.7 # vulnerability
                 risk_vec[2] = 0.9 # operational_impact
                 risk_vec[6] = 0.9 # urgency
-            elif 'environmental' in initial_reason:
-                risk_vec[0] = 0.9 # threat_severity
-                risk_vec[1] = 0.6 # vulnerability
-                risk_vec[5] = 0.8 # public_safety
-            
             risk_vec[3] = 0.5 + 0.5 * (len(failed_nodes) / self.num_nodes) # cascade_probability
             ground_truth_risk = risk_vec
+            
         else:
-            print(f"  [NORMAL] Generating non-linear normal operation at stress level {stress_level:.2f}")
-            failed_nodes, failure_times, failure_reasons, cascade_start_time = [], [], [], -1
-            initial_reason = 'none'
-            # Normal scenario has low risk
-            ground_truth_risk = np.array([stress_level * 0.5, 0.1, 0.1, 0.1, 0.2, 0.1, 0.1], dtype=np.float32)
-        # ====================================================================
-        # END: IMPROVEMENT 1 & 2
-        # ====================================================================
+            # NO failure was triggered
+            is_cascade = False
+            if stress_level > 0.8:
+                print(f"  [STRESSED] No failure thresholds crossed. (e.g., Voltage: {voltages.min():.3f})")
+            else:
+                print(f"  [NORMAL] No failure thresholds crossed.")
+            failed_nodes, failure_times, failure_reasons = [], [], []
+            cascade_start_time = -1
+            # Risk is based on stress level
+            ground_truth_risk = np.array([stress_level, stress_level*0.7, stress_level*0.5, 0.1, 0.1, 0.1, stress_level], dtype=np.float32)
+        
         
         # Build timestep to failed nodes mapping
         timestep_to_failed_nodes = {}
@@ -1388,7 +1369,7 @@ class PhysicsBasedGridSimulator:
         sequence = []
         
         current_frequency = 60.0
-        ambient_temp_base = 25 + 10 * np.random.rand()
+        # Reset equipment temps for the *actual* sequence generation
         self.equipment_temperatures = np.full(self.num_nodes, ambient_temp_base)
         
         generation = np.zeros(self.num_nodes)
@@ -1396,31 +1377,20 @@ class PhysicsBasedGridSimulator:
         
         cumulative_failed_nodes = set()
         
-        # This is the base stress level for the scenario
-        base_stress_level = stress_level
-        
         for t in range(sequence_length):
             
-            # --- START: STABILITY FIX - RAMP-UP LOGIC ---
             current_stress = base_stress_level
             if is_cascade and t < cascade_start_time:
-                # At t=0, start with 60% of the final stress.
-                # Ramp up to 100% of the final stress by cascade_start_time.
                 ramp_factor = 0.6 + 0.4 * (t / max(1, cascade_start_time - 1))
                 current_stress = base_stress_level * ramp_factor
             elif not is_cascade:
-                # Normal cases use a lower, non-ramping stress level
-                current_stress = base_stress_level * 0.7 
-            # If is_cascade and t >= cascade_start_time, current_stress remains base_stress_level
-            # --- END: STABILITY FIX - RAMP-UP LOGIC ---
-
+                current_stress = base_stress_level
+            
             if is_cascade:
-                # Use the (potentially ramped-up) stress
                 load_multiplier = 0.7 + current_stress * 0.4 
                 load_noise = 0.05
             else:
-                # Use the lower, stable stress
-                load_multiplier = 0.5 + current_stress * 0.25 
+                load_multiplier = 0.5 + current_stress * 0.4
                 load_noise = 0.02
             
             load_values = self.base_load * load_multiplier * (1 + np.random.normal(0, load_noise, self.num_nodes))
@@ -1432,7 +1402,7 @@ class PhysicsBasedGridSimulator:
                 if total_capacity > 0:
                     generation[idx] = (self.gen_capacity[idx] / total_capacity) * total_load * 1.02
                 else:
-                    generation[idx] = 0 # Handle case with no generators
+                    generation[idx] = 0
             
             if t in timestep_to_failed_nodes:
                 cumulative_failed_nodes.update(timestep_to_failed_nodes[t])
@@ -1440,27 +1410,16 @@ class PhysicsBasedGridSimulator:
             failed_nodes_t = list(cumulative_failed_nodes)
             failed_lines_t = []
             
-            # ====================================================================
-            # START: NON-LINEAR MODEL SWAP
-            # ====================================================================
-            # --- This is the one-line change ---
-            # Call the new, non-linear simplified solver
             voltages, angles, line_flows, is_stable = self._compute_simplified_power_flow(
                 generation, load_values, failed_lines_t, failed_nodes_t
             )
-            # ====================================================================
-            # END: NON-LINEAR MODEL SWAP
-            # ====================================================================
             
-            # Create dummy values for the missing AC-only outputs for compatibility
             reactive_generation = generation * 0.33
 
             num_failed = len(failed_nodes_t)
             failure_ratio = num_failed / self.num_nodes
             
             if not is_stable:
-                # This block should now NEVER be hit, but it's good practice
-                # to keep it as a safeguard.
                 if is_cascade:
                     if failure_ratio >= 0.9:
                         print(f"  [COMPLETE] Grid collapse complete ({num_failed}/{self.num_nodes} nodes failed = {failure_ratio*100:.1f}%). Generating final timestep.")
@@ -1480,7 +1439,7 @@ class PhysicsBasedGridSimulator:
             equipment_temps = self._update_thermal_dynamics(loading_ratios, ambient_temp, dt=1.0)
             
             sat_data, weather_seq, threat_ind = self._generate_correlated_environmental_data(
-                failed_nodes_t, failed_lines_t, t, cascade_start_time, current_stress # Use current_stress
+                failed_nodes_t, failed_lines_t, t, cascade_start_time, current_stress
             )
             vis_data, thermal_data, sensor_data = self._generate_correlated_robotic_data(
                 failed_nodes_t, failed_lines_t, t, cascade_start_time, equipment_temps
@@ -1524,7 +1483,7 @@ class PhysicsBasedGridSimulator:
                     self.base_load,
                     self.node_types,
                     np.full(self.num_nodes, t / sequence_length),
-                    np.full(self.num_nodes, current_stress), # Use current_stress
+                    np.full(self.num_nodes, current_stress),
                 ]).astype(np.float32),
                 
                 'pmu_sequence': np.column_stack([
@@ -1589,20 +1548,17 @@ class PhysicsBasedGridSimulator:
             last_step = sequence[-1]
             num_positive = int(last_step['node_labels'].sum())
             print(f"  [LABELS] Final timestep: {num_positive}/{self.num_nodes} nodes labeled as failed ({num_positive/self.num_nodes*100:.1f}%)")
-            print(f"  [SUCCESS] Generated {len(sequence)} timesteps of quality {'cascade' if is_cascade else 'normal'} data")
+            print(f"  [SUCCESS] Generated {len(sequence)} timesteps of quality {'cascade' if is_cascade else ('stressed' if stress_level > 0.8 else 'normal')} data")
         
-        # ====================================================================
-        # START: IMPROVEMENT 1 & 2 (Save new metadata)
-        # ====================================================================
         return {
             'sequence': sequence,
             'edge_index': self.edge_index,
             'metadata': {
-                'cascade_start_time': cascade_start_time, # <-- FIX: Use correct variable name
+                'cascade_start_time': cascade_start_time,
                 'failed_nodes': failed_nodes,
-                'failure_times': failure_times, # This list is now relative, starting at 0.0
-                'failure_reasons': failure_reasons, # <-- ADDED
-                'ground_truth_risk': ground_truth_risk, # <-- ADDED
+                'failure_times': failure_times,
+                'failure_reasons': failure_reasons,
+                'ground_truth_risk': ground_truth_risk,
                 'is_cascade': is_cascade,
                 'stress_level': base_stress_level,
                 'num_nodes': self.num_nodes,
@@ -1610,19 +1566,25 @@ class PhysicsBasedGridSimulator:
                 'base_mva': 100.0,
             }
         }
-        # ====================================================================
-        # END: IMPROVEMENT 1 & 2
-        # ====================================================================
     # ====================================================================
-    # END: BUG FIX
+    # END: DETERMINISTIC SCENARIO GENERATOR
     # ====================================================================
 
 
 def main():
     """Main function to generate dataset."""
     parser = argparse.ArgumentParser(description='Generate multi-modal cascade failure dataset')
-    parser.add_argument('--normal', type=int, default=500, help='Number of normal scenarios')
-    parser.add_argument('--cascade', type=int, default=500, help='Number of cascade scenarios')
+    
+    # ====================================================================
+    # START: MODIFICATION (Add --stressed)
+    # ====================================================================
+    parser.add_argument('--normal', type=int, default=100, help='Number of normal (low-stress) scenarios ')
+    parser.add_argument('--cascade', type=int, default=100, help='Number of cascade scenarios ')
+    parser.add_argument('--stressed', type=int, default=100, help='Number of stressed (high-stress, non-failing) scenarios ')
+    # ====================================================================
+    # END: MODIFICATION
+    # ====================================================================
+    
     parser.add_argument('--grid-size', type=int, default=118, help='Number of nodes in grid')
     parser.add_argument('--sequence-length', type=int, default=60, help='Sequence length (timesteps)')
     parser.add_argument('--batch-size', type=int, default=1, help='Number of scenarios to save in each .pkl file')
@@ -1632,23 +1594,16 @@ def main():
     parser.add_argument('--train-ratio', type=float, default=0.70, help='Training set ratio')
     parser.add_argument('--val-ratio', type=float, default=0.15, help='Validation set ratio')
     parser.add_argument('--test-ratio', type=float, default=0.15, help='Test set ratio')
-    
-    # ====================================================================
-    # START: IMPROVEMENT (Add start_batch argument)
-    # ====================================================================
     parser.add_argument('--start_batch', type=int, default=0, help='Starting batch number for output files (e.g., 5000)')
-    # ====================================================================
-    # END: IMPROVEMENT
-    # ====================================================================
 
     args = parser.parse_args()
     
     assert abs(args.train_ratio + args.val_ratio + args.test_ratio - 1.0) < 1e-6, \
         "Train/val/test ratios must sum to 1.0"
     
-    train_dir = Path(args.output_dir) / 'train' # Changed from 'train_batches'
-    val_dir = Path(args.output_dir) / 'val'     # Changed from 'val_batches'
-    test_dir = Path(args.output_dir) / 'test'   # Changed from 'test_batches'
+    train_dir = Path(args.output_dir) / 'train'
+    val_dir = Path(args.output_dir) / 'val'
+    test_dir = Path(args.output_dir) / 'test'
     
     train_dir.mkdir(parents=True, exist_ok=True)
     val_dir.mkdir(parents=True, exist_ok=True)
@@ -1672,13 +1627,13 @@ def main():
     
     # --- START: MODIFIED LOGIC FOR BATCHED GENERATION ---
     
-    # 1. Determine scenario counts for each split
     total_normal = args.normal
     total_cascade = args.cascade
-    total_scenarios = total_normal + total_cascade
+    total_stressed = args.stressed
+    total_scenarios = total_normal + total_cascade + total_stressed
     
     if total_scenarios == 0:
-        print("No scenarios to generate (normal=0, cascade=0). Exiting.")
+        print("No scenarios to generate (normal=0, cascade=0, stressed=0). Exiting.")
         return
 
     # Calculate precise counts for each split
@@ -1690,99 +1645,128 @@ def main():
     num_val_cascade = int(total_cascade * args.val_ratio)
     num_test_cascade = total_cascade - num_train_cascade - num_val_cascade
 
-    num_train = num_train_normal + num_train_cascade
-    num_val = num_val_normal + num_val_cascade
-    num_test = num_test_normal + num_test_cascade
+    num_train_stressed = int(total_stressed * args.train_ratio)
+    num_val_stressed = int(total_stressed * args.val_ratio)
+    num_test_stressed = total_stressed - num_train_stressed - num_val_stressed
+
+    num_train = num_train_normal + num_train_cascade + num_train_stressed
+    num_val = num_val_normal + num_val_cascade + num_val_stressed
+    num_test = num_test_normal + num_test_cascade + num_test_stressed
     
     print(f"\n{'='*80}")
     print(f"DATASET GENERATION PLAN")
     print(f"{'='*80}")
     print(f"  Total Scenarios: {total_scenarios}")
-    print(f"    Normal:   {total_normal}")
-    print(f"    Cascade:  {total_cascade}")
+    print(f"    Normal (Stress 0.3-0.7):   {total_normal}")
+    print(f"    Stressed (Stress 0.8-0.9): {total_stressed}")
+    print(f"    Cascade (Stress > 0.9):  {total_cascade}")
     print(f"\n  TRAIN Set: {num_train} scenarios ({num_train/total_scenarios*100:.1f}%)")
     print(f"    Normal:   {num_train_normal}")
+    print(f"    Stressed: {num_train_stressed}")
     print(f"    Cascade:  {num_train_cascade}")
     print(f"  VAL Set:   {num_val} scenarios ({num_val/total_scenarios*100:.1f}%)")
     print(f"    Normal:   {num_val_normal}")
+    print(f"    Stressed: {num_val_stressed}")
     print(f"    Cascade:  {num_val_cascade}")
     print(f"  TEST Set:  {num_test} scenarios ({num_test/total_scenarios*100:.1f}%)")
     print(f"    Normal:   {num_test_normal}")
+    print(f"    Stressed: {num_test_stressed}")
     print(f"    Cascade:  {num_test_cascade}")
     print(f"\n  Batch size: {args.batch_size} scenarios per file.")
     print(f"  Starting Batch Number: {args.start_batch}")
 
-    # 2. Define helper function for batched generation
     # ====================================================================
-    # START: IMPROVEMENT (Accept start_batch)
+    # START: MODIFICATION - Add retry logic
     # ====================================================================
     def generate_and_save_split_batched(
         num_normal: int, 
-        num_cascade: int, 
+        num_cascade: int,
+        num_stressed: int,
         output_dir: Path, 
         split_name: str,
-        start_batch: int = 0  # <-- ADDED
+        start_batch: int = 0
     ):
-    # ====================================================================
-    # END: IMPROVEMENT
-    # ====================================================================
         """Generates scenarios for a split and saves them in batches."""
         print(f"\n{'='*80}")
-        print(f"GENERATING {split_name} SET ({num_normal} Normal, {num_cascade} Cascade)")
+        print(f"GENERATING {split_name} SET ({num_normal} Normal, {num_stressed} Stressed, {num_cascade} Cascade)")
         print(f"{'='*80}")
 
-        total_to_generate = num_normal + num_cascade
+        total_to_generate = num_normal + num_cascade + num_stressed
+        
         if total_to_generate == 0:
             print(f"  No scenarios to generate for {split_name} set. Skipping.")
             return
 
-        # Create a shuffled list of types to generate
-        types_to_gen = ['normal'] * num_normal + ['cascade'] * num_cascade
+        types_to_gen = ['normal'] * num_normal + ['cascade'] * num_cascade + ['stressed'] * num_stressed
         np.random.shuffle(types_to_gen)
         
         current_batch = []
-        # ====================================================================
-        # START: IMPROVEMENT (Use start_batch)
-        # ====================================================================
-        batch_count = start_batch # <-- CHANGED
-        # ====================================================================
-        # END: IMPROVEMENT
-        # ====================================================================
+        batch_count = start_batch
         
         for i in range(total_to_generate):
             gen_type = types_to_gen[i]
-            is_cascade = (gen_type == 'cascade')
             
-            print(f"\n--- Generating {split_name} scenario {i+1}/{total_to_generate} (Type: {gen_type}) ---")
+            print(f"\n--- Generating {split_name} scenario {i+1}/{total_to_generate} (Target Type: {gen_type}) ---")
             
-            if is_cascade:
-                stress_level = np.random.uniform(0.6, 0.95)
-            else:
-                stress_level = np.random.uniform(0.5, 0.85) # This is the base_stress_level
+            scenario_data = None
+            max_retries = 10 # Safeguard against an impossible-to-generate scenario
+            retries = 0
 
-            scenario_data = simulator._generate_scenario_data(
-                stress_level=stress_level,
-                sequence_length=args.sequence_length,
-                is_cascade=is_cascade
-            )
+            while scenario_data is None and retries < max_retries:
+                if gen_type == 'cascade':
+                    # Use a stress level high enough to *guarantee* a failure
+                    stress_level = np.random.uniform(0.7, 1.0)
+                elif gen_type == 'stressed':
+                    # Use a stress level that is *high* but *just below* the failure threshold
+                    stress_level = np.random.uniform(0.5, 0.62)
+                else: # gen_type == 'normal'
+                    stress_level = np.random.uniform(0.0, 0.5)
+                
+                # Generate a candidate scenario
+                candidate_scenario = simulator._generate_scenario_data(
+                    stress_level=stress_level,
+                    sequence_length=args.sequence_length
+                )
+
+                if candidate_scenario is None:
+                    # Generator rejected it (e.g., too short)
+                    retries += 1
+                    print(f"  [RETRY {retries}] Scenario rejected by generator (e.g., too short).")
+                    continue
+
+                # Check if the *output* type matches the *input* type
+                is_cascade_output = candidate_scenario['metadata']['is_cascade']
+
+                if gen_type == 'cascade' and not is_cascade_output:
+                    # We *wanted* a cascade, but *got* a normal/stressed one. This is a FAILED ATTEMPT.
+                    retries += 1
+                    print(f"  [RETRY {retries}] Wanted 'cascade', but stress {stress_level:.3f} only produced 'normal'. Retrying with higher stress...")
+                    continue # Loop again
+                
+                if (gen_type == 'stressed' or gen_type == 'normal') and is_cascade_output:
+                    # We *wanted* a normal/stressed, but *got* a cascade. FAILED ATTEMPT.
+                    retries += 1
+                    print(f"  [RETRY {retries}] Wanted 'normal/stressed', but stress {stress_level:.3f} produced 'cascade'. Retrying with lower stress...")
+                    continue # Loop again
+                
+                # If we get here, the scenario is valid AND matches the type we wanted.
+                scenario_data = candidate_scenario
             
+            # After the while loop, check if we succeeded
             if scenario_data is not None:
                 current_batch.append(scenario_data)
             else:
-                print(f"  Skipping {split_name} scenario {i+1} (rejected due to quality checks)")
+                print(f"  [FAIL] Skipping {split_name} scenario {i+1}. Max retries ({max_retries}) exceeded.")
+                # This will just skip this one scenario
+            # ====================================================================
+            # END: MODIFICATION
+            # ====================================================================
 
             # Save batch if full or if it's the last item
-            # We check `len(current_batch) > 0` in case the last scenario was rejected
             if (len(current_batch) == args.batch_size or (i == total_to_generate - 1)) and len(current_batch) > 0:
                 batch_file = output_dir / f'scenarios_batch_{batch_count}.pkl'
                 with open(batch_file, 'wb') as f:
-                    # ====================================================================
-                    # START: BUG FIX - Saving `current_batch` not `topology_data`
-                    # ====================================================================
                     pickle.dump(current_batch, f)
-                    # ====================================================================
-                    # END: BUG FIX
-                    # ====================================================================
                 
                 print(f"\n  SAVED BATCH: {len(current_batch)} scenarios to {batch_file}")
                 batch_count += 1
@@ -1791,15 +1775,9 @@ def main():
                 gc.collect() # Force garbage collection
 
     # 3. Generate and save each split sequentially
-    # ====================================================================
-    # START: IMPROVEMENT (Pass start_batch)
-    # ====================================================================
-    generate_and_save_split_batched(num_train_normal, num_train_cascade, train_dir, "TRAIN", args.start_batch)
-    generate_and_save_split_batched(num_val_normal, num_val_cascade, val_dir, "VALIDATION", args.start_batch)
-    generate_and_save_split_batched(num_test_normal, num_test_cascade, test_dir, "TEST", args.start_batch)
-    # ====================================================================
-    # END: IMPROVEMENT
-    # ====================================================================
+    generate_and_save_split_batched(num_train_normal, num_train_cascade, num_train_stressed, train_dir, "TRAIN", args.start_batch)
+    generate_and_save_split_batched(num_val_normal, num_val_cascade, num_val_stressed, val_dir, "VALIDATION", args.start_batch)
+    generate_and_save_split_batched(num_test_normal, num_test_cascade, num_test_stressed, test_dir, "TEST", args.start_batch)
     
     # --- END: MODIFIED LOGIC ---
     
