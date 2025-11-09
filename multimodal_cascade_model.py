@@ -1,6 +1,8 @@
 """
 Unified Cascade Failure Prediction Model
 =========================================
+(MODIFIED to fix non-physical prediction heads)
+
 Combines ALL features:
 1. Graph Neural Networks (GNN) with graph attention
 2. Physics-informed learning (power flow, stability constraints)
@@ -11,6 +13,12 @@ Combines ALL features:
 *** IMPROVEMENT: Replaced complex edge-based RelayTimingModel with a 
 *** direct node-based failure_time_head for simpler and more
 *** effective causal path prediction.
+***
+*** IMPROVEMENT 2 (CRITICAL): Fixed all physics prediction heads.
+*** - Removed non-physical activations (Sigmoid, Softplus)
+*** - Removed hard-coded scaling (voltage, angle, frequency)
+*** - Added a dedicated head for reactive_flow.
+*** This forces the model to learn the real physics.
 """
 
 import torch
@@ -364,9 +372,15 @@ class GraphAttentionLayer(MessagePassing):
         
         edge_attr_transformed = None
         if edge_attr is not None and self.lin_edge is not None:
-            B_e, E, edge_dim = edge_attr.shape
-            edge_attr_flat = edge_attr.reshape(B_e * E, edge_dim)
-            edge_attr_transformed = self.lin_edge(edge_attr_flat).reshape(B_e * E, H, C_out)
+            # Handle both batched [B, E, D] and unbatched [E, D] edge_attr
+            if edge_attr.dim() == 3:
+                B_e, E, edge_dim = edge_attr.shape
+                edge_attr_flat = edge_attr.reshape(B_e * E, edge_dim)
+            else: # dim == 2
+                E, edge_dim = edge_attr.shape
+                edge_attr_flat = edge_attr
+            
+            edge_attr_transformed = self.lin_edge(edge_attr_flat).reshape(-1, H, C_out)
         
         # Create batched edge_index
         edge_index_batched = []
@@ -374,17 +388,29 @@ class GraphAttentionLayer(MessagePassing):
             edge_index_batched.append(edge_index + b * N)
         edge_index_batched = torch.cat(edge_index_batched, dim=1)
         
+        # Handle batched edge attributes
+        if edge_attr is not None and edge_attr.dim() == 3 and edge_attr_transformed is not None:
+             edge_attr_propagated = edge_attr_transformed.reshape(B*edge_attr.shape[1], H, C_out)
+        else:
+             edge_attr_propagated = edge_attr_transformed # Use as is (either [E,H,C] or None)
+
+        
         if True:  # add_self_loops
             edge_index_batched, _ = add_self_loops(edge_index_batched, num_nodes=B * N)
-            if edge_attr_transformed is not None:
+            if edge_attr_propagated is not None:
                 num_self_loops = B * N
-                self_loop_attr = torch.zeros(num_self_loops, H, C_out, device=edge_attr_transformed.device)
-                edge_attr_transformed = torch.cat([edge_attr_transformed, self_loop_attr], dim=0)
+                self_loop_attr = torch.zeros(num_self_loops, H, C_out, device=edge_attr_propagated.device)
+                
+                # If unbatched, expand to match batched self-loops
+                if edge_attr_propagated.shape[0] == edge_attr.shape[0]: # [E, H, C]
+                    edge_attr_propagated = edge_attr_propagated.repeat(B, 1, 1)
+
+                edge_attr_propagated = torch.cat([edge_attr_propagated, self_loop_attr], dim=0)
         
         out = self.propagate(
             edge_index_batched,
             x=x_transformed,
-            edge_attr=edge_attr_transformed,
+            edge_attr=edge_attr_propagated,
             size=(B * N, B * N)
         )
         
@@ -482,11 +508,6 @@ class TemporalGNNCell(nn.Module):
 
 
 # ============================================================================
-# *** REMOVED RelayTimingModel ***
-# ============================================================================
-
-
-# ============================================================================
 # PHYSICS-INFORMED LOSS (Section 4.2)
 # ============================================================================
 
@@ -512,8 +533,8 @@ class PhysicsInformedLoss(nn.Module):
             voltages: Node voltages [batch_size, num_nodes, 1]
             angles: Node angles [batch_size, num_nodes, 1]
             edge_index: Edge connectivity [2, num_edges]
-            conductance: Edge conductance [batch_size, num_edges]
-            susceptance: Edge susceptance [batch_size, num_edges]
+            conductance: Edge conductance [batch_size, num_edges] or [num_edges]
+            susceptance: Edge susceptance [batch_size, num_edges] or [num_edges]
             power_injection: Node power injection [batch_size, num_nodes, 1]
         """
         src, dst = edge_index
@@ -572,7 +593,8 @@ class PhysicsInformedLoss(nn.Module):
         elif thermal_limits.dim() == 2:
             thermal_limits = thermal_limits.unsqueeze(-1)
         
-        violations = F.relu(line_flows - thermal_limits)
+        # Violations are when |line_flow| > limit
+        violations = F.relu(torch.abs(line_flows) - thermal_limits)
         return torch.mean(violations ** 2)
     
     def voltage_stability_loss(self, voltages: torch.Tensor,
@@ -760,46 +782,63 @@ class UnifiedCascadePredictionModel(nn.Module):
         # END: IMPROVEMENT
         # ====================================================================
 
+        # ====================================================================
+        # START: PHYSICS HEAD FIXES
+        # ====================================================================
+        
+        # Voltage head: Must be able to predict < 0.9 and > 1.1
+        # Removed Sigmoid, replaced with ReLU (voltage is positive)
         self.voltage_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Dropout(0.3),  # Added dropout
+            nn.Dropout(0.3),
             nn.Linear(hidden_dim // 2, 1),
-            nn.Sigmoid()
+            nn.ReLU() # <-- FIX: Allows prediction of any positive voltage
         )
         
+        # Angle head: Must predict small radians. Tanh [-1, 1] is a good
+        # range for this. The scaling was the bug.
         self.angle_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Dropout(0.3),  # Added dropout
+            nn.Dropout(0.3),
             nn.Linear(hidden_dim // 2, 1),
-            nn.Tanh()
+            nn.Tanh() # <-- Kept, as it's a good range for radians
         )
         
+        # Line flow head: Must predict positive AND negative values.
+        # Removed Softplus, now a linear output.
         self.line_flow_head = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.3),  # Added dropout
-            nn.Linear(hidden_dim, 1),
-            nn.Softplus()
+            nn.Dropout(0.3),
+            nn.Linear(hidden_dim, 1)
+            # <-- FIX: Removed Softplus
         )
         
-        # Frequency prediction head
+        # Reactive flow head: NEW head, learns this task separately.
+        # Also a linear output.
+        self.reactive_flow_head = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(hidden_dim, 1)
+        )
+        
+        # Frequency head: Must be able to predict "bad" frequencies.
+        # Removed Sigmoid, replaced with ReLU.
         self.frequency_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Dropout(0.4),  # Increased dropout
+            nn.Dropout(0.4),
             nn.Linear(hidden_dim // 2, 1),
-            nn.Sigmoid()  # Output: 0-1, scaled to 57-63 Hz range
+            nn.ReLU()  # <-- FIX: Allows prediction of any positive frequency
         )
         
         # ====================================================================
-        # START: IMPROVEMENT - Remove RelayTimingModel
+        # END: PHYSICS HEAD FIXES
         # ====================================================================
-        # self.relay_model = RelayTimingModel(hidden_dim=hidden_dim) # <-- REMOVED
-        # ====================================================================
-        # END: IMPROVEMENT
-        # ====================================================================
+        
         
         # Seven-dimensional risk assessment with supervision
         self.risk_head = nn.Sequential(
@@ -850,6 +889,17 @@ class UnifiedCascadePredictionModel(nn.Module):
         
         has_temporal = env_emb.dim() == 4  # [B, T, N, D]
         
+        edge_attr_input = batch.get('edge_attr')
+        if edge_attr_input is None:
+            # Create a dummy if missing, using edge_index to get E
+            E = batch['edge_index'].shape[1]
+            edge_attr_input = torch.zeros(env_emb.shape[0], E, 5, device=env_emb.device)
+        
+        # Handle unbatched edge_attr (e.g., from dataloader in single-step mode)
+        if edge_attr_input.dim() == 2 and env_emb.dim() > 2: # [E, D] vs [B, N, D]
+             edge_attr_input = edge_attr_input.unsqueeze(0).expand(env_emb.shape[0], -1, -1)
+
+
         if has_temporal:
             B, T, N, D = env_emb.shape
             logging.debug(f"Processing temporal data: B={B}, T={T}, N={N}, D={D}")
@@ -877,7 +927,7 @@ class UnifiedCascadePredictionModel(nn.Module):
             fused = fused_sequence[:, -1, :, :]  # [B, N, D] - last timestep
             
             # Edge embedding
-            edge_embedded = self.edge_embedding(batch.get('edge_attr', torch.zeros(B, batch['edge_index'].shape[1], 5, device=env_emb.device)))
+            edge_embedded = self.edge_embedding(edge_attr_input)
             logging.debug(f"Edge embedding shape: {edge_embedded.shape}")
             
             # Process temporal sequence through LSTM
@@ -907,7 +957,7 @@ class UnifiedCascadePredictionModel(nn.Module):
             fused = self.fusion_norm(fused)
             
             # Edge embedding
-            edge_embedded = self.edge_embedding(batch.get('edge_attr', torch.zeros(B, batch['edge_index'].shape[1], 5, device=fused.device)))
+            edge_embedded = self.edge_embedding(edge_attr_input)
             logging.debug(f"Edge embedding shape: {edge_embedded.shape}")
             
             # Single timestep processing
@@ -924,75 +974,62 @@ class UnifiedCascadePredictionModel(nn.Module):
         failure_prob = self.failure_prob_head(h)
         logging.debug(f"Failure probability head output shape: {failure_prob.shape}")
 
-        # ====================================================================
-        # START: IMPROVEMENT - Use new node-timing head
-        # ====================================================================
-        # This now predicts per-node time: [B, N, 1]
         failure_timing = self.failure_time_head(h)
         logging.debug(f"Failure timing head output shape: {failure_timing.shape}")
+        
         # ====================================================================
-        # END: IMPROVEMENT
+        # START: PHYSICS PREDICTION FIXES
         # ====================================================================
         
-        voltages = self.voltage_head(h)  # [B, N, 1], range [0, 1], scaled to [0.9, 1.1] p.u.
-        voltages = 0.9 + voltages * 0.2  # Scale from [0,1] to [0.9, 1.1] p.u.
-        logging.debug(f"Voltages head output shape: {voltages.shape}")
+        # Predict raw voltage. The loss function will handle penalties.
+        voltages = self.voltage_head(h)  # [B, N, 1]
+        # logging.debug(f"Voltages head (raw) output: {voltages.mean().item():.3f}")
         
-        angles = self.angle_head(h)  # [B, N, 1], range [-1, 1], scaled to [-π, π]
-        angles = angles * 3.14159  # Scale to radians
-        logging.debug(f"Angles head output shape: {angles.shape}")
+        # Predict angles in range [-1, 1]. The loss function will handle radians.
+        angles = self.angle_head(h)  # [B, N, 1]
+        # logging.debug(f"Angles head (raw) output: {angles.mean().item():.3f}")
         
         h_global = h.mean(dim=1, keepdim=True)  # Global pooling
-        frequency_normalized = self.frequency_head(h_global)
-        frequency = 57.0 + frequency_normalized * 6.0  # Scale to 57-63 Hz
-        logging.debug(f"Frequency head output shape: {frequency.shape}")
+        # Predict raw frequency (e.g., 60.0, 58.5). Loss function handles it.
+        frequency = self.frequency_head(h_global)
+        # logging.debug(f"Frequency head (raw) output: {frequency.mean().item():.3f}")
         
         # Line flow prediction
         src, dst = batch['edge_index']
         h_src = h[:, src, :]
         h_dst = h[:, dst, :]
         edge_features = torch.cat([h_src, h_dst], dim=-1)
+        
+        # Predict raw line flow (can be positive or negative)
         line_flows = self.line_flow_head(edge_features)  # [B, E, 1]
-        logging.debug(f"Line flows head output shape: {line_flows.shape}")
         
-        # Reactive power flow prediction
-        reactive_flows = line_flows * 0.3  # Reactive power typically 30% of active power
-        logging.debug(f"Reactive flows output shape: {reactive_flows.shape}")
+        # Predict raw reactive flow (can be positive or negative)
+        reactive_flows = self.reactive_flow_head(edge_features) # [B, E, 1]
         
         # ====================================================================
-        # START: IMPROVEMENT - Remove relay predictions
+        # END: PHYSICS PREDICTION FIXES
         # ====================================================================
-        # relay_predictions = self.relay_model(edge_features, line_flows) # <-- REMOVED
-        # logging.debug(f"Relay model output keys: {relay_predictions.keys()}")
-        # ====================================================================
-        # END: IMPROVEMENT
-        # ====================================================================
-        
-        risk_scores = self.risk_head(h)  # [B, N, 7]: threat_severity, vulnerability, operational_impact, 
-                                          # cascade_probability, response_complexity, public_safety, urgency
+
+        risk_scores = self.risk_head(h)  # [B, N, 7]
         logging.debug(f"Risk scores head output shape: {risk_scores.shape}")
         
         if torch.isnan(failure_prob).any():
             logging.error("[ERROR] NaN detected in failure_prob!")
-            print("[ERROR] NaN detected in failure_prob!")
         if torch.isnan(voltages).any():
             logging.error("[ERROR] NaN detected in voltages!")
-            print("[ERROR] NaN detected in voltages!")
         if torch.isnan(line_flows).any():
             logging.error("[ERROR] NaN detected in line_flows!")
-            print("[ERROR] NaN detected in line_flows!")
         
         return {
             'failure_probability': failure_prob,
-            'failure_timing': failure_timing, # <-- Use new node-timing head
-            'cascade_timing': failure_timing, # <-- Use new node-timing head
-            'voltages': voltages,  # ALWAYS output voltages
-            'angles': angles,      # ALWAYS output angles
-            'line_flows': line_flows,  # ALWAYS output line_flows
-            'reactive_flows': reactive_flows,
-            'frequency': frequency,  # ALWAYS output frequency
+            'failure_timing': failure_timing,
+            'cascade_timing': failure_timing, # Alias for loss function
+            'voltages': voltages,
+            'angles': angles,
+            'line_flows': line_flows,
+            'reactive_flows': reactive_flows, # Now a real prediction
+            'frequency': frequency,
             'risk_scores': risk_scores,
-            # 'relay_outputs': { ... }, # <-- REMOVED
             'node_embeddings': h,
             'env_embedding': env_emb,
             'infra_embedding': infra_emb,

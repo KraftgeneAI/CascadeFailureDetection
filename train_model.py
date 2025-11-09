@@ -79,6 +79,7 @@ class PhysicsInformedLoss(nn.Module):
         self.lambda_reactive = lambda_reactive 
         self.lambda_risk = lambda_risk       # <-- IMPROVEMENT: Added
         self.lambda_timing = lambda_timing   # <-- IMPROVEMENT: Added
+        self.lambda_reactive = lambda_reactive
         
         # Focal Loss & Imbalance parameters
         self.pos_weight = pos_weight
@@ -174,6 +175,63 @@ class PhysicsInformedLoss(nn.Module):
             power_injection = power_injection.unsqueeze(-1)
             
         return F.mse_loss(P_calc, power_injection)
+
+# ... (after power_flow_loss) ...
+
+    def reactive_power_flow_loss(self, voltages: torch.Tensor, angles: torch.Tensor,
+                                 edge_index: torch.Tensor, conductance: torch.Tensor,
+                                 susceptance: torch.Tensor, reactive_injection: torch.Tensor) -> torch.Tensor:
+        """
+        Compute REAL AC reactive power flow loss (Q).
+        Q_ij = V_i * V_j * (G_ij * sin(theta_ij) - B_ij * cos(theta_ij))
+        """
+        src, dst = edge_index
+        batch_size, num_nodes, _ = voltages.shape
+        num_edges = edge_index.shape[1]
+
+        # (Helper function prep_prop is already in your file)
+        def prep_prop(prop, shape):
+            if prop.dim() == 1: # [E]
+                return prop.unsqueeze(0).unsqueeze(-1).expand(batch_size, -1, 1)
+            if prop.dim() == 2: # [B, E]
+                return prop.unsqueeze(-1)
+            if prop.shape == shape:
+                return prop
+            if prop.numel() == shape[1]:
+                 return prop.unsqueeze(0).unsqueeze(-1).expand(batch_size, -1, 1)
+            return prop.expand(batch_size, num_edges, 1)
+
+        conductance = prep_prop(conductance, (batch_size, num_edges, 1))
+        susceptance = prep_prop(susceptance, (batch_size, num_edges, 1))
+        
+        V_i = voltages[:, src, :]  # [B, E, 1]
+        V_j = voltages[:, dst, :]  # [B, E, 1]
+        theta_i = angles[:, src, :]  # [B, E, 1]
+        theta_j = angles[:, dst, :]  # [B, E, 1]
+        
+        theta_ij = theta_i - theta_j  # [B, E, 1]
+        
+        # --- This is the Reactive Power (Q) equation ---
+        Q_ij = V_i * V_j * (conductance * torch.sin(theta_ij) - susceptance * torch.cos(theta_ij))
+        Q_ij_squeezed = Q_ij.squeeze(-1)  # [B, E]
+        
+        Q_calc_flat = torch.zeros(batch_size * num_nodes, device=voltages.device)
+        
+        batch_offset = torch.arange(0, batch_size, device=voltages.device) * num_nodes
+        src_flat = src.repeat(batch_size) + batch_offset.repeat_interleave(num_edges)
+        dst_flat = dst.repeat(batch_size) + batch_offset.repeat_interleave(num_edges)
+        
+        Q_ij_flat = Q_ij_squeezed.flatten() # [B*E]
+        
+        Q_calc_flat.index_add_(0, src_flat, Q_ij_flat)
+        Q_calc_flat.index_add_(0, dst_flat, -Q_ij_flat)
+        
+        Q_calc = Q_calc_flat.reshape(batch_size, num_nodes, 1)
+        
+        if reactive_injection.dim() == 2:
+            reactive_injection = reactive_injection.unsqueeze(-1)
+            
+        return F.mse_loss(Q_calc, reactive_injection)
 
     def capacity_loss(self, line_flows: torch.Tensor, thermal_limits: torch.Tensor) -> torch.Tensor:
         """
@@ -365,6 +423,22 @@ class PhysicsInformedLoss(nn.Module):
             total_loss += self.lambda_stability * L_stability
             loss_components['voltage'] = L_stability.item()
 
+        if 'reactive_flows' in predictions and get_prop('reactive_injection') is not None and \
+           'voltages' in predictions and 'angles' in predictions and \
+           get_prop('conductance') is not None and get_prop('susceptance') is not None:
+            
+            L_reactive = self.reactive_power_flow_loss(
+                voltages=predictions['voltages'],
+                angles=predictions['angles'],
+                edge_index=graph_properties['edge_index'],
+                conductance=get_prop('conductance'),
+                susceptance=get_prop('susceptance'),
+                reactive_injection=get_prop('reactive_injection')
+            )
+            L_reactive = torch.clamp(L_reactive, 0.0, 10.0) # Prevent explosion
+            total_loss += self.lambda_reactive * L_reactive
+            loss_components['reactive'] = L_reactive.item()
+
         # ====================================================================
         # START: REPLACED HEURISTIC WITH PHYSICS-BASED LOSS
         # ====================================================================
@@ -503,6 +577,7 @@ class Trainer:
             lambda_stability=calibrated_lambdas.get('voltage', 0.001), # Calibrator uses 'voltage'
             lambda_frequency=calibrated_lambdas.get('lambda_frequency', 0.1),
             lambda_risk=calibrated_lambdas.get('lambda_risk', 0.2),
+            lambda_reactive=calibrated_lambdas.get('lambda_reactive', 0.1),
             lambda_timing=10.0,   # <-- MANUALLY OVERRIDDEN to force focus on timing
             
             pos_weight=20.0,
@@ -550,6 +625,7 @@ class Trainer:
             lambda_reactive=1.0, 
             lambda_risk=1.0,     # <-- IMPROVEMENT: Added
             lambda_timing=1.0,   # <-- IMPROVEMENT: Added
+            lambda_reactive=1.0,
             use_logits=self.model_outputs_logits,
             base_mva=self.base_mva,
             base_freq=self.base_freq
@@ -630,7 +706,7 @@ class Trainer:
         print(f"\n  Target magnitude (from prediction loss): {target_magnitude:.6f}")
         
         # --- IMPROVEMENT: Added risk and timing keys ---
-        physics_loss_keys = ['powerflow', 'capacity', 'voltage', 'frequency', 'risk', 'timing']
+        physics_loss_keys = ['powerflow', 'capacity', 'voltage', 'frequency', 'reactive', 'risk', 'timing']
         calibrated_lambdas = {}
         
         print("\n  Calibrating lambda weights (Target-Value Strategy):")
