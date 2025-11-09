@@ -752,16 +752,38 @@ def print_single_prediction_report(prediction: Dict, inference_time: float, casc
 
     # --- 3. Timing Analysis ---
     if actual_cascade or predicted_cascade:
-        print("\n--- 3. Time-to-Cascade Analysis ---")
-        pred_time = prediction['time_to_cascade_minutes']
-        actual_time = gt.get('time_to_cascade', -1.0)
+        print("\n--- 3. Timing Analysis ---")
         
-        if pred_time == -1 and actual_time == -1:
-            print("  - No timing information available.")
+        pred_path = prediction.get('cascade_path', [])
+        actual_path = gt.get('cascade_path', [])
+        
+        # --- Calculate Predicted Times ---
+        if pred_path:
+            pred_times = [p['time_minutes'] for p in pred_path]
+            pred_first_fail = min(pred_times)
+            pred_last_fail = max(pred_times)
+            pred_duration = pred_last_fail - pred_first_fail
         else:
-            print(f"  - Predicted Lead Time: {pred_time:.2f} minutes")
-            print(f"  - Actual Lead Time:    {actual_time:.2f} minutes")
+            pred_first_fail = 0.0
+            pred_duration = 0.0
+            
+        # --- Calculate Actual Times ---
+        if actual_path:
+            actual_times = [a['time_minutes'] for a in actual_path]
+            actual_first_fail = min(actual_times) # Should be 0.0
+            actual_last_fail = max(actual_times)
+            actual_duration = actual_last_fail - actual_first_fail
+        else:
+            actual_first_fail = 0.0
+            actual_duration = 0.0
 
+        # --- Print the new comparison table ---
+        print(f"  Metric                      | Predicted       | Ground Truth")
+        print(f"  ----------------------------|-----------------|-----------------")
+        print(f"  Time of First Failure (Rel) | {pred_first_fail:7.2f} minutes | {actual_first_fail:7.2f} minutes")
+        print(f"  Total Cascade Duration      | {pred_duration:7.2f} minutes | {actual_duration:7.2f} minutes")
+
+        
     # --- 4. Critical Information ---
     print("\n--- 4. Critical Information ---")
     print(f"System Frequency: {prediction['system_state']['frequency_hz']:.2f} Hz")
