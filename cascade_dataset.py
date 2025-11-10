@@ -59,8 +59,6 @@ class CascadeDataset(Dataset):
             # Check for the files the generator *actually* creates
             old_files = sorted(glob.glob(str(self.data_dir / "scenarios_batch_*.pkl")))
             if old_files:
-                print(f"  [Warning] Found 'scenarios_batch_*.pkl' files. Assuming batch_size=1 and attempting to load.")
-                print(f"  [Info] For performance, run rebatch_data.py to create 'scenario_*.pkl' files.")
                 self.scenario_files = old_files
             else:
                 raise ValueError(f"No 'scenario_*.pkl' or 'scenarios_batch_*.pkl' files found in {data_dir}.")

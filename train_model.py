@@ -625,7 +625,6 @@ class Trainer:
             lambda_reactive=1.0, 
             lambda_risk=1.0,     # <-- IMPROVEMENT: Added
             lambda_timing=1.0,   # <-- IMPROVEMENT: Added
-            lambda_reactive=1.0,
             use_logits=self.model_outputs_logits,
             base_mva=self.base_mva,
             base_freq=self.base_freq
