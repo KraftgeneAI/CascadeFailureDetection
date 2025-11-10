@@ -533,13 +533,22 @@ class Trainer:
         # START: MODIFICATION - Set pos_weight=1.0 and add lambda_reactive
         # ====================================================================
         self.criterion = PhysicsInformedLoss(
-            lambda_powerflow=calibrated_lambdas.get('lambda_powerflow', 0.1),
-            lambda_temperature=calibrated_lambdas.get('lambda_temperature', 0.1),
-            lambda_stability=calibrated_lambdas.get('voltage', 0.001), 
-            lambda_frequency=calibrated_lambdas.get('lambda_frequency', 0.1),
-            lambda_reactive=calibrated_lambdas.get('lambda_reactive', 0.1), # <-- ADDED
-            lambda_risk=calibrated_lambdas.get('lambda_risk', 0.2),       
-            lambda_timing=10.0,   # <-- Manually set to prioritize timing
+            lambda_powerflow=5.0,      # <-- MANUALLY SET (was 0.026)
+            lambda_temperature=5.0,      # <-- MANUALLY SET (was 0.017)
+            lambda_stability=1.0,      # <-- MANUALLY SET (was 0.21)
+            lambda_frequency=1.0,      # <-- MANUALLY SET (was 0.11)
+            lambda_reactive=5.0,       # <-- MANUALLY SET (was 0.22)
+            lambda_risk=1.5,           # (Calibrated 1.77, this is fine)
+
+            # For dynamic calibration (case-dependent)
+            # lambda_powerflow=calibrated_lambdas.get('lambda_powerflow', 0.1),
+            # lambda_temperature=calibrated_lambdas.get('lambda_temperature', 0.1),
+            # lambda_stability=calibrated_lambdas.get('voltage', 0.001), 
+            # lambda_frequency=calibrated_lambdas.get('lambda_frequency', 0.1),
+            # lambda_reactive=calibrated_lambdas.get('lambda_reactive', 0.1),
+            # lambda_risk=calibrated_lambdas.get('lambda_risk', 0.2),
+
+            lambda_timing=10.0,        # (This remains the highest priority)
             
             pos_weight=1.0,     # <-- CHANGED: Set to 1.0 (sampler handles balance)
             focal_alpha=0.25,
