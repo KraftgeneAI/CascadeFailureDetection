@@ -62,7 +62,7 @@ class PhysicsInformedLoss(nn.Module):
     - ***IMPROVEMENT: Added Risk and Timing losses***
     """
     
-    def __init__(self, lambda_powerflow: float = 0.1, lambda_capacity: float = 0.1,
+    def __init__(self, lambda_powerflow: float = 0.1, lambda_temperature: float = 0.1,
                  lambda_stability: float = 0.001, lambda_frequency: float = 0.1,
                  lambda_reactive: float = 0.1, 
                  lambda_risk: float = 0.2,       # <-- IMPROVEMENT: Added
@@ -73,7 +73,7 @@ class PhysicsInformedLoss(nn.Module):
         super(PhysicsInformedLoss, self).__init__()
         
         self.lambda_powerflow = lambda_powerflow
-        self.lambda_capacity = lambda_capacity
+        self.lambda_temperature = lambda_temperature
         self.lambda_stability = lambda_stability
         self.lambda_frequency = lambda_frequency
         self.lambda_reactive = lambda_reactive 
@@ -172,45 +172,15 @@ class PhysicsInformedLoss(nn.Module):
     # END: "DEAD HEAD" BUG FIX
     # ====================================================================
 
-    def capacity_loss(self, line_flows: torch.Tensor, thermal_limits: torch.Tensor, node_labels: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    def temperature_loss(self, predicted_temp: torch.Tensor, ground_truth_temp: torch.Tensor) -> torch.Tensor:
         """
-        Compute a new, two-part capacity loss.
+        Forces the model to learn the actual ground truth temperature.
         """
-        batch_size = line_flows.shape[0]
-        num_edges = line_flows.shape[1]
-        src, dst = edge_index
+        # predicted_temp is [B, N, 1]
+        # ground_truth_temp is [B, N]
+        return F.mse_loss(predicted_temp.squeeze(-1), ground_truth_temp)
 
-        if thermal_limits.dim() == 1:
-            thermal_limits = thermal_limits.unsqueeze(0).unsqueeze(-1).expand(batch_size, -1, 1)
-        elif thermal_limits.dim() == 2:
-            thermal_limits = thermal_limits.unsqueeze(-1)
 
-        # Get node failure labels for the *nodes* connected to each *edge*
-        node_labels_expanded_src = node_labels[:, src] # [B, E]
-        node_labels_expanded_dst = node_labels[:, dst] # [B, E]
-        
-        # Create a "line failure" label: 1.0 if either connected node failed, 0.0 otherwise
-        line_failure_labels = (node_labels_expanded_src + node_labels_expanded_dst > 0).float().unsqueeze(-1) # [B, E, 1]
-
-        # --- 1. HARD VIOLATION LOSS (for cascade scenarios) ---
-        # Penalize any flow that exceeds 100% of the limit.
-        hard_limits = thermal_limits
-        hard_violations = F.relu(torch.abs(line_flows) - hard_limits)
-        
-        # Only apply this hard loss to lines that are *part* of a cascade (label=1.0)
-        hard_loss = (hard_violations * line_failure_labels).mean()
-
-        # --- 2. "STRESSED" VIOLATION LOSS (for non-cascade scenarios) ---
-        # This is the fix. We penalize any flow that exceeds 60% of the limit.
-        # This will *finally* create a non-zero loss for your "stressed" data.
-        soft_limits = thermal_limits * 0.60
-        soft_violations = F.relu(torch.abs(line_flows) - soft_limits)
-        
-        # Only apply this "soft" loss to lines that are *not* part of a cascade (label=0.0)
-        soft_loss = (soft_violations * (1.0 - line_failure_labels)).mean()
-
-        # The total loss is the sum of both, forcing the model to learn both rules.
-        return hard_loss + soft_loss
     def voltage_stability_loss(self, voltages: torch.Tensor,
                               voltage_min: float = 0.9, voltage_max: float = 1.1) -> torch.Tensor:
         """
@@ -411,25 +381,22 @@ class PhysicsInformedLoss(nn.Module):
         # END: "DEAD HEAD" BUG FIX
         # ====================================================================
         
-        # 2. Capacity Loss
-        if 'line_flows' in predictions and get_prop('thermal_limits') is not None:
-            L_capacity = self.capacity_loss(
-                line_flows=predictions['line_flows'],
-                thermal_limits=get_prop('thermal_limits'),
-                node_labels=targets['failure_label'].reshape(B, N), # Pass in the failure labels
-                edge_index=graph_properties['edge_index'] # Pass in the edge_index
+        # 2. Temperature Loss
+        if 'temperature' in predictions and get_prop('ground_truth_temperature') is not None:
+            L_temperature = self.temperature_loss(
+                predictions['temperature'],
+                get_prop('ground_truth_temperature')
             )
-            L_capacity = torch.clamp(L_capacity, 0.0, 10.0) # Prevent explosion
-            total_loss += self.lambda_capacity * L_capacity
-            loss_components['capacity'] = L_capacity.item()
-
-        # 3. Voltage Stability Loss
-        if 'voltages' in predictions:
-            L_stability = self.voltage_stability_loss(
-                voltages=predictions['voltages']
-            )
-            total_loss += self.lambda_stability * L_stability
-            loss_components['voltage'] = L_stability.item()
+            L_temperature = torch.clamp(L_temperature, 0.0, 10.0) # Prevent explosion
+            total_loss += self.lambda_temperature * L_temperature
+            loss_components['temperature'] = L_temperature.item()
+            # 3. Voltage Stability Loss
+            if 'voltages' in predictions:
+                L_stability = self.voltage_stability_loss(
+                    voltages=predictions['voltages']
+                )
+                total_loss += self.lambda_stability * L_stability
+                loss_components['voltage'] = L_stability.item()
 
         # ====================================================================
         # START: "DEAD HEAD" BUG FIX 
@@ -567,7 +534,7 @@ class Trainer:
         # ====================================================================
         self.criterion = PhysicsInformedLoss(
             lambda_powerflow=calibrated_lambdas.get('lambda_powerflow', 0.1),
-            lambda_capacity=calibrated_lambdas.get('lambda_capacity', 0.1),
+            lambda_temperature=calibrated_lambdas.get('lambda_temperature', 0.1),
             lambda_stability=calibrated_lambdas.get('voltage', 0.001), 
             lambda_frequency=calibrated_lambdas.get('lambda_frequency', 0.1),
             lambda_reactive=calibrated_lambdas.get('lambda_reactive', 0.1), # <-- ADDED
@@ -606,7 +573,7 @@ class Trainer:
         self.model.eval()
         
         dummy_criterion = PhysicsInformedLoss(
-            lambda_powerflow=1.0, lambda_capacity=1.0,
+            lambda_powerflow=1.0, lambda_temperature=1.0,
             lambda_stability=1.0, lambda_frequency=1.0,
             lambda_reactive=1.0, # <-- ADDED
             lambda_risk=1.0,
@@ -684,7 +651,7 @@ class Trainer:
         # ====================================================================
         # START: MODIFICATION - Add 'reactive'
         # ====================================================================
-        physics_loss_keys = ['powerflow', 'capacity', 'voltage', 'frequency', 'reactive', 'risk', 'timing']
+        physics_loss_keys = ['powerflow', 'temperature', 'voltage', 'frequency', 'reactive', 'risk', 'timing']
         # ====================================================================
         # END: MODIFICATION
         # ====================================================================

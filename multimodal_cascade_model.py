@@ -142,7 +142,7 @@ class EnvironmentalEmbedding(nn.Module):
 class InfrastructureEmbedding(nn.Module):
     """Embedding network for infrastructure data (φ_infra)."""
     
-    def __init__(self, scada_features: int = 15, pmu_features: int = 8,  # Changed from 3 to 8 to match actual PMU data
+    def __init__(self, scada_features: int = 14, pmu_features: int = 8,  # Changed from 3 to 8 to match actual PMU data
                  equipment_features: int = 10, embedding_dim: int = 128):  # Changed from 4 to 10 to match actual equipment data
         super(InfrastructureEmbedding, self).__init__()
         
@@ -835,6 +835,22 @@ class UnifiedCascadePredictionModel(nn.Module):
             nn.ReLU()  # <-- FIX: Allows prediction of any positive frequency
         )
         
+
+        # ====================================================================
+        # START: ADDITION
+        # ====================================================================
+        # New head for direct temperature prediction
+        self.temperature_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(hidden_dim // 2, 1),
+            nn.ReLU() # Temperature must be positive
+        )
+        # ====================================================================
+        # END: ADDITION
+        # ====================================================================
+
         # ====================================================================
         # END: PHYSICS HEAD FIXES
         # ====================================================================
@@ -994,6 +1010,16 @@ class UnifiedCascadePredictionModel(nn.Module):
         frequency = self.frequency_head(h_global)
         # logging.debug(f"Frequency head (raw) output: {frequency.mean().item():.3f}")
         
+
+        # ====================================================================
+        # START: ADDITION
+        # ====================================================================
+        temperature = self.temperature_head(h) # [B, N, 1]
+        logging.debug(f"Temperature head output shape: {temperature.shape}")
+        # ====================================================================
+        # END: ADDITION
+        # ====================================================================
+
         # Line flow prediction
         src, dst = batch['edge_index']
         h_src = h[:, src, :]
@@ -1027,6 +1053,7 @@ class UnifiedCascadePredictionModel(nn.Module):
             'voltages': voltages,
             'angles': angles,
             'line_flows': line_flows,
+            'temperature': temperature,
             'reactive_flows': reactive_flows, # Now a real prediction
             'frequency': frequency,
             'risk_scores': risk_scores,

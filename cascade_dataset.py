@@ -255,6 +255,8 @@ class CascadeDataset(Dataset):
                 scada_data[:, 3] = self._normalize_power(scada_data[:, 3]) # reactive_generation
                 scada_data[:, 4] = self._normalize_power(scada_data[:, 4]) # load_values
                 scada_data[:, 5] = self._normalize_power(scada_data[:, 5]) # reactive_load
+            if scada_data.shape[1] == 15:
+                scada_data = scada_data[:, :14] # Keep the first 14 features
             scada_seq.append(to_tensor(scada_data))
             
             # --- PMU NORMALIZATION ---
@@ -496,6 +498,9 @@ class CascadeDataset(Dataset):
         
         if 'base_mva' in metadata:
             graph_props['base_mva'] = torch.tensor(metadata['base_mva'])
+
+        if 'scada_data' in timestep_data and timestep_data['scada_data'].shape[1] > 6:
+            graph_props['ground_truth_temperature'] = torch.from_numpy(timestep_data['scada_data'][:, 6]).float()
         
         return graph_props
     
