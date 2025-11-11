@@ -524,33 +524,79 @@ class Trainer:
         print("\n" + "="*80)
         print("STARTING DYNAMIC LOSS WEIGHT CALIBRATION")
         print("="*80)
-        calibrated_lambdas = self._calibrate_loss_weights()
+        avg_losses = self._calibrate_loss_weights() # <-- Get raw losses
         print("="*80)
         print("CALIBRATION COMPLETE")
         print("="*80 + "\n")
         
-        # ====================================================================
-        # START: MODIFICATION - Set pos_weight=1.0 and add lambda_reactive
-        # ====================================================================
-        self.criterion = PhysicsInformedLoss(
-            lambda_powerflow=5.0,      # <-- MANUALLY SET (was 0.026)
-            lambda_temperature=5.0,      # <-- MANUALLY SET (was 0.017)
-            lambda_stability=1.0,      # <-- MANUALLY SET (was 0.21)
-            lambda_frequency=1.0,      # <-- MANUALLY SET (was 0.11)
-            lambda_reactive=5.0,       # <-- MANUALLY SET (was 0.22)
-            lambda_risk=1.5,           # (Calibrated 1.77, this is fine)
+        # --- START: NEW BALANCING & REPORTING LOGIC ---
+        print("Balancing loss weights...")
+        
+        # 1. Get calibrated weights (the "dynamic" suggestion)
+        target_magnitude = avg_losses.get('prediction', 0.1)
+        if target_magnitude < 1e-9: target_magnitude = 1e-9
+        
+        calibrated_lambdas = {}
+        physics_loss_keys = ['powerflow', 'temperature', 'voltage', 'frequency', 'reactive', 'risk', 'timing']
+        
+        for key in physics_loss_keys:
+            raw_loss = avg_losses.get(key, 0.0)
+            denominator = raw_loss if raw_loss >= 1e-6 else target_magnitude
+            lambda_val = target_magnitude / denominator
+            lambda_key = f"lambda_{key}" if key not in ['voltage'] else key
+            calibrated_lambdas[lambda_key] = lambda_val
 
-            # For dynamic calibration (case-dependent)
-            # lambda_powerflow=calibrated_lambdas.get('lambda_powerflow', 0.1),
-            # lambda_temperature=calibrated_lambdas.get('lambda_temperature', 0.1),
-            # lambda_stability=calibrated_lambdas.get('voltage', 0.001), 
-            # lambda_frequency=calibrated_lambdas.get('lambda_frequency', 0.1),
-            # lambda_reactive=calibrated_lambdas.get('lambda_reactive', 0.1),
-            # lambda_risk=calibrated_lambdas.get('lambda_risk', 0.2),
+        # 2. Define FINAL weights, applying manual overrides
+        final_lambdas = {
+            'lambda_powerflow': 5.0,
+            'lambda_temperature': 5.0,
+            'lambda_stability': 5.0,     # <-- MANUALLY SET (was 1.0)
+            'lambda_frequency': 5.0,     # <-- MANUALLY SET (was 1.0)
+            'lambda_reactive': 5.0,
+            'lambda_risk': 1.5,          # (Calibrated 0.66, this is higher)
+            'lambda_timing': 10.0,       # (This remains your highest priority)
+        }
 
-            lambda_timing=10.0,        # (This remains the highest priority)
+        # 3. Print a clear report
+        print(f"  Target Magnitude (from prediction loss): {target_magnitude:.4f}")
+        print("\n  Final Loss Weights:")
+        print(f"  {'Component':<15} | {'Raw Loss':<12} | {'Dynamic Lambda':<15} | {'Final Lambda':<12} | {'Initial Weighted Loss'}")
+        print(f"  {'-'*15} | {'-'*12} | {'-'*15} | {'-'*12} | {'-'*20}")
+        
+        # Helper to print the table
+        def print_row(key_pretty, key_raw, key_lambda, is_voltage=False):
+            raw = avg_losses.get(key_raw, 0.0)
+            dyn_key = 'voltage' if is_voltage else key_lambda
+            dyn = calibrated_lambdas.get(dyn_key, 0.0)
             
-            pos_weight=1.0,     # <-- CHANGED: Set to 1.0 (sampler handles balance)
+            final_key = 'lambda_stability' if is_voltage else key_lambda
+            final = final_lambdas.get(final_key, 0.0)
+            
+            status = "(MANUAL)" if abs(final - dyn) > 0.01 else "(Dynamic)"
+            
+            print(f"  {key_pretty:<15} | {raw:<12.4f} | {dyn:<15.4f} | {final:<12.4f} | {raw * final:12.4f} {status}")
+
+        print_row("Timing", "timing", "lambda_timing")
+        print_row("Powerflow", "powerflow", "lambda_powerflow")
+        print_row("Temperature", "temperature", "lambda_temperature")
+        print_row("Reactive", "reactive", "lambda_reactive")
+        print_row("Voltage", "voltage", "voltage", is_voltage=True)
+        print_row("Frequency", "frequency", "lambda_frequency")
+        print_row("Risk", "risk", "lambda_risk")
+        
+        # --- END: NEW BALANCING & REPORTING LOGIC ---
+
+        # 4. Initialize the criterion with the FINAL weights
+        self.criterion = PhysicsInformedLoss(
+            lambda_powerflow=final_lambdas['lambda_powerflow'],
+            lambda_temperature=final_lambdas['lambda_temperature'],
+            lambda_stability=final_lambdas['lambda_stability'],
+            lambda_frequency=final_lambdas['lambda_frequency'],
+            lambda_reactive=final_lambdas['lambda_reactive'],
+            lambda_risk=final_lambdas['lambda_risk'],
+            lambda_timing=final_lambdas['lambda_timing'],
+            
+            pos_weight=1.0,
             focal_alpha=0.25,
             focal_gamma=2.0,
             label_smoothing=0.1,
@@ -558,7 +604,8 @@ class Trainer:
             base_mva=self.base_mva,
             base_freq=self.base_freq
         )
-        print(f"\n✓ PhysicsInformedLoss initialized (pos_weight=1.0, lambda_timing=10.0)")
+        print(f"\n✓ PhysicsInformedLoss initialized with FINAL weights.")
+
         # ====================================================================
         # END: MODIFICATION
         # ====================================================================
@@ -575,18 +622,22 @@ class Trainer:
 
     def _calibrate_loss_weights(self, num_batches=20) -> Dict[str, float]:
         """
-        Run a few batches to find the average raw loss for each component
-        and compute balancing weights.
+        Run a few batches to find the average raw loss for each component.
+        Returns a dict of the raw, unweighted loss magnitudes.
         """
         print(f"Running loss calibration for {num_batches} batches...")
         self.model.eval()
         
+        # Use a "dummy" criterion with all weights at 1.0 to get raw loss magnitudes
         dummy_criterion = PhysicsInformedLoss(
-            lambda_powerflow=1.0, lambda_temperature=1.0,
-            lambda_stability=1.0, lambda_frequency=1.0,
-            lambda_reactive=1.0, # <-- ADDED
+            lambda_powerflow=1.0, 
+            lambda_temperature=1.0, # <-- Use new key
+            lambda_stability=1.0, 
+            lambda_frequency=1.0,
+            lambda_reactive=1.0, 
             lambda_risk=1.0,
             lambda_timing=1.0,
+            pos_weight=1.0, # Use 1.0 for calibration
             use_logits=self.model_outputs_logits,
             base_mva=self.base_mva,
             base_freq=self.base_freq
@@ -640,52 +691,17 @@ class Trainer:
 
         if total_batches == 0:
             print("[ERROR] Calibration failed: No data loaded.")
-            return {
-                'lambda_powerflow': 0.1, 'lambda_capacity': 0.1,
-                'voltage': 0.001, 'lambda_frequency': 0.1,
-                'lambda_reactive': 0.1, 'lambda_risk': 0.2, 'lambda_timing': 0.1
-            }
+            return {} # Return empty
         
         avg_losses = {key: val / total_batches for key, val in loss_sums.items()}
         
         print("  Average raw loss components (unweighted):")
-        for key, val in avg_losses.items():
-            print(f"    {key}: {val:.6f}")
-            
-        
-        target_magnitude = avg_losses.get('prediction', 0.1)
-        if target_magnitude < 1e-9: target_magnitude = 1e-9 
-        print(f"\n  Target magnitude (from prediction loss): {target_magnitude:.6f}")
-        
-        # ====================================================================
-        # START: MODIFICATION - Add 'reactive'
-        # ====================================================================
-        physics_loss_keys = ['powerflow', 'temperature', 'voltage', 'frequency', 'reactive', 'risk', 'timing']
-        # ====================================================================
-        # END: MODIFICATION
-        # ====================================================================
-        calibrated_lambdas = {}
-        
-        print("\n  Calibrating lambda weights (Target-Value Strategy):")
-        
-        for key in physics_loss_keys:
-            raw_loss = avg_losses.get(key, 0.0)
-            
-            if raw_loss < 1e-6:
-                denominator = target_magnitude 
-            else:
-                denominator = raw_loss
-            
-            lambda_val = target_magnitude / denominator
-            
-            lambda_key = f"lambda_{key}" if key not in ['voltage'] else key
-            calibrated_lambdas[lambda_key] = lambda_val
-            
-            print(f"    {lambda_key}: {lambda_val:10.4f}  (Raw Loss: {raw_loss:.6f}, Denom: {denominator:.6f}, Initial Weighted Loss: {lambda_val * raw_loss:.4f})")
+        for key, val in sorted(avg_losses.items()):
+            print(f"    {key: <15}: {val:10.6f}")
             
         self.model.train()
-        return calibrated_lambdas
-    
+        return avg_losses # <-- Return the raw losses
+
     def load_checkpoint(self, checkpoint_path: str):
         if not os.path.exists(checkpoint_path):
             print(f"Checkpoint not found: {checkpoint_path}")
@@ -1060,21 +1076,32 @@ class Trainer:
             train_metrics = self.train_epoch()
             val_metrics = self.validate()
             
+            # --- 1. Adjust Cascade Threshold ---
+            if val_metrics['cascade_recall'] < 0.5:
+                self.cascade_threshold = max(0.1, self.cascade_threshold - 0.05)
+                print(f"  ⚠ Cascade Recall low - lowering C-thresh to {self.cascade_threshold:.3f}")
+            elif val_metrics['cascade_precision'] < 0.8: # Use a high bar
+                self.cascade_threshold = min(0.8, self.cascade_threshold + 0.05)
+                print(f"  ⚠ Cascade Precision low - raising C-thresh to {self.cascade_threshold:.3f}")
+            elif val_metrics['cascade_f1'] > 0.95 and self.cascade_threshold < 0.7:
+                # If F1 is great and thresh is below our goal, slowly raise it
+                self.cascade_threshold = min(0.7, self.cascade_threshold + 0.02) # <-- CHANGED
+                
+            # --- 2. Adjust Node Threshold (Independently) ---
+            if val_metrics['node_recall'] < 0.5:
+                self.node_threshold = max(0.1, self.node_threshold - 0.05)
+                print(f"  ⚠ Node Recall low - lowering N-thresh to {self.node_threshold:.3f}")
+            elif val_metrics['node_precision'] < 0.5:
+                self.node_threshold = min(0.8, self.node_threshold + 0.05)
+                print(f"  ⚠ Node Precision low - raising N-thresh to {self.node_threshold:.3f}")
+            elif val_metrics['node_f1'] > 0.95 and self.node_threshold < 0.7:
+                # If F1 is great and thresh is below our goal, slowly raise it
+                self.node_threshold = min(0.7, self.node_threshold + 0.02) # <-- CHANGED
+
             combined_f1 = (val_metrics['cascade_f1'] + val_metrics['node_f1']) / 2
-            
             if combined_f1 > self.best_val_f1:
                 self.best_val_f1 = combined_f1
-                print(f"  ✓ Improved F1 score: {combined_f1:.4f} (thresholds: cascade={self.cascade_threshold:.3f}, node={self.node_threshold:.3f})")
-            
-            elif val_metrics['cascade_recall'] < 0.5 or val_metrics['node_recall'] < 0.3:
-                self.cascade_threshold = max(0.1, self.cascade_threshold - 0.05)
-                self.node_threshold = max(0.1, self.node_threshold - 0.05)
-                print(f"  ⚠ Low recall detected - lowering thresholds to cascade={self.cascade_threshold:.3f}, node={self.node_threshold:.3f}")
-            
-            elif val_metrics['cascade_precision'] < 0.4 or val_metrics['node_precision'] < 0.3:
-                self.cascade_threshold = min(0.8, self.cascade_threshold + 0.05)
-                self.node_threshold = min(0.8, self.node_threshold + 0.05)
-                print(f"  ⚠ Low precision detected - raising thresholds to cascade={self.cascade_threshold:.3f}, node={self.node_threshold:.3f}")
+                print(f"  ✓ Improved F1 score: {combined_f1:.4f} (new thresholds: C={self.cascade_threshold:.3f}, N={self.node_threshold:.3f})")
             
             self.scheduler.step(val_metrics['loss'])
             
@@ -1148,6 +1175,18 @@ class Trainer:
             elif val_metrics['loss'] < self.best_val_loss and not f1_is_good:
                 self.best_val_loss = val_metrics['loss']
                 patience_counter = 0
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'val_loss': val_metrics['loss'],
+                    'val_cascade_f1': val_metrics['cascade_f1'],
+                    'val_node_f1': val_metrics['node_f1'],
+                    'val_time_mae': current_val_mae, # <-- Save the new best MAE
+                    'cascade_threshold': self.cascade_threshold,
+                    'node_threshold': self.node_threshold,
+                    'history': self.history
+                }, f"{self.output_dir}/best_model.pth")
                 print(f"  ✓ Saved best model (val_loss: {val_metrics['loss']:.4f}) - (F1 scores not high enough yet)")
                 
             else:
