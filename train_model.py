@@ -1,24 +1,11 @@
 """
 Training Script for Cascade Prediction Model
 ======================================================
-This script trains the UnifiedCascadePredictionModel using data generated
-by multimodal_data_generator.py. It incorporates:
-- Command-line arguments for hyperparameters.
-- Automatic GPU (CUDA) detection.
-- Weighted sampling to handle class imbalance.
-- A merged physics-informed focal loss function.
-- Dynamic loss weight calibration.
-- Checkpointing and metrics logging.
-
-*** IMPROVEMENT: Added loss functions for 7-D risk and cascade timing
-*** to train the model on causal path prediction.
-***
-*** IMPROVEMENT 2: Added metric tracking and plotting for
-*** Timing MAE and Risk MSE to monitor causal path performance.
-***
-*** IMPROVEMENT 3 (FINAL): The "best" model is now saved based on the
-*** LOWEST val_time_mae (causal path accuracy), while ensuring
-*** F1 scores remain high.
+(MODIFIED for "New, Sound Training Methodology")
+- New "un-cheatable" timing loss
+- Fully dynamic lambda calibration
+- Data leakage fix (pos_weight=1.0)
+- "Resume" bug fix
 """
 
 import torch
@@ -35,7 +22,6 @@ import sys
 from pathlib import Path
 import argparse # Import argparse
 
-# Add parent directory to path for imports
 sys.path.append(str(Path(__file__).resolve().parent))
 
 try:
@@ -53,20 +39,13 @@ except ImportError as e:
 class PhysicsInformedLoss(nn.Module):
     """
     Physics-informed loss function with FOCAL LOSS for severe class imbalance.
-    
-    Combines:
-    - Focal Loss (from train_model.py) for class imbalance.
-    - REAL Physics Constraints (from multimodal_cascade_model.py) for power flow,
-      capacity, and voltage stability.
-    - Physics-based frequency loss using the swing equation.***
-    - ***IMPROVEMENT: Added Risk and Timing losses***
     """
     
     def __init__(self, lambda_powerflow: float = 0.1, lambda_temperature: float = 0.1,
                  lambda_stability: float = 0.001, lambda_frequency: float = 0.1,
                  lambda_reactive: float = 0.1, 
-                 lambda_risk: float = 0.2,       # <-- IMPROVEMENT: Added
-                 lambda_timing: float = 0.1,     # <-- IMPROVEMENT: Added
+                 lambda_risk: float = 0.2,
+                 lambda_timing: float = 0.1,
                  pos_weight: float = 10.0, focal_alpha: float = 0.25, focal_gamma: float = 2.0,
                  label_smoothing: float = 0.15, use_logits: bool = False,
                  base_mva: float = 100.0, base_freq: float = 60.0):
@@ -77,10 +56,9 @@ class PhysicsInformedLoss(nn.Module):
         self.lambda_stability = lambda_stability
         self.lambda_frequency = lambda_frequency
         self.lambda_reactive = lambda_reactive 
-        self.lambda_risk = lambda_risk       # <-- IMPROVEMENT: Added
-        self.lambda_timing = lambda_timing   # <-- IMPROVEMENT: Added
+        self.lambda_risk = lambda_risk
+        self.lambda_timing = lambda_timing
         
-        # Focal Loss & Imbalance parameters
         self.pos_weight = pos_weight
         self.focal_alpha = focal_alpha
         self.focal_gamma = focal_gamma
@@ -89,24 +67,15 @@ class PhysicsInformedLoss(nn.Module):
         
         self._warned_missing_outputs = set()
         
-        # Constants for physics (can be overridden by graph_properties if available)
         self.power_base = base_mva
         self.freq_nominal = base_freq
 
-    # --- Focal Loss (from original train_model.py) ---
     def focal_loss(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
         Focal loss with label smoothing and POS_WEIGHT for handling severe class imbalance.
-        FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t) * pos_weight
         """
-        # Smooth labels
         targets_smooth = targets * (1 - self.label_smoothing) + self.label_smoothing * 0.5
         
-        # ====================================================================
-        # START: BUG FIX - Use pos_weight correctly
-        # ====================================================================
-        # pos_weight (e.g., 1.0) must be applied to the loss, not just a tensor
-        # Create a weight tensor that applies pos_weight to positive samples
         weight = torch.ones_like(logits)
         if self.pos_weight != 1.0:
             weight[targets > 0.5] = self.pos_weight
@@ -114,14 +83,10 @@ class PhysicsInformedLoss(nn.Module):
         bce_loss = F.binary_cross_entropy_with_logits(
             logits, 
             targets_smooth, 
-            reduction='none' # Do not reduce yet
+            reduction='none'
         )
         
-        # Apply the pos_weight
         bce_loss = bce_loss * weight
-        # ====================================================================
-        # END: BUG FIX
-        # ====================================================================
 
         probs = torch.sigmoid(logits)
         
@@ -132,10 +97,6 @@ class PhysicsInformedLoss(nn.Module):
         
         return focal_loss.mean()
 
-    # ====================================================================
-    # START: "DEAD HEAD" BUG FIX 
-    # Re-wire power_flow_loss to use the model's *prediction*
-    # ====================================================================
     def power_flow_loss(self, predicted_line_flows: torch.Tensor, 
                               edge_index: torch.Tensor, 
                               power_injection: torch.Tensor,
@@ -148,7 +109,6 @@ class PhysicsInformedLoss(nn.Module):
         src, dst = edge_index
         num_edges = edge_index.shape[1]
         
-        # predicted_line_flows is [B, E, 1]
         P_ij_squeezed = predicted_line_flows.squeeze(-1)  # [B, E]
         
         P_calc_flat = torch.zeros(batch_size * num_nodes, device=predicted_line_flows.device)
@@ -160,7 +120,7 @@ class PhysicsInformedLoss(nn.Module):
         P_ij_flat = P_ij_squeezed.flatten() # [B*E]
         
         P_calc_flat.index_add_(0, src_flat, P_ij_flat)
-        P_calc_flat.index_add_(0, dst_flat, -P_ij_flat) # Sums flows at nodes
+        P_calc_flat.index_add_(0, dst_flat, -P_ij_flat)
         
         P_calc = P_calc_flat.reshape(batch_size, num_nodes, 1)
         
@@ -168,76 +128,40 @@ class PhysicsInformedLoss(nn.Module):
             power_injection = power_injection.unsqueeze(-1)
             
         return F.mse_loss(P_calc, power_injection)
-    # ====================================================================
-    # END: "DEAD HEAD" BUG FIX
-    # ====================================================================
 
     def temperature_loss(self, predicted_temp: torch.Tensor, ground_truth_temp: torch.Tensor) -> torch.Tensor:
         """
         Forces the model to learn the actual ground truth temperature.
+        FIX: We scale both prediction and target by 100
         """
-        # predicted_temp is [B, N, 1]
-        # ground_truth_temp is [B, N]
-        return F.mse_loss(predicted_temp.squeeze(-1), ground_truth_temp)
-
+        predicted_temp_scaled = predicted_temp.squeeze(-1) / 100.0
+        ground_truth_temp_scaled = ground_truth_temp / 100.0
+        scaled_mse_loss = F.mse_loss(predicted_temp_scaled, ground_truth_temp_scaled)
+        
+        return scaled_mse_loss
 
     def voltage_stability_loss(self, voltages: torch.Tensor,
                               voltage_min: float = 0.9, voltage_max: float = 1.1) -> torch.Tensor:
         """
         Compute voltage stability constraint violations.
-        (Using wider, more realistic 0.9-1.1 p.u. limits)
         """
         low_violations = F.relu(voltage_min - voltages)
         high_violations = F.relu(voltages - voltage_max)
         return torch.mean(low_violations ** 2 + high_violations ** 2)
 
-    # ====================================================================
-    # START: PHYSICS-BASED FREQUENCY LOSS
-    # ====================================================================
     def frequency_loss(self, predicted_freq_Hz: torch.Tensor, 
                        power_injection_pu: torch.Tensor,
                        nominal_freq_Hz: float = 60.0,
                        total_inertia_H: float = 5.0) -> torch.Tensor:
         """
         Compute REAL physics-based frequency loss using the swing equation.
-        Converts predicted Hz and p.u. power imbalance to a common p.u. space.
-        
-        Args:
-            predicted_freq_Hz: Model's predicted frequency [B, 1, 1] (in Hz)
-            power_injection_pu: Net power injection at each node [B, N] (in p.u.)
-            nominal_freq_Hz: System nominal frequency (e.g., 60.0)
-            total_inertia_H: Heuristic system inertia constant (H) in seconds.
         """
-        
-        # 1. Convert predicted Hz to p.u.
-        # predicted_freq_Hz is [B, 1, 1]
         predicted_freq_pu = predicted_freq_Hz / nominal_freq_Hz
-        
-        # 2. Calculate total system power imbalance (p.u.)
-        # power_injection_pu is [B, N], sum over nodes (dim=1)
-        # Result is [B]
         system_power_imbalance_pu = torch.sum(power_injection_pu, dim=1)
-        
-        # 3. Simplified Swing Equation (steady-state deviation)
-        # d_f_pu = P_imbalance_pu / (2 * H_total)
-        # P_imbalance is [B], H is scalar. Result is [B]
         expected_freq_deviation_pu = system_power_imbalance_pu / (2 * total_inertia_H)
-        
-        # 4. Calculate expected p.u. frequency
-        # expected_freq = 1.0 p.u. + deviation
-        # Reshape deviation to match predicted_freq_pu [B, 1, 1]
         expected_freq_pu = 1.0 + expected_freq_deviation_pu.view(-1, 1, 1)
-        
-        # 5. Compute MSE loss in p.u. space
         return F.mse_loss(predicted_freq_pu, expected_freq_pu)
-    # ====================================================================
-    # END: PHYSICS-BASED FREQUENCY LOSS
-    # ====================================================================
 
-    # ====================================================================
-    # START: "DEAD HEAD" BUG FIX 
-    # Re-wire reactive_power_flow_loss to use the model's *prediction*
-    # ====================================================================
     def reactive_power_flow_loss(self, predicted_reactive_flows: torch.Tensor, 
                                  edge_index: torch.Tensor, 
                                  reactive_injection: torch.Tensor,
@@ -245,12 +169,10 @@ class PhysicsInformedLoss(nn.Module):
                                  batch_size: int) -> torch.Tensor:
         """
         Computes reactive power flow loss by summing the model's *predicted* reactive flows (Q)
-        at each node and comparing to the ground truth reactive injection.
         """
         src, dst = edge_index
         num_edges = edge_index.shape[1]
         
-        # predicted_reactive_flows is [B, E, 1]
         Q_ij_squeezed = predicted_reactive_flows.squeeze(-1)  # [B, E]
         
         Q_calc_flat = torch.zeros(batch_size * num_nodes, device=predicted_reactive_flows.device)
@@ -262,7 +184,7 @@ class PhysicsInformedLoss(nn.Module):
         Q_ij_flat = Q_ij_squeezed.flatten() # [B*E]
         
         Q_calc_flat.index_add_(0, src_flat, Q_ij_flat)
-        Q_calc_flat.index_add_(0, dst_flat, -Q_ij_flat) # Sums flows at nodes
+        Q_calc_flat.index_add_(0, dst_flat, -Q_ij_flat)
         
         Q_calc = Q_calc_flat.reshape(batch_size, num_nodes, 1)
         
@@ -270,58 +192,79 @@ class PhysicsInformedLoss(nn.Module):
             reactive_injection = reactive_injection.unsqueeze(-1)
             
         return F.mse_loss(Q_calc, reactive_injection)
-    # ====================================================================
-    # END: "DEAD HEAD" BUG FIX
-    # ====================================================================
 
-    # ====================================================================
-    # START: IMPROVEMENT - RISK SCORE LOSS
-    # ====================================================================
     def risk_loss(self, predicted_risk: torch.Tensor, target_risk: torch.Tensor) -> torch.Tensor:
         """
         Compute loss for the 7-D risk assessment.
-        Compares aggregated predicted node risk to the scenario's ground truth risk.
-        
-        Args:
-            predicted_risk: Model's per-node risk output [B, N, 7]
-            target_risk: Ground truth scenario risk vector [B, 7]
         """
-        # Aggregate predicted risk across nodes (mean)
         predicted_risk_agg = torch.mean(predicted_risk, dim=1) # [B, 7]
-        
-        # Use MSELoss to compare the aggregated prediction to the target
         return F.mse_loss(predicted_risk_agg, target_risk)
-    # ====================================================================
-    # END: IMPROVEMENT - RISK SCORE LOSS
-    # ====================================================================
 
     # ====================================================================
-    # START: IMPROVEMENT - SIMPLIFIED TIMING LOSS
+    # START: "CHEATEABLE MAE" BUG FIX
+    # Replace the old timing_loss with a new, robust "Ranking + MSE" loss
     # ====================================================================
     def timing_loss(self, predicted_node_timing: torch.Tensor, 
                     target_node_timing: torch.Tensor) -> torch.Tensor:
         """
-        Compute loss for cascade timing (Node-to-Node).
+        Compute a robust loss for cascade timing that combines:
+        1. MSE Loss:   Penalizes the absolute time error (like tMAE).
+        2. Ranking Loss: Penalizes the *order* of failures.
         
-        Args:
-            predicted_node_timing: Model's per-node time output [B, N, 1]
-            target_node_timing: Ground truth per-node time [B, N]
+        This prevents the model from "cheating" by predicting 0.0 for all nodes.
         """
-        # Squeeze prediction to match target shape
-        predicted_node_timing = predicted_node_timing.squeeze(-1) # [B, N]
         
-        # 1. Create mask for only nodes that *should* fail (ground truth time >= 0)
+        predicted_node_timing_squeezed = predicted_node_timing.squeeze(-1) # [B, N]
+        batch_size = predicted_node_timing_squeezed.shape[0]
+        
         mask = target_node_timing >= 0.0
         
         if mask.sum() == 0:
-            # No cascade nodes in this batch, return zero loss
             return torch.tensor(0.0, device=target_node_timing.device)
             
-        # 2. Compute loss only on nodes that are part of the cascade
-        loss = F.mse_loss(predicted_node_timing[mask], target_node_timing[mask])
-        return loss
+        # --- 1. MSE Loss (The "Absolute" Teacher) ---
+        mse_loss = F.mse_loss(predicted_node_timing_squeezed[mask], target_node_timing[mask])
+        
+        # --- 2. Pairwise Ranking Loss (The "Relative" Teacher) ---
+        ranking_losses = []
+        for b in range(batch_size):
+            preds = predicted_node_timing_squeezed[b]
+            targets = target_node_timing[b]
+            
+            pos_idx = torch.where(targets >= 0)[0]
+            
+            if len(pos_idx) < 2:
+                continue
+                
+            pairs = torch.combinations(pos_idx, r=2)
+            i_indices = pairs[:, 0]
+            j_indices = pairs[:, 1]
+            
+            pred_i = preds[i_indices]
+            pred_j = preds[j_indices]
+            target_i = targets[i_indices]
+            target_j = targets[j_indices]
+            
+            pred_diff = pred_i - pred_j
+            target_diff = target_i - target_j
+            
+            target_sign = torch.sign(target_diff)
+            
+            margin = 0.1
+            sample_ranking_loss = torch.relu(margin - (pred_diff * target_sign))
+            
+            if sample_ranking_loss.numel() > 0:
+                ranking_losses.append(sample_ranking_loss.mean())
+
+        if not ranking_losses:
+            return mse_loss
+        
+        avg_ranking_loss = torch.stack(ranking_losses).mean()
+        
+        # Combine the two losses. We weight the ranking loss.
+        return mse_loss + (avg_ranking_loss * 0.5)
     # ====================================================================
-    # END: IMPROVEMENT - SIMPLIFIED TIMING LOSS
+    # END: "CHEATEABLE MAE" BUG FIX
     # ====================================================================
 
 
@@ -330,12 +273,11 @@ class PhysicsInformedLoss(nn.Module):
                 targets: Dict[str, torch.Tensor],
                 graph_properties: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
         
-        failure_prob = predictions['failure_probability']  # [B, N, 1]
+        failure_prob = predictions['failure_probability']
         B, N, _ = failure_prob.shape
         
-        failure_prob_flat = failure_prob.reshape(-1)  # [B*N]
-        # --- IMPROVEMENT: targets is now a dict ---
-        targets_flat = targets['failure_label'].reshape(-1)  # [B*N]
+        failure_prob_flat = failure_prob.reshape(-1)
+        targets_flat = targets['failure_label'].reshape(-1)
         
         if self.use_logits:
             logits = failure_prob_flat
@@ -343,15 +285,11 @@ class PhysicsInformedLoss(nn.Module):
             probs = failure_prob_flat.clamp(1e-7, 1 - 1e-7)
             logits = torch.log(probs / (1 - probs))
         
-        # --- Main Prediction Loss ---
         L_prediction = self.focal_loss(logits, targets_flat)
         
         loss_components = {'prediction': L_prediction.item()}
         total_loss = L_prediction
         
-        # --- Physics-Informed Losses ---
-        
-        # Helper to get graph properties
         def get_prop(key):
             if graph_properties and key in graph_properties:
                 return graph_properties[key]
@@ -360,26 +298,19 @@ class PhysicsInformedLoss(nn.Module):
                 self._warned_missing_outputs.add(key)
             return None
 
-        # ====================================================================
-        # START: "DEAD HEAD" BUG FIX 
-        # Call the new power_flow_loss
-        # ====================================================================
         # 1. Power Flow Loss
         if 'line_flows' in predictions and get_prop('power_injection') is not None:
             
             L_powerflow = self.power_flow_loss(
-                predicted_line_flows=predictions['line_flows'], # <-- USE PREDICTION
+                predicted_line_flows=predictions['line_flows'],
                 edge_index=graph_properties['edge_index'],
                 power_injection=get_prop('power_injection'),
                 num_nodes=N,
                 batch_size=B
             )
-            L_powerflow = torch.clamp(L_powerflow, 0.0, 10.0) # Prevent explosion
+            L_powerflow = torch.clamp(L_powerflow, 0.0, 10.0) 
             total_loss += self.lambda_powerflow * L_powerflow
             loss_components['powerflow'] = L_powerflow.item()
-        # ====================================================================
-        # END: "DEAD HEAD" BUG FIX
-        # ====================================================================
         
         # 2. Temperature Loss
         if 'temperature' in predictions and get_prop('ground_truth_temperature') is not None:
@@ -387,25 +318,23 @@ class PhysicsInformedLoss(nn.Module):
                 predictions['temperature'],
                 get_prop('ground_truth_temperature')
             )
-            L_temperature = torch.clamp(L_temperature, 0.0, 10.0) # Prevent explosion
+            # The clamp is removed because the loss is now scaled
             total_loss += self.lambda_temperature * L_temperature
             loss_components['temperature'] = L_temperature.item()
-            # 3. Voltage Stability Loss
-            if 'voltages' in predictions:
-                L_stability = self.voltage_stability_loss(
-                    voltages=predictions['voltages']
-                )
-                total_loss += self.lambda_stability * L_stability
-                loss_components['voltage'] = L_stability.item()
+            
+        # 3. Voltage Stability Loss
+        if 'voltages' in predictions:
+            L_stability = self.voltage_stability_loss(
+                voltages=predictions['voltages']
+            )
+            total_loss += self.lambda_stability * L_stability
+            loss_components['voltage'] = L_stability.item()
 
-        # ====================================================================
-        # START: "DEAD HEAD" BUG FIX 
-        # Call the new reactive_power_flow_loss
-        # ====================================================================
+        # 4. Reactive Power Loss
         if 'reactive_flows' in predictions and get_prop('reactive_injection') is not None:
             
             L_reactive = self.reactive_power_flow_loss(
-                predicted_reactive_flows=predictions['reactive_flows'], # <-- USE PREDICTION
+                predicted_reactive_flows=predictions['reactive_flows'],
                 edge_index=graph_properties['edge_index'],
                 reactive_injection=get_prop('reactive_injection'),
                 num_nodes=N,
@@ -414,44 +343,38 @@ class PhysicsInformedLoss(nn.Module):
             L_reactive = torch.clamp(L_reactive, 0.0, 10.0)
             total_loss += self.lambda_reactive * L_reactive
             loss_components['reactive'] = L_reactive.item()
-        # ====================================================================
-        # END: "DEAD HEAD" BUG FIX
-        # ====================================================================
         
-        # 4. Frequency Loss (PHYSICS-BASED)
+        # 5. Frequency Loss (PHYSICS-BASED)
         if 'frequency' in predictions and get_prop('power_injection') is not None:
             
-            predicted_freq_Hz = predictions['frequency']  # [B, 1, 1] (in Hz)
-            
-            # power_injection is [B, N] from data loader (already p.u.)
+            predicted_freq_Hz = predictions['frequency']
             power_injection_pu = get_prop('power_injection')
             
             L_frequency = self.frequency_loss(
                 predicted_freq_Hz,
                 power_injection_pu,
                 nominal_freq_Hz=self.freq_nominal,
-                total_inertia_H=5.0 # Heuristic system inertia
+                total_inertia_H=5.0
             )
             
             L_frequency = torch.clamp(L_frequency, 0.0, 10.0)
             total_loss += self.lambda_frequency * L_frequency
             loss_components['frequency'] = L_frequency.item()
         
-        # 5. Risk Score Loss
+        # 6. Risk Score Loss
         if 'risk_scores' in predictions and 'ground_truth_risk' in targets and targets['ground_truth_risk'] is not None:
             L_risk = self.risk_loss(
-                predicted_risk=predictions['risk_scores'],  # [B, N, 7]
-                target_risk=targets['ground_truth_risk']    # [B, 7]
+                predicted_risk=predictions['risk_scores'],
+                target_risk=targets['ground_truth_risk']
             )
             total_loss += self.lambda_risk * L_risk
             loss_components['risk'] = L_risk.item()
 
-        # 6. Timing Loss
-        # 'cascade_timing' (pred) is [B,N,1], 'cascade_timing' (target) is [B,N]
+        # 7. Timing Loss
         if 'cascade_timing' in predictions and 'cascade_timing' in targets and targets['cascade_timing'] is not None:
             L_timing = self.timing_loss(
-                predicted_node_timing=predictions['cascade_timing'], # [B, N, 1]
-                target_node_timing=targets['cascade_timing'],        # [B, N]
+                predicted_node_timing=predictions['cascade_timing'],
+                target_node_timing=targets['cascade_timing'],
             )
             total_loss += self.lambda_timing * L_timing
             loss_components['timing'] = L_timing.item()
@@ -478,8 +401,8 @@ class Trainer:
         max_grad_norm: float = 5.0,
         use_amp: bool = False,
         model_outputs_logits: bool = False,
-        base_mva: float = 100.0,    # Added for loss
-        base_freq: float = 60.0     # Added for loss
+        base_mva: float = 100.0,
+        base_freq: float = 60.0
     ):
         self.model = model
         self.train_loader = train_loader
@@ -498,7 +421,6 @@ class Trainer:
         self.use_amp = use_amp
         self.model_outputs_logits = model_outputs_logits
         
-        # Pass base mva/freq to loss
         self.base_mva = base_mva
         self.base_freq = base_freq
         
@@ -524,15 +446,16 @@ class Trainer:
         print("\n" + "="*80)
         print("STARTING DYNAMIC LOSS WEIGHT CALIBRATION")
         print("="*80)
-        avg_losses = self._calibrate_loss_weights() # <-- Get raw losses
+        avg_losses = self._calibrate_loss_weights()
         print("="*80)
         print("CALIBRATION COMPLETE")
         print("="*80 + "\n")
         
-        # --- START: NEW BALANCING & REPORTING LOGIC ---
-        print("Balancing loss weights...")
+        # ====================================================================
+        # START: FINAL FIX - TRUST THE DYNAMIC CALIBRATOR
+        # ====================================================================
+        print("Balancing loss weights dynamically...")
         
-        # 1. Get calibrated weights (the "dynamic" suggestion)
         target_magnitude = avg_losses.get('prediction', 0.1)
         if target_magnitude < 1e-9: target_magnitude = 1e-9
         
@@ -546,35 +469,28 @@ class Trainer:
             lambda_key = f"lambda_{key}" if key not in ['voltage'] else key
             calibrated_lambdas[lambda_key] = lambda_val
 
-        # 2. Define FINAL weights, applying manual overrides
+        # Define FINAL weights (All are now dynamic)
         final_lambdas = {
-            'lambda_powerflow': 5.0,
-            'lambda_temperature': 5.0,
-            'lambda_stability': 5.0,     # <-- MANUALLY SET (was 1.0)
-            'lambda_frequency': 5.0,     # <-- MANUALLY SET (was 1.0)
-            'lambda_reactive': 5.0,
-            'lambda_risk': 1.5,          # (Calibrated 0.66, this is higher)
-            'lambda_timing': 10.0,       # (This remains your highest priority)
+            'lambda_powerflow': calibrated_lambdas.get('lambda_powerflow', 0.1),
+            'lambda_temperature': calibrated_lambdas.get('lambda_temperature', 0.1),
+            'lambda_stability': calibrated_lambdas.get('voltage', 0.001), 
+            'lambda_frequency': calibrated_lambdas.get('lambda_frequency', 0.1),
+            'lambda_reactive': calibrated_lambdas.get('lambda_reactive', 0.1),
+            'lambda_risk': calibrated_lambdas.get('lambda_risk', 0.2),       
+            'lambda_timing': calibrated_lambdas.get('lambda_timing', 0.1), # <-- NO LONGER MANUAL
         }
 
-        # 3. Print a clear report
+        # Print a clear report
         print(f"  Target Magnitude (from prediction loss): {target_magnitude:.4f}")
-        print("\n  Final Loss Weights:")
-        print(f"  {'Component':<15} | {'Raw Loss':<12} | {'Dynamic Lambda':<15} | {'Final Lambda':<12} | {'Initial Weighted Loss'}")
-        print(f"  {'-'*15} | {'-'*12} | {'-'*15} | {'-'*12} | {'-'*20}")
+        print("\n  Final Loss Weights (Fully Dynamic):")
+        print(f"  {'Component':<15} | {'Raw Loss':<12} | {'Final Lambda':<12} | {'Initial Weighted Loss'}")
+        print(f"  {'-'*15} | {'-'*12} | {'-'*12} | {'-'*20}")
         
-        # Helper to print the table
         def print_row(key_pretty, key_raw, key_lambda, is_voltage=False):
             raw = avg_losses.get(key_raw, 0.0)
-            dyn_key = 'voltage' if is_voltage else key_lambda
-            dyn = calibrated_lambdas.get(dyn_key, 0.0)
-            
             final_key = 'lambda_stability' if is_voltage else key_lambda
             final = final_lambdas.get(final_key, 0.0)
-            
-            status = "(MANUAL)" if abs(final - dyn) > 0.01 else "(Dynamic)"
-            
-            print(f"  {key_pretty:<15} | {raw:<12.4f} | {dyn:<15.4f} | {final:<12.4f} | {raw * final:12.4f} {status}")
+            print(f"  {key_pretty:<15} | {raw:<12.4f} | {final:<12.4f} | {raw * final:12.4f}")
 
         print_row("Timing", "timing", "lambda_timing")
         print_row("Powerflow", "powerflow", "lambda_powerflow")
@@ -584,9 +500,7 @@ class Trainer:
         print_row("Frequency", "frequency", "lambda_frequency")
         print_row("Risk", "risk", "lambda_risk")
         
-        # --- END: NEW BALANCING & REPORTING LOGIC ---
-
-        # 4. Initialize the criterion with the FINAL weights
+        # Initialize the criterion with the FINAL weights
         self.criterion = PhysicsInformedLoss(
             lambda_powerflow=final_lambdas['lambda_powerflow'],
             lambda_temperature=final_lambdas['lambda_temperature'],
@@ -596,7 +510,7 @@ class Trainer:
             lambda_risk=final_lambdas['lambda_risk'],
             lambda_timing=final_lambdas['lambda_timing'],
             
-            pos_weight=1.0,
+            pos_weight=1.0, # <-- Set to 1.0 (sampler handles balance)
             focal_alpha=0.25,
             focal_gamma=2.0,
             label_smoothing=0.1,
@@ -604,18 +518,17 @@ class Trainer:
             base_mva=self.base_mva,
             base_freq=self.base_freq
         )
-        print(f"\n✓ PhysicsInformedLoss initialized with FINAL weights.")
-
+        print(f"\n✓ PhysicsInformedLoss initialized with FINAL dynamic weights.")
         # ====================================================================
-        # END: MODIFICATION
+        # END: FINAL FIX
         # ====================================================================
         
         self.start_epoch = 0
-        self.best_val_mae = float('inf') # We want to MINIMIZE this
-        self.best_val_loss = float('inf') # Fallback for early epochs
+        self.best_val_mae = float('inf') 
+        self.best_val_loss = float('inf')
         
-        self.cascade_threshold = 0.5 # Start at 0.5, let it adjust
-        self.node_threshold = 0.5 # Start at 0.5, let it adjust
+        self.cascade_threshold = 0.5
+        self.node_threshold = 0.5
         self.best_val_f1 = 0.0
         
         self._model_validated = False
@@ -628,16 +541,15 @@ class Trainer:
         print(f"Running loss calibration for {num_batches} batches...")
         self.model.eval()
         
-        # Use a "dummy" criterion with all weights at 1.0 to get raw loss magnitudes
         dummy_criterion = PhysicsInformedLoss(
             lambda_powerflow=1.0, 
-            lambda_temperature=1.0, # <-- Use new key
+            lambda_temperature=1.0,
             lambda_stability=1.0, 
             lambda_frequency=1.0,
             lambda_reactive=1.0, 
             lambda_risk=1.0,
             lambda_timing=1.0,
-            pos_weight=1.0, # Use 1.0 for calibration
+            pos_weight=1.0,
             use_logits=self.model_outputs_logits,
             base_mva=self.base_mva,
             base_freq=self.base_freq
@@ -691,7 +603,7 @@ class Trainer:
 
         if total_batches == 0:
             print("[ERROR] Calibration failed: No data loaded.")
-            return {} # Return empty
+            return {} 
         
         avg_losses = {key: val / total_batches for key, val in loss_sums.items()}
         
@@ -700,7 +612,7 @@ class Trainer:
             print(f"    {key: <15}: {val:10.6f}")
             
         self.model.train()
-        return avg_losses # <-- Return the raw losses
+        return avg_losses
 
     def load_checkpoint(self, checkpoint_path: str):
         if not os.path.exists(checkpoint_path):
@@ -859,6 +771,7 @@ class Trainer:
         check_shape('frequency', ('B', 1, 1))
         check_shape('risk_scores', ('B', 'N', 7))
         check_shape('cascade_timing', ('B', 'N', 1))
+        check_shape('temperature', ('B', 'N', 1)) # <-- Added this
 
         print("\nChecking other model outputs...")
         check_shape('reactive_flows', ('B', 'E', 1))
@@ -1076,6 +989,10 @@ class Trainer:
             train_metrics = self.train_epoch()
             val_metrics = self.validate()
             
+            # ====================================================================
+            # START: FINAL THRESHOLD ADJUSTMENT LOGIC
+            # ====================================================================
+            
             # --- 1. Adjust Cascade Threshold ---
             if val_metrics['cascade_recall'] < 0.5:
                 self.cascade_threshold = max(0.1, self.cascade_threshold - 0.05)
@@ -1083,9 +1000,9 @@ class Trainer:
             elif val_metrics['cascade_precision'] < 0.8: # Use a high bar
                 self.cascade_threshold = min(0.8, self.cascade_threshold + 0.05)
                 print(f"  ⚠ Cascade Precision low - raising C-thresh to {self.cascade_threshold:.3f}")
-            elif val_metrics['cascade_f1'] > 0.95 and self.cascade_threshold < 0.7:
+            elif val_metrics['cascade_f1'] > 0.95 and self.cascade_threshold < 0.9:
                 # If F1 is great and thresh is below our goal, slowly raise it
-                self.cascade_threshold = min(0.7, self.cascade_threshold + 0.02) # <-- CHANGED
+                self.cascade_threshold = min(0.9, self.cascade_threshold + 0.02)
                 
             # --- 2. Adjust Node Threshold (Independently) ---
             if val_metrics['node_recall'] < 0.5:
@@ -1094,14 +1011,19 @@ class Trainer:
             elif val_metrics['node_precision'] < 0.5:
                 self.node_threshold = min(0.8, self.node_threshold + 0.05)
                 print(f"  ⚠ Node Precision low - raising N-thresh to {self.node_threshold:.3f}")
-            elif val_metrics['node_f1'] > 0.95 and self.node_threshold < 0.7:
+            elif val_metrics['node_f1'] > 0.95 and self.node_threshold < 0.9:
                 # If F1 is great and thresh is below our goal, slowly raise it
-                self.node_threshold = min(0.7, self.node_threshold + 0.02) # <-- CHANGED
+                self.node_threshold = min(0.9, self.node_threshold + 0.02)
 
+            # --- 3. F1 Score Logging ---
             combined_f1 = (val_metrics['cascade_f1'] + val_metrics['node_f1']) / 2
             if combined_f1 > self.best_val_f1:
                 self.best_val_f1 = combined_f1
                 print(f"  ✓ Improved F1 score: {combined_f1:.4f} (new thresholds: C={self.cascade_threshold:.3f}, N={self.node_threshold:.3f})")
+            
+            # ====================================================================
+            # END: FINAL THRESHOLD ADJUSTMENT LOGIC
+            # ====================================================================
             
             self.scheduler.step(val_metrics['loss'])
             
@@ -1164,7 +1086,7 @@ class Trainer:
                     'val_loss': val_metrics['loss'],
                     'val_cascade_f1': val_metrics['cascade_f1'],
                     'val_node_f1': val_metrics['node_f1'],
-                    'val_time_mae': current_val_mae, # <-- Save the new best MAE
+                    'val_time_mae': current_val_mae,
                     'cascade_threshold': self.cascade_threshold,
                     'node_threshold': self.node_threshold,
                     'history': self.history
@@ -1182,7 +1104,7 @@ class Trainer:
                     'val_loss': val_metrics['loss'],
                     'val_cascade_f1': val_metrics['cascade_f1'],
                     'val_node_f1': val_metrics['node_f1'],
-                    'val_time_mae': current_val_mae, # <-- Save the new best MAE
+                    'val_time_mae': current_val_mae,
                     'cascade_threshold': self.cascade_threshold,
                     'node_threshold': self.node_threshold,
                     'history': self.history
@@ -1205,7 +1127,7 @@ class Trainer:
                 'optimizer_state_dict': self.optimizer.state_dict(),
                 'val_loss': val_metrics['loss'],
                 'val_time_mae': val_metrics['time_mae'],
-                'val_mae': current_val_mae, # Use val_mae for consistency
+                'val_mae': current_val_mae,
                 'cascade_threshold': self.cascade_threshold,
                 'node_threshold': self.node_threshold,
                 'history': self.history
@@ -1239,7 +1161,6 @@ class Trainer:
 
         epochs = range(1, len(self.history['train_loss']) + 1)
         
-        # Loss (Row 0, Col 0)
         axes[0, 0].plot(epochs, self.history['train_loss'], 'b-', label='Train', linewidth=2)
         axes[0, 0].plot(epochs, self.history['val_loss'], 'r-', label='Validation', linewidth=2)
         axes[0, 0].set_xlabel('Epoch')
@@ -1248,7 +1169,6 @@ class Trainer:
         axes[0, 0].legend()
         axes[0, 0].grid(True, alpha=0.3)
         
-        # Cascade F1 (Row 0, Col 1)
         axes[0, 1].plot(epochs, self.history['train_cascade_f1'], 'b-', label='Train', linewidth=2)
         axes[0, 1].plot(epochs, self.history['val_cascade_f1'], 'r-', label='Validation', linewidth=2)
         axes[0, 1].set_xlabel('Epoch')
@@ -1257,7 +1177,6 @@ class Trainer:
         axes[0, 1].legend()
         axes[0, 1].grid(True, alpha=0.3)
         
-        # Node F1 (Row 0, Col 2)
         axes[0, 2].plot(epochs, self.history['train_node_f1'], 'b-', label='Train', linewidth=2)
         axes[0, 2].plot(epochs, self.history['val_node_f1'], 'r-', label='Validation', linewidth=2)
         axes[0, 2].set_xlabel('Epoch')
@@ -1266,7 +1185,6 @@ class Trainer:
         axes[0, 2].legend()
         axes[0, 2].grid(True, alpha=0.3)
         
-        # Cascade Precision/Recall (Row 1, Col 0)
         axes[1, 0].plot(epochs, self.history['train_cascade_precision'], 'b--', label='Train Precision', linewidth=2)
         axes[1, 0].plot(epochs, self.history['val_cascade_precision'], 'r--', label='Val Precision', linewidth=2)
         axes[1, 0].plot(epochs, self.history['train_cascade_recall'], 'b:', label='Train Recall', linewidth=2)
@@ -1277,7 +1195,6 @@ class Trainer:
         axes[1, 0].legend()
         axes[1, 0].grid(True, alpha=0.3)
         
-        # Node Precision/Recall (Row 1, Col 1)
         axes[1, 1].plot(epochs, self.history['train_node_precision'], 'b--', label='Train Precision', linewidth=2)
         axes[1, 1].plot(epochs, self.history['val_node_precision'], 'r--', label='Val Precision', linewidth=2)
         axes[1, 1].plot(epochs, self.history['train_node_recall'], 'b:', label='Train Recall', linewidth=2)
@@ -1288,7 +1205,6 @@ class Trainer:
         axes[1, 1].legend()
         axes[1, 1].grid(True, alpha=0.3)
         
-        # Timing MAE (Row 1, Col 2)
         axes[1, 2].plot(epochs, self.history.get('train_time_mae', [0]*len(epochs)), 'b-', label='Train', linewidth=2)
         axes[1, 2].plot(epochs, self.history.get('val_time_mae', [0]*len(epochs)), 'r-', label='Validation', linewidth=2)
         axes[1, 2].set_xlabel('Epoch')
@@ -1297,7 +1213,6 @@ class Trainer:
         axes[1, 2].legend()
         axes[1, 2].grid(True, alpha=0.3)
         
-        # Risk MSE (Row 2, Col 0)
         axes[2, 0].plot(epochs, self.history.get('train_risk_mse', [0]*len(epochs)), 'b-', label='Train', linewidth=2)
         axes[2, 0].plot(epochs, self.history.get('val_risk_mse', [0]*len(epochs)), 'r-', label='Validation', linewidth=2)
         axes[2, 0].set_xlabel('Epoch')
@@ -1306,7 +1221,6 @@ class Trainer:
         axes[2, 0].legend()
         axes[2, 0].grid(True, alpha=0.3)
         
-        # Learning Rate (Row 2, Col 1)
         axes[2, 1].plot(epochs, self.history['learning_rate'], 'g-', label='Learning Rate', linewidth=2)
         axes[2, 1].set_xlabel('Epoch')
         axes[2, 1].set_ylabel('LR')
@@ -1314,7 +1228,6 @@ class Trainer:
         axes[2, 1].legend()
         axes[2, 1].grid(True, alpha=0.3)
         
-        # Accuracy comparison (Row 2, Col 2)
         axes[2, 2].plot(epochs, self.history['train_cascade_acc'], 'b-', label='Train Cascade', linewidth=2)
         axes[2, 2].plot(epochs, self.history['val_cascade_acc'], 'r-', label='Val Cascade', linewidth=2)
         axes[2, 2].plot(epochs, self.history['train_node_acc'], 'b--', label='Train Node', linewidth=2, alpha=0.6)
@@ -1344,7 +1257,7 @@ if __name__ == "__main__":
                         help="Root directory containing train/val/test data folders")
     parser.add_argument('--output_dir', type=str, default="checkpoints", 
                         help="Directory to save checkpoints and logs")
-    parser.add_argument('--epochs', type=int, default=100, 
+    parser.add_argument('--epochs', type=int, default=50, 
                         help="Number of epochs to train")
     parser.add_argument('--batch_size', type=int, default=4, 
                         help="Training and validation batch size")
@@ -1354,8 +1267,16 @@ if __name__ == "__main__":
                         help="Max gradient norm for clipping")
     parser.add_argument('--patience', type=int, default=10, 
                         help="Epochs for early stopping patience")
-    parser.add_argument('--resume', action='store_true', 
-                        help="Resume training from latest_checkpoint.pth")
+    
+    # ====================================================================
+    # START: "RESUME" FIX (Allows custom checkpoint path)
+    # ====================================================================
+    parser.add_argument('--resume', type=str, default=None, 
+                        help="Path to checkpoint file to resume (e.g., checkpoints/best_model.pth)")
+    # ====================================================================
+    # END: "RESUME" FIX
+    # ====================================================================
+    
     parser.add_argument('--base_mva', type=float, default=100.0,
                         help="Base MVA for physics normalization")
     parser.add_argument('--base_freq', type=float, default=60.0,
@@ -1392,7 +1313,7 @@ if __name__ == "__main__":
         print("  (WARNING: CUDA (GPU) not available, training will be slow on CPU.)")
     print(f"  Gradient clipping: {MAX_GRAD_NORM}")
     print(f"  Mixed precision: {USE_AMP}")
-    print(f"  Resume training: {args.resume}")
+    print(f"  Resume training: {args.resume is not None}")
     
     print(f"\nLoading datasets...")
     try:
@@ -1435,8 +1356,6 @@ if __name__ == "__main__":
         print("  [WARNING] Training data contains only one class. Using uniform weights.")
         sample_weights = [1.0] * len(train_dataset)
     else:
-        # Calculate weights to create a 1:1 balance in each batch
-        # Weight = Total Samples / Num Samples in Class
         total_samples = len(train_dataset)
         pos_weight_val = total_samples / positive_count
         neg_weight_val = total_samples / negative_count
@@ -1511,9 +1430,18 @@ if __name__ == "__main__":
         base_freq=args.base_freq
     )
     
-    checkpoint_path = f"{OUTPUT_DIR}/latest_checkpoint.pth"
-    if args.resume and os.path.exists(checkpoint_path):
-        trainer.load_checkpoint(checkpoint_path)
+    # ====================================================================
+    # START: "RESUME" FIX (Allows custom checkpoint path)
+    # ====================================================================
+    if args.resume:
+        checkpoint_path = args.resume # Use the path from the command
+        if os.path.exists(checkpoint_path):
+            trainer.load_checkpoint(checkpoint_path)
+        else:
+            print(f"Warning: Checkpoint file not found at {checkpoint_path}. Starting from scratch.")
+    # ====================================================================
+    # END: "RESUME" FIX
+    # ====================================================================
     
     # Train
     print(f"\n{'='*80}")
