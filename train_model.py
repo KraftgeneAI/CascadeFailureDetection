@@ -262,7 +262,7 @@ class PhysicsInformedLoss(nn.Module):
         avg_ranking_loss = torch.stack(ranking_losses).mean()
         
         # Combine the two losses. We weight the ranking loss.
-        return mse_loss + (avg_ranking_loss * 0.5)
+        return mse_loss + (avg_ranking_loss * 10.0)
     # ====================================================================
     # END: "CHEATEABLE MAE" BUG FIX
     # ====================================================================
@@ -987,6 +987,17 @@ class Trainer:
             print("-" * 80)
             
             train_metrics = self.train_epoch()
+
+            # ====================================================================
+            # START: "LOG TYPO" FIX
+            # ====================================================================
+            # Store the thresholds *before* validation, so we can report
+            # the correct metrics for the values that were *actually used*.
+            cascade_thresh_for_this_epoch = self.cascade_threshold
+            node_thresh_for_this_epoch = self.node_threshold
+            # ====================================================================
+            # END: "LOG TYPO" FIX
+
             val_metrics = self.validate()
             
             # ====================================================================
@@ -1056,11 +1067,11 @@ class Trainer:
             print(f"\nEpoch {epoch + 1} Results:")
             print(f"  Train Loss: {train_metrics['loss']:.4f} | Val Loss: {val_metrics['loss']:.4f}")
             print(f"  Learning Rate: {current_lr:.6f}")
-            print(f"\n  CASCADE DETECTION (Thresh: {self.cascade_threshold:.3f}):")
+            print(f"\n  CASCADE DETECTION (Thresh: {cascade_thresh_for_this_epoch:.3f}):")
             print(f"    F1 Score:  Train {train_metrics['cascade_f1']:.4f} | Val {val_metrics['cascade_f1']:.4f}")
             print(f"    Precision: Train {train_metrics['cascade_precision']:.4f} | Val {val_metrics['cascade_precision']:.4f}")
             print(f"    Recall:    Train {train_metrics['cascade_recall']:.4f} | Val {val_metrics['cascade_recall']:.4f}")
-            print(f"\n  NODE FAILURE (Thresh: {self.node_threshold:.3f}):")
+            print(f"\n  NODE FAILURE (Thresh: {node_thresh_for_this_epoch:.3f}):")
             print(f"    F1 Score:  Train {train_metrics['node_f1']:.4f} | Val {val_metrics['node_f1']:.4f}")
             print(f"    Precision: Train {train_metrics['node_precision']:.4f} | Val {val_metrics['node_precision']:.4f}")
             print(f"    Recall:    Train {train_metrics['node_recall']:.4f} | Val {val_metrics['node_recall']:.4f}")
