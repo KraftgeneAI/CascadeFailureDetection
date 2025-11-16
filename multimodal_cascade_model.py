@@ -142,7 +142,7 @@ class EnvironmentalEmbedding(nn.Module):
 class InfrastructureEmbedding(nn.Module):
     """Embedding network for infrastructure data (φ_infra)."""
     
-    def __init__(self, scada_features: int = 14, pmu_features: int = 8,  # Changed from 3 to 8 to match actual PMU data
+    def __init__(self, scada_features: int = 13, pmu_features: int = 8,  # Changed from 3 to 8 to match actual PMU data
                  equipment_features: int = 10, embedding_dim: int = 128):  # Changed from 4 to 10 to match actual equipment data
         super(InfrastructureEmbedding, self).__init__()
         

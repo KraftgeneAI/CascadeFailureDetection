@@ -243,10 +243,7 @@ class CascadeDataset(Dataset):
                     try:
                         return data.reshape(default_val.shape)
                     except ValueError:
-                         return default_val
-                # Handle the 15-to-14 feature change
-                if key == 'scada_data' and data.shape[1] == 15:
-                    return data[:, :14]
+                        return default_val
                 return default_val
             return data
 
@@ -259,7 +256,9 @@ class CascadeDataset(Dataset):
             # ====================================================================
             # Slice off the 15th feature (stress_level)
             if scada_data_raw.shape[1] == 15:
-                scada_data = scada_data_raw[:, :14]
+                scada_data = scada_data_raw[:, :13]
+            elif scada_data_raw.shape[1] == 14: # Data with (time) leak only
+                scada_data = scada_data_raw[:, :13]
             else:
                 scada_data = scada_data_raw
             # ====================================================================
@@ -355,7 +354,7 @@ class CascadeDataset(Dataset):
         # Create dummy data for one timestep
         T = 1
         # --- Data Leakage Fix: Set to 14 features ---
-        scada_data = torch.randn(T, num_nodes, 14)
+        scada_data = torch.randn(T, num_nodes, 13)
         weather_sequence = torch.randn(T, num_nodes, 80)
         threat_indicators = torch.randn(T, num_nodes, 6)
         pmu_sequence = torch.randn(T, num_nodes, 8)

@@ -262,7 +262,7 @@ class PhysicsInformedLoss(nn.Module):
         avg_ranking_loss = torch.stack(ranking_losses).mean()
         
         # Combine the two losses. We weight the ranking loss.
-        return mse_loss + (avg_ranking_loss * 10.0)
+        return mse_loss + (avg_ranking_loss * 5.0)
     # ====================================================================
     # END: "CHEATEABLE MAE" BUG FIX
     # ====================================================================
@@ -1011,7 +1011,7 @@ class Trainer:
             elif val_metrics['cascade_precision'] < 0.8: # Use a high bar
                 self.cascade_threshold = min(0.8, self.cascade_threshold + 0.05)
                 print(f"  ⚠ Cascade Precision low - raising C-thresh to {self.cascade_threshold:.3f}")
-            elif val_metrics['cascade_f1'] > 0.95 and self.cascade_threshold < 0.9:
+            elif val_metrics['cascade_f1'] > 0.9 and self.cascade_threshold < 0.9:
                 # If F1 is great and thresh is below our goal, slowly raise it
                 self.cascade_threshold = min(0.9, self.cascade_threshold + 0.02)
                 
@@ -1022,7 +1022,7 @@ class Trainer:
             elif val_metrics['node_precision'] < 0.5:
                 self.node_threshold = min(0.8, self.node_threshold + 0.05)
                 print(f"  ⚠ Node Precision low - raising N-thresh to {self.node_threshold:.3f}")
-            elif val_metrics['node_f1'] > 0.95 and self.node_threshold < 0.9:
+            elif val_metrics['node_f1'] > 0.9 and self.node_threshold < 0.9:
                 # If F1 is great and thresh is below our goal, slowly raise it
                 self.node_threshold = min(0.9, self.node_threshold + 0.02)
 
@@ -1268,7 +1268,7 @@ if __name__ == "__main__":
                         help="Root directory containing train/val/test data folders")
     parser.add_argument('--output_dir', type=str, default="checkpoints", 
                         help="Directory to save checkpoints and logs")
-    parser.add_argument('--epochs', type=int, default=50, 
+    parser.add_argument('--epochs', type=int, default=100, 
                         help="Number of epochs to train")
     parser.add_argument('--batch_size', type=int, default=4, 
                         help="Training and validation batch size")

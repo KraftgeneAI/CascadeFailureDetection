@@ -226,16 +226,14 @@ class CascadePredictor:
             # START: "DATA LEAKAGE" FIX
             # ====================================================================
             last_step = sequence[-1]
-            scada_cols = last_step.get('scada_data', np.zeros((self.num_nodes,14))).shape[1] # Should be 14
-            
-            if scada_cols not in [14, 15]:
-                print(f"[Warning] Expected 14 or 15 SCADA features, but found {scada_cols}. Slicing to 14.")
-                scada_shape = (self.num_nodes, 14)
-            elif scada_cols == 15:
-                print(f"[Warning] Expected 14 SCADA features, but found 15. Slicing to 14.")
-                scada_shape = (self.num_nodes, 14)
-            else:
-                scada_shape = (self.num_nodes, 14)
+            # Set default to 13
+            scada_shape = (self.num_nodes, 13)
+            scada_cols = last_step.get('scada_data', np.zeros(scada_shape)).shape[1]
+
+            if scada_cols in [14, 15]:
+                print(f"[Warning] Found {scada_cols} features (leaky data). Slicing to 13.")
+            elif scada_cols != 13:
+                print(f"[Warning] Expected 13 SCADA features, but found {scada_cols}. Check data.")
             # ====================================================================
             # END: "DATA LEAKAGE" FIX
             # ====================================================================
@@ -277,19 +275,19 @@ class CascadePredictor:
                 scada_data_raw = safe_get_or_default(ts, 'scada_data', (self.num_nodes, 15)) # Check for 15 first
                 
                 # ====================================================================
-                # START: "DATA LEAKAGE" FIX
-                # ====================================================================
-                # The 15th feature (index 14) is the 'current_stress' label.
-                # We must remove it to match the 14-feature model input.
-                if scada_data_raw.shape[1] == 15:
-                    scada_data = scada_data_raw[:, :14]
-                elif scada_data_raw.shape[1] == 14:
-                    scada_data = scada_data_raw
-                else:
-                    scada_data = np.zeros(scada_shape, dtype=np.float32)
-                # ====================================================================
-                # END: "DATA LEAKAGE" FIX
-                # ====================================================================
+            # START: DATA LEAKAGE FIX (Time + Stress)
+            # ====================================================================
+            if scada_data_raw.shape[1] == 15:
+                scada_data = scada_data_raw[:, :13] # Slice to 13
+            elif scada_data_raw.shape[1] == 14:
+                scada_data = scada_data_raw[:, :13] # Slice to 13
+            elif scada_data_raw.shape[1] == 13:
+                scada_data = scada_data_raw # Already correct
+            else:
+                scada_data = np.zeros(scada_shape, dtype=np.float32) # Fallback
+            # ====================================================================
+            # END: DATA LEAKAGE FIX
+            # ====================================================================
                 
                 if scada_data.shape[1] >= 6:
                     scada_data[:, 2] = self._normalize_power(scada_data[:, 2])
