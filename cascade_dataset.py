@@ -1,13 +1,12 @@
 """
 Memory-efficient dataset loader for pre-generated cascade failure/normal data.
 =============================================================================
-MODIFIED FOR 1-SCENARIO-PER-FILE FORMAT
-This version reads individual scenario_*.pkl files.
-
-*** FINAL "SOUND" VERSION ***
-1.  Removes the 'stress_level' data leak (slices SCADA data to 14 features).
-2.  Truncates ALL sequences (Normal, Stressed, Cascade) to a random
-    pre-event timestep to force true "future" prediction.
+(MODIFIED for "Sound Training Methodology")
+- Truncates ALL sequences (cascade and normal) to variable lengths
+- Removes "stress_level" data leakage (slices to 13)
+- Removes "t / sequence_length" data leakage (slices to 13)
+- Removes "cascade_start_time" data leakage (does NOT pass to model)
+- Fixes ground truth timing/label loading
 =============================================================================
 
 Author: Kraftgene AI Inc. (R&D)
@@ -146,10 +145,47 @@ class CascadeDataset(Dataset):
     
     def _process_sequence_format(self, scenario: Dict) -> Dict[str, Any]:
         """Process NEW FORMAT (sequence of timestep dicts) WITH NORMALIZATION."""
-        sequence = scenario['sequence']
+        sequence_original = scenario['sequence']
         edge_index = scenario['edge_index']
         metadata = scenario.get('metadata', {})
         
+        # ====================================================================
+        # START: "CHEAT" FIX - Truncate ALL sequences
+        # ====================================================================
+        cascade_start_time = metadata.get('cascade_start_time', -1)
+        is_cascade = metadata.get('is_cascade', False)
+        
+        # Define the "early warning window"
+        # We will predict from 5 timesteps *before* the first failure.
+        WARNING_WINDOW = 5 
+        
+        # Define the valid range of sequence lengths
+        min_len = int(len(sequence_original) * 0.3) # e.g., 18
+        max_len = int(len(sequence_original) * 0.95) # e.g., 57
+        
+        if is_cascade:
+            # Cascade case: Truncate sequence to *before* the failure window
+            # e.g., if start_time = 40, prediction_timestep = 40 - 5 = 35
+            prediction_timestep = int(cascade_start_time) - WARNING_WINDOW
+            
+            # Ensure it's within the valid range
+            if prediction_timestep < min_len:
+                prediction_timestep = min_len
+        else:
+            # Normal/Stressed case: Truncate to a *random* point
+            # This prevents the model from learning "if len < 35, predict cascade"
+            prediction_timestep = np.random.randint(min_len, max_len)
+        
+        # Truncate the sequence
+        sequence = sequence_original[:prediction_timestep]
+        
+        if len(sequence) == 0:
+             # Fallback if truncation results in an empty sequence
+             sequence = sequence_original[:min_len]
+        # ====================================================================
+        # END: "CHEAT" FIX
+        # ====================================================================
+
         def to_tensor(data):
             if isinstance(data, torch.Tensor):
                 return data
@@ -158,56 +194,6 @@ class CascadeDataset(Dataset):
             else:
                 return torch.tensor(data, dtype=torch.float32)
         
-        # ====================================================================
-        # START: "CHEAT" FIX (Data Truncation)
-        # ====================================================================
-        
-        # 1. Get the "ground truth" labels and times *before* truncation
-        # We need these *full* answers to grade the model
-        full_sequence_length = len(sequence)
-        last_step = sequence[-1]
-        
-        # Get the final failure state (the answer)
-        final_node_labels = to_tensor(last_step.get('node_labels', np.zeros(1)))
-        
-        # Get the cascade start time
-        cascade_start_time = metadata.get('cascade_start_time', -1)
-        is_cascade = metadata.get('is_cascade', False)
-
-        # 2. Determine the "prediction timestep" (the "Question")
-        if is_cascade:
-            # For cascades, the "prediction time" is *right before* the failure
-            prediction_time = cascade_start_time
-        else:
-            # For normal/stressed, pick a *random* time to prevent "length" cheating
-            # We pick a time in the latter half of the sequence
-            min_time = full_sequence_length // 2
-            prediction_time = np.random.randint(min_time, full_sequence_length)
-
-        # 3. Truncate the *input sequence* to the prediction time
-        # We use max(1, ...) to ensure we never have an empty sequence
-        truncated_sequence = sequence[:max(1, prediction_time)]
-        
-        # We pass this "prediction time" to the model's brain
-        # For a normal case (start_time=-1), this becomes a random time (e.g., 47)
-        # For a cascade (start_time=40), this becomes 40.
-        # The model will then select the state at t-1 (e.g., 39 or 46)
-        model_prediction_time = prediction_time if is_cascade else (prediction_time + 1)
-        
-        # 4. Get the correct ground truth timing map
-        if is_cascade and 0 <= cascade_start_time < len(sequence):
-            # The "answer" is the timing map from the *start* of the cascade
-            correct_timing_tensor = to_tensor(sequence[cascade_start_time].get('cascade_timing', np.zeros(1)))
-        else:
-            # For normal cases, the answer is just "-1" (no failure)
-            correct_timing_tensor = to_tensor(last_step.get('cascade_timing', np.zeros(1)))
-            
-        # ====================================================================
-        # END: "CHEAT" FIX (Data Truncation)
-        # ====================================================================
-
-        
-        # --- Now, we process the *TRUNCATED* sequence ---
         satellite_seq = []
         scada_seq = []
         weather_seq = []
@@ -218,22 +204,8 @@ class CascadeDataset(Dataset):
         pmu_seq = []
         equipment_seq = []
         
-        # Get default shapes from last (original) step
-        num_nodes = last_step.get('scada_data', np.zeros((118,14))).shape[0]
-        num_edges = edge_index.shape[1]
+        last_step = sequence[-1] # Use last step of the *truncated* sequence
         
-        sat_shape = last_step.get('satellite_data', np.zeros((num_nodes, 12, 16, 16))).shape
-        weather_shape = last_step.get('weather_sequence', np.zeros((num_nodes, 10, 8))).shape
-        threat_shape = last_step.get('threat_indicators', np.zeros((num_nodes, 6))).shape
-        # --- Data Leakage Fix: Set default to 14 features ---
-        scada_shape = (num_nodes, 14)
-        pmu_shape = last_step.get('pmu_sequence', np.zeros((num_nodes, 8))).shape
-        equip_shape = last_step.get('equipment_status', np.zeros((num_nodes, 10))).shape
-        vis_shape = last_step.get('visual_data', np.zeros((num_nodes, 3, 32, 32))).shape
-        therm_shape = last_step.get('thermal_data', np.zeros((num_nodes, 1, 32, 32))).shape
-        sensor_shape = last_step.get('sensor_data', np.zeros((num_nodes, 12))).shape
-
-        # Helper to safely get data
         def safe_get(ts, key, default_val):
             data = ts.get(key)
             if data is None:
@@ -243,55 +215,69 @@ class CascadeDataset(Dataset):
                     try:
                         return data.reshape(default_val.shape)
                     except ValueError:
-                        return default_val
+                         return default_val
                 return default_val
             return data
 
-        for ts in truncated_sequence: # <-- Use the truncated sequence
-            # --- SCADA NORMALIZATION ---
+        # ====================================================================
+        # START: "DATA LEAKAGE" FIX (Set default to 13)
+        # ====================================================================
+        scada_shape = (last_step.get('scada_data', np.zeros((118,13))).shape[0], 13)
+        # ====================================================================
+        # END: "DATA LEAKAGE" FIX
+        # ====================================================================
+        
+        num_nodes = scada_shape[0]
+        num_edges = edge_index.shape[1]
+        
+        sat_shape = last_step.get('satellite_data', np.zeros((num_nodes, 12, 16, 16))).shape
+        weather_shape = last_step.get('weather_sequence', np.zeros((num_nodes, 10, 8))).shape
+        threat_shape = last_step.get('threat_indicators', np.zeros((num_nodes, 6))).shape
+        pmu_shape = last_step.get('pmu_sequence', np.zeros((num_nodes, 8))).shape
+        equip_shape = last_step.get('equipment_status', np.zeros((num_nodes, 10))).shape
+        vis_shape = last_step.get('visual_data', np.zeros((num_nodes, 3, 32, 32))).shape
+        therm_shape = last_step.get('thermal_data', np.zeros((num_nodes, 1, 32, 32))).shape
+        sensor_shape = last_step.get('sensor_data', np.zeros((num_nodes, 12))).shape
+        label_shape = last_step.get('node_labels', np.zeros(num_nodes)).shape
+        timing_shape = last_step.get('cascade_timing', np.zeros(num_nodes)).shape
+
+        for ts in sequence: # Loop over the *truncated* sequence
+            # Use 15-col default for safe_get to load old data
             scada_data_raw = safe_get(ts, 'scada_data', np.zeros((num_nodes, 15))).astype(np.float32)
             
+            if scada_data_raw.shape[1] >= 6:
+                scada_data_raw[:, 2] = self._normalize_power(scada_data_raw[:, 2]) # generation
+                scada_data_raw[:, 3] = self._normalize_power(scada_data_raw[:, 3]) # reactive_generation
+                scada_data_raw[:, 4] = self._normalize_power(scada_data_raw[:, 4]) # load_values
+                scada_data_raw[:, 5] = self._normalize_power(scada_data_raw[:, 5]) # reactive_load
+            
             # ====================================================================
-            # START: "CHEAT" FIX (Data Leakage)
+            # START: "DATA LEAKAGE" FIX (Time + Stress)
             # ====================================================================
-            # Slice off the 15th feature (stress_level)
-            if scada_data_raw.shape[1] == 15:
-                scada_data = scada_data_raw[:, :13]
-            elif scada_data_raw.shape[1] == 14: # Data with (time) leak only
-                scada_data = scada_data_raw[:, :13]
-            else:
-                scada_data = scada_data_raw
+            # Slice off the "cheat" features (time and stress)
+            scada_data = scada_data_raw[:, :13]
             # ====================================================================
-            # END: "CHEAT" FIX
+            # END: "DATA LEAKAGE" FIX
             # ====================================================================
-
-            if scada_data.shape[1] >= 6:
-                scada_data[:, 2] = self._normalize_power(scada_data[:, 2]) # generation
-                scada_data[:, 3] = self._normalize_power(scada_data[:, 3]) # reactive_generation
-                scada_data[:, 4] = self._normalize_power(scada_data[:, 4]) # load_values
-                scada_data[:, 5] = self._normalize_power(scada_data[:, 5]) # reactive_load
+            
             scada_seq.append(to_tensor(scada_data))
             
-            # --- PMU NORMALIZATION ---
             pmu_data = safe_get(ts, 'pmu_sequence', np.zeros(pmu_shape)).astype(np.float32)
             if pmu_data.shape[1] >= 6:
                 pmu_data[:, 5] = self._normalize_frequency(pmu_data[:, 5]) # frequency
             pmu_seq.append(to_tensor(pmu_data))
 
-            # --- Reshape weather from [N, 10, 8] to [N, 80] ---
             weather_data_raw = safe_get(ts, 'weather_sequence', np.zeros(weather_shape)).astype(np.float32)
-            weather_data = weather_data_raw.reshape(num_nodes, -1) # Reshape to [N, 80]
+            weather_data = weather_data_raw.reshape(num_nodes, -1)
             weather_seq.append(to_tensor(weather_data))
 
-            # --- Other data (no normalization needed) ---
             satellite_seq.append(to_tensor(safe_get(ts, 'satellite_data', np.zeros(sat_shape))))
             threat_seq.append(to_tensor(safe_get(ts, 'threat_indicators', np.zeros(threat_shape))))
             visual_seq.append(to_tensor(safe_get(ts, 'visual_data', np.zeros(vis_shape))))
             thermal_seq.append(to_tensor(safe_get(ts, 'thermal_data', np.zeros(therm_shape))))
             sensor_seq.append(to_tensor(safe_get(ts, 'sensor_data', np.zeros(sensor_shape))))
             equipment_seq.append(to_tensor(safe_get(ts, 'equipment_status', np.zeros(equip_shape))))
-
-        # --- EDGE ATTR NORMALIZATION (from the *original* last step) ---
+            
         edge_attr = safe_get(last_step, 'edge_attr', np.zeros((num_edges, 5))).astype(np.float32)
         if edge_attr.shape[1] >= 2:
             edge_attr[:, 1] = self._normalize_power(edge_attr[:, 1]) # thermal_limits
@@ -299,7 +285,16 @@ class CascadeDataset(Dataset):
         
         ground_truth_risk = metadata.get('ground_truth_risk', np.zeros(7, dtype=np.float32))
 
-        # Note: self.mode is 'full_sequence'
+        # --- Get the ground truth labels from the *original* full sequence ---
+        final_labels = to_tensor(sequence_original[-1].get('node_labels', np.zeros(label_shape)))
+        
+        # --- Get the ground truth timing from the *original* cascade start time ---
+        original_cascade_start_time = metadata.get('cascade_start_time', -1)
+        if is_cascade and 0 <= original_cascade_start_time < len(sequence_original):
+            correct_timing_tensor = to_tensor(sequence_original[original_cascade_start_time].get('cascade_timing', np.zeros(timing_shape)))
+        else:
+            correct_timing_tensor = to_tensor(np.full(timing_shape, -1.0, dtype=np.float32))
+        
         return {
             'satellite_data': torch.stack(satellite_seq),
             'scada_data': torch.stack(scada_seq),
@@ -311,24 +306,16 @@ class CascadeDataset(Dataset):
             'pmu_sequence': torch.stack(pmu_seq),
             'equipment_status': torch.stack(equipment_seq),
             'edge_index': to_tensor(edge_index).long(),
-            'edge_attr': edge_attr, # Use last edge_attr
-            
-            # --- "ANSWER" FIELDS ---
-            'node_failure_labels': final_node_labels, # The *final* answer
-            'cascade_timing': correct_timing_tensor, # The *real* timing map
-            'ground_truth_risk': to_tensor(ground_truth_risk), # The *real* risk
-            
-            # --- "CHEAT" FIX ---
-            'graph_properties': self._extract_graph_properties(last_step, metadata, edge_attr, model_prediction_time),
-            
-            'temporal_sequence': torch.stack(scada_seq), # Use SCADA as main temporal feature
-            'sequence_length': len(truncated_sequence)
+            'edge_attr': edge_attr,
+            'node_failure_labels': final_labels, # The *real* answer
+            'cascade_timing': correct_timing_tensor, # The *real* answer
+            'ground_truth_risk': to_tensor(ground_truth_risk), # The *real* answer
+            'graph_properties': self._extract_graph_properties(last_step, metadata, edge_attr),
+            'temporal_sequence': torch.stack(scada_seq),
+            'sequence_length': len(sequence) # The *truncated* length
         }
-
     
     def _process_metadata_format(self, scenario: Dict) -> Dict[str, Any]:
-        """Process NEW FORMAT with empty sequence but metadata containing failure information."""
-        # This fallback is unlikely to be used now, but we'll keep it.
         metadata = scenario['metadata']
         edge_index = scenario['edge_index']
         
@@ -351,10 +338,8 @@ class CascadeDataset(Dataset):
                 except (ValueError, TypeError):
                     continue
         
-        # Create dummy data for one timestep
         T = 1
-        # --- Data Leakage Fix: Set to 14 features ---
-        scada_data = torch.randn(T, num_nodes, 13)
+        scada_data = torch.randn(T, num_nodes, 13) # 13 features
         weather_sequence = torch.randn(T, num_nodes, 80)
         threat_indicators = torch.randn(T, num_nodes, 6)
         pmu_sequence = torch.randn(T, num_nodes, 8)
@@ -365,16 +350,12 @@ class CascadeDataset(Dataset):
         sensor_data = torch.randn(T, num_nodes, 12)
         edge_attr = torch.randn(num_edges, 5)
 
-        # Normalize this dummy data
         edge_attr[:, 1] = self._normalize_power(edge_attr[:, 1])
         scada_data[..., 2:6] = self._normalize_power(scada_data[..., 2:6])
         pmu_sequence[..., 5] = self._normalize_frequency(pmu_sequence[..., 5])
             
         graph_props = self._extract_graph_properties_from_metadata(metadata, num_edges)
         ground_truth_risk = metadata.get('ground_truth_risk', np.zeros(7, dtype=np.float32))
-
-        # "CHEAT" FIX: Add dummy prediction time
-        graph_props['cascade_start_time'] = torch.tensor(metadata.get('cascade_start_time', -1), dtype=torch.long)
 
         item = {
             'satellite_data': satellite_data[0],
@@ -394,37 +375,29 @@ class CascadeDataset(Dataset):
             'graph_properties': graph_props
         }
         
-        # Handle full_sequence mode
         if self.mode == 'full_sequence':
             for key in ['satellite_data', 'scada_data', 'weather_sequence', 'threat_indicators', 'visual_data', 'thermal_data', 'sensor_data', 'pmu_sequence', 'equipment_status']:
-                item[key] = item[key].unsqueeze(0) # Add T dimension
+                item[key] = item[key].unsqueeze(0)
             item['temporal_sequence'] = item['scada_data']
             item['sequence_length'] = 1
 
         return item
     
     
-    # ====================================================================
-    # START: "CHEAT" FIX (Pass model_prediction_time)
-    # ====================================================================
-    def _extract_graph_properties(self, timestep_data: Dict, metadata: Dict, edge_attr: torch.Tensor, model_prediction_time: int) -> Dict[str, torch.Tensor]:
-    # ====================================================================
-    # END: "CHEAT" FIX
-    # ====================================================================
-        """Extract graph properties for physics-informed loss WITH NORMALIZATION."""
+    def _extract_graph_properties(self, timestep_data: Dict, metadata: Dict, edge_attr: torch.Tensor) -> Dict[str, torch.Tensor]:
         graph_props = {}
         
         if 'conductance' in timestep_data:
             graph_props['conductance'] = torch.from_numpy(timestep_data['conductance']).float()
         else:
-            graph_props['conductance'] = edge_attr[:, 4] # Col 4 = conductance
+            graph_props['conductance'] = edge_attr[:, 4]
         
         if 'susceptance' in timestep_data:
             graph_props['susceptance'] = torch.from_numpy(timestep_data['susceptance']).float()
         else:
-            graph_props['susceptance'] = edge_attr[:, 3] # Col 3 = susceptance
+            graph_props['susceptance'] = edge_attr[:, 3]
         
-        graph_props['thermal_limits'] = edge_attr[:, 1] # Col 1 = thermal_limits
+        graph_props['thermal_limits'] = edge_attr[:, 1]
         
         if 'power_injection' in timestep_data:
             power_injection_raw = torch.from_numpy(timestep_data['power_injection']).float()
@@ -432,50 +405,48 @@ class CascadeDataset(Dataset):
         else:
             scada = timestep_data.get('scada_data', None)
             if scada is not None:
-                # --- Data Leakage Fix: Use correct indices for 14 features ---
-                if scada.shape[1] >= 6: # Check if it has at least 6 features
+                # Use 13-feature-safe indices
+                if scada.shape[1] >= 6:
                     generation_pu = scada[:, 2]
                     load_pu = scada[:, 4]
                     graph_props['power_injection'] = generation_pu - load_pu
-                # --- End Fix ---
-
+        
         if 'reactive_injection' in timestep_data:
              reactive_injection_raw = torch.from_numpy(timestep_data['reactive_injection']).float()
              graph_props['reactive_injection'] = self._normalize_power(reactive_injection_raw)
         else:
             scada = timestep_data.get('scada_data', None)
             if scada is not None:
-                # --- Data Leakage Fix: Use correct indices for 14 features ---
                 if scada.shape[1] >= 6:
                     reac_gen_pu = scada[:, 3]
                     reac_load_pu = scada[:, 5]
                     graph_props['reactive_injection'] = reac_gen_pu - reac_load_pu
-                # --- End Fix ---
 
         
         if 'base_mva' in metadata:
             graph_props['base_mva'] = torch.tensor(metadata['base_mva'])
 
-        if 'scada_data' in timestep_data:
-            # --- Data Leakage Fix: Use correct index 6 (was 6) ---
-            if timestep_data['scada_data'].shape[1] > 6:
-                graph_props['ground_truth_temperature'] = torch.from_numpy(timestep_data['scada_data'][:, 6]).float()
-            # --- End Fix ---
-        
         # ====================================================================
-        # START: "CHEAT" FIX (Pass the prediction time to the model)
+        # START: "CHEAT" FIX (cascade_start_time is no longer passed to model)
         # ====================================================================
-        graph_props['cascade_start_time'] = torch.tensor(model_prediction_time, dtype=torch.long)
+        # (This key is removed)
         # ====================================================================
         # END: "CHEAT" FIX
         # ====================================================================
+        
+        if 'scada_data' in timestep_data:
+             scada_data = timestep_data['scada_data']
+             if scada_data.shape[1] > 6:
+                 # Use 13-feature-safe index
+                 graph_props['ground_truth_temperature'] = torch.from_numpy(scada_data[:, 6]).float()
+             else:
+                 graph_props['ground_truth_temperature'] = torch.zeros(scada_data.shape[0])
         
         return graph_props
     
     def _extract_graph_properties_from_metadata(self, metadata: Dict, num_edges: int) -> Dict[str, torch.Tensor]:
         """Extract graph properties from metadata when sequence is empty WITH NORMALIZATION."""
         graph_props = {}
-        
         num_nodes = metadata.get('num_nodes', 118)
         
         thermal_limits_raw = torch.rand(num_edges) * 40.0 + 10.0
@@ -522,8 +493,7 @@ class CascadeDataset(Dataset):
         if 'base_mva' in metadata:
             graph_props['base_mva'] = torch.tensor(metadata['base_mva'])
             
-        # "CHEAT" FIX: Add dummy prediction time
-        graph_props['cascade_start_time'] = torch.tensor(metadata.get('cascade_start_time', -1), dtype=torch.long)
+        # "CHEAT" FIX: (This key is removed)
         
         return graph_props
     
@@ -539,7 +509,6 @@ def collate_cascade_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor
     This function will now skip any empty dictionaries returned by __getitem__.
     """
     
-    # Filter out empty dictionaries (from loading errors)
     batch = [item for item in batch if item]
     
     batch_dict = {}
@@ -560,14 +529,7 @@ def collate_cascade_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor
         
         elif key == 'temporal_sequence':
             items = [item[key] for item in batch]
-            # ====================================================================
-            # START: "CHEAT" FIX (Padding)
-            # ====================================================================
-            # Pad to the longest sequence *in this batch*
             max_len = max(item.shape[0] for item in items)
-            # ====================================================================
-            # END: "CHEAT" FIX
-            # ====================================================================
             
             padded_items = []
             for item in items:
@@ -592,16 +554,8 @@ def collate_cascade_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor
                     if props:
                         if isinstance(props[0], torch.Tensor):
                             try:
-                                # ====================================================================
-                                # START: "CHEAT" FIX (Stack cascade_start_time)
-                                # ====================================================================
-                                if prop_key == 'cascade_start_time':
-                                    graph_props_batch[prop_key] = torch.stack(props, dim=0)
-                                # ====================================================================
-                                # END: "CHEAT" FIX
-                                # ====================================================================
-                                else:
-                                    graph_props_batch[prop_key] = torch.stack(props, dim=0)
+                                # "CHEAT" FIX: cascade_start_time is no longer here
+                                graph_props_batch[prop_key] = torch.stack(props, dim=0)
                             except RuntimeError:
                                 graph_props_batch[prop_key] = props[0]
                         else:
@@ -625,19 +579,18 @@ def collate_cascade_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor
                     print(f"Error collating key {key}: {e}")
                     continue
             
-            # Check for temporal sequences (dim=4 for [T,N,F] or dim=5 for [T,N,C,H,W])
+            # ====================================================================
+            # START: "COLLATION" FIX (from >= 4 to >= 3)
+            # ====================================================================
             if items[0].dim() >= 3 and key in ['satellite_data', 'visual_data', 'thermal_data', 
                                                  'scada_data', 'weather_sequence', 'threat_indicators',
                                                  'equipment_status', 'pmu_sequence', 'sensor_data']:
-                
-                # ====================================================================
-                # START: "CHEAT" FIX (Padding)
-                # ====================================================================
+            # ====================================================================
+            # END: "COLLATION" FIX
+            # ====================================================================
                 first_dims = [item.shape[0] for item in items]
+                
                 max_len = max(first_dims)
-                # ====================================================================
-                # END: "CHEAT" FIX
-                # ====================================================================
 
                 if len(set(first_dims)) > 1:
                     padded_items = []
