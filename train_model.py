@@ -262,7 +262,7 @@ class PhysicsInformedLoss(nn.Module):
         avg_ranking_loss = torch.stack(ranking_losses).mean()
         
         # Combine the two losses. We weight the ranking loss.
-        return mse_loss + (avg_ranking_loss * 5.0)
+        return mse_loss + (avg_ranking_loss * 3.0)
     # ====================================================================
     # END: "CHEATEABLE MAE" BUG FIX
     # ====================================================================
@@ -477,7 +477,7 @@ class Trainer:
             'lambda_frequency': calibrated_lambdas.get('lambda_frequency', 0.1),
             'lambda_reactive': calibrated_lambdas.get('lambda_reactive', 0.1),
             'lambda_risk': calibrated_lambdas.get('lambda_risk', 0.2),       
-            'lambda_timing': calibrated_lambdas.get('lambda_timing', 0.1), # <-- NO LONGER MANUAL
+            'lambda_timing': 1.0,  # <-- NEW: Set to 1.0 for major focus
         }
 
         # Print a clear report
@@ -526,9 +526,9 @@ class Trainer:
         self.start_epoch = 0
         self.best_val_mae = float('inf') 
         self.best_val_loss = float('inf')
-        
-        self.cascade_threshold = 0.5
-        self.node_threshold = 0.5
+        self.best_val_timing_loss = float('inf')
+        self.cascade_threshold = 0.35
+        self.node_threshold = 0.35
         self.best_val_f1 = 0.0
         
         self._model_validated = False
@@ -629,12 +629,13 @@ class Trainer:
         self.best_val_mae = checkpoint.get('val_time_mae', float('inf'))
         self.best_val_loss = checkpoint.get('val_loss', float('inf'))
         
-        self.cascade_threshold = checkpoint.get('cascade_threshold', 0.5)
-        self.node_threshold = checkpoint.get('node_threshold', 0.5)
+        self.cascade_threshold = checkpoint.get('cascade_threshold', 0.35)
+        self.node_threshold = checkpoint.get('node_threshold', 0.35)
         
         if 'history' in checkpoint:
             self.history = checkpoint['history']
         
+
         print(f"✓ Resumed from epoch {self.start_epoch} (best val_mae: {self.best_val_mae:.4f})")
         print(f"✓ Loaded thresholds: cascade={self.cascade_threshold:.3f}, node={self.node_threshold:.3f}")
         return True
@@ -898,7 +899,8 @@ class Trainer:
         avg_loss = total_loss / (len(self.train_loader) + 1e-7)
         epoch_metrics = self._aggregate_epoch_metrics(metric_sums, len(self.train_loader), total_timing_batches)
         epoch_metrics['loss'] = avg_loss
-        
+        epoch_metrics['timing_loss'] = loss_component_sums.get('timing', 0.0) / (len(self.train_loader) + 1e-7)
+
         avg_grad_norm = np.mean(grad_norms) if grad_norms else 0.0
         
         print(f"\n  Average gradient norm: {avg_grad_norm:.4f}")
@@ -916,7 +918,7 @@ class Trainer:
         self.model.eval()
         
         total_loss = 0.0
-        
+        total_timing_loss_sum = 0.0
         metric_sums = {}
         total_timing_batches = 0
         
@@ -950,13 +952,15 @@ class Trainer:
                     'cascade_timing': batch_device.get('cascade_timing')
                 }
                 
-                loss, _ = self.criterion(
+                loss, loss_components = self.criterion(
                     outputs,
                     targets,
                     graph_properties
                 )
                 
                 total_loss += loss.item()
+
+                total_timing_loss_sum += loss_components.get('timing', 0.0)
                 
                 batch_metrics = self._calculate_metrics(outputs, batch_device)
                 for key, value in batch_metrics.items():
@@ -973,9 +977,12 @@ class Trainer:
                 })
         
         avg_loss = total_loss / (len(self.val_loader) + 1e-7)
+
+        avg_timing_loss = total_timing_loss_sum / (len(self.val_loader) + 1e-7)
         epoch_metrics = self._aggregate_epoch_metrics(metric_sums, len(self.val_loader), total_timing_batches)
         epoch_metrics['loss'] = avg_loss
-        
+        epoch_metrics['timing_loss'] = avg_timing_loss
+
         return epoch_metrics
     
     def train(self, num_epochs: int, early_stopping_patience: int = 10):
@@ -1005,32 +1012,32 @@ class Trainer:
             # ====================================================================
             
             # --- 1. Adjust Cascade Threshold ---
-            if val_metrics['cascade_recall'] < 0.5:
-                self.cascade_threshold = max(0.1, self.cascade_threshold - 0.05)
-                print(f"  ⚠ Cascade Recall low - lowering C-thresh to {self.cascade_threshold:.3f}")
-            elif val_metrics['cascade_precision'] < 0.8: # Use a high bar
-                self.cascade_threshold = min(0.8, self.cascade_threshold + 0.05)
-                print(f"  ⚠ Cascade Precision low - raising C-thresh to {self.cascade_threshold:.3f}")
-            elif val_metrics['cascade_f1'] > 0.9 and self.cascade_threshold < 0.9:
-                # If F1 is great and thresh is below our goal, slowly raise it
-                self.cascade_threshold = min(0.9, self.cascade_threshold + 0.02)
+            # if val_metrics['cascade_recall'] < 0.5:
+            #     self.cascade_threshold = max(0.1, self.cascade_threshold - 0.01)
+            #     print(f"  ⚠ Cascade Recall low - lowering C-thresh to {self.cascade_threshold:.3f}")
+            # elif val_metrics['cascade_precision'] < 0.5: # Use a high bar
+            #     self.cascade_threshold = min(0.8, self.cascade_threshold + 0.01)
+            #     print(f"  ⚠ Cascade Precision low - raising C-thresh to {self.cascade_threshold:.3f}")
+            # elif val_metrics['cascade_f1'] > 0.9 and self.cascade_threshold < 0.9:
+            #     # If F1 is great and thresh is below our goal, slowly raise it
+            #     self.cascade_threshold = min(0.9, self.cascade_threshold + 0.02)
                 
-            # --- 2. Adjust Node Threshold (Independently) ---
-            if val_metrics['node_recall'] < 0.5:
-                self.node_threshold = max(0.1, self.node_threshold - 0.05)
-                print(f"  ⚠ Node Recall low - lowering N-thresh to {self.node_threshold:.3f}")
-            elif val_metrics['node_precision'] < 0.5:
-                self.node_threshold = min(0.8, self.node_threshold + 0.05)
-                print(f"  ⚠ Node Precision low - raising N-thresh to {self.node_threshold:.3f}")
-            elif val_metrics['node_f1'] > 0.9 and self.node_threshold < 0.9:
-                # If F1 is great and thresh is below our goal, slowly raise it
-                self.node_threshold = min(0.9, self.node_threshold + 0.02)
+            # # --- 2. Adjust Node Threshold (Independently) ---
+            # if val_metrics['node_recall'] < 0.5:
+            #     self.node_threshold = max(0.1, self.node_threshold - 0.01)
+            #     print(f"  ⚠ Node Recall low - lowering N-thresh to {self.node_threshold:.3f}")
+            # elif val_metrics['node_precision'] < 0.5:
+            #     self.node_threshold = min(0.8, self.node_threshold + 0.01)
+            #     print(f"  ⚠ Node Precision low - raising N-thresh to {self.node_threshold:.3f}")
+            # elif val_metrics['node_f1'] > 0.9 and self.node_threshold < 0.9:
+            #     # If F1 is great and thresh is below our goal, slowly raise it
+            #     self.node_threshold = min(0.9, self.node_threshold + 0.02)
 
-            # --- 3. F1 Score Logging ---
-            combined_f1 = (val_metrics['cascade_f1'] + val_metrics['node_f1']) / 2
-            if combined_f1 > self.best_val_f1:
-                self.best_val_f1 = combined_f1
-                print(f"  ✓ Improved F1 score: {combined_f1:.4f} (new thresholds: C={self.cascade_threshold:.3f}, N={self.node_threshold:.3f})")
+            # # --- 3. F1 Score Logging ---
+            # combined_f1 = (val_metrics['cascade_f1'] + val_metrics['node_f1']) / 2
+            # if combined_f1 > self.best_val_f1:
+            #     self.best_val_f1 = combined_f1
+            #     print(f"  ✓ Improved F1 score: {combined_f1:.4f} (new thresholds: C={self.cascade_threshold:.3f}, N={self.node_threshold:.3f})")
             
             # ====================================================================
             # END: FINAL THRESHOLD ADJUSTMENT LOGIC
@@ -1077,58 +1084,57 @@ class Trainer:
             print(f"    Recall:    Train {train_metrics['node_recall']:.4f} | Val {val_metrics['node_recall']:.4f}")
             
             print(f"\n  CAUSAL PATH & RISK METRICS:")
-            print(f"    Timing MAE (mins): Train {train_metrics['time_mae']:.3f} | Val {val_metrics['time_mae']:.3f}")
-            print(f"    Risk MSE:          Train {train_metrics['risk_mse']:.4f} | Val {val_metrics['risk_mse']:.4f}")
+            print(f"    Timing Loss:       Train {train_metrics['timing_loss']:.4f} | Val {val_metrics['timing_loss']:.4f}")
+
 
             # ====================================================================
-            # START: "BEST MODEL" LOGIC (Minimize MAE if F1 is good)
+            # START: "BEST MODEL" LOGIC (Save based on Timing Loss)
             # ====================================================================
-            current_val_mae = val_metrics['time_mae']
-            f1_is_good = val_metrics['cascade_f1'] > 0.9 and val_metrics['node_f1'] > 0.9
+                  
+            # Save based on minimizing validation Loss. Use this to pretrain the model for physics understanding
+            # current_val_loss = val_metrics['loss']
+            # if current_val_loss < self.best_val_loss:
+            #     self.best_val_loss = current_val_loss
+            #     patience_counter = 0
+                
+            #     torch.save({
+            #         'epoch': epoch,
+            #         'model_state_dict': self.model.state_dict(),
+            #         'optimizer_state_dict': self.optimizer.state_dict(),
+            #         'val_loss': current_val_loss,
+            #         'val_timing_loss': val_metrics['timing_loss'],
+            #         'cascade_threshold': self.cascade_threshold,
+            #         'node_threshold': self.node_threshold,
+            #         'history': self.history
+            #     }, f"{self.output_dir}/best_model.pth")
+                
+            #     print(f"  ✓ Saved best model (New best Val Loss: {current_val_loss:.4f})")
 
-            # We are trying to MINIMIZE the MAE
-            if current_val_mae < self.best_val_mae and f1_is_good:
-                self.best_val_mae = current_val_mae
-                patience_counter = 0
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': self.model.state_dict(),
-                    'optimizer_state_dict': self.optimizer.state_dict(),
-                    'val_loss': val_metrics['loss'],
-                    'val_cascade_f1': val_metrics['cascade_f1'],
-                    'val_node_f1': val_metrics['node_f1'],
-                    'val_time_mae': current_val_mae,
-                    'cascade_threshold': self.cascade_threshold,
-                    'node_threshold': self.node_threshold,
-                    'history': self.history
-                }, f"{self.output_dir}/best_model.pth")
-                print(f"  ✓ Saved best model (New best MAE: {current_val_mae:.4f}m, F1s: {val_metrics['cascade_f1']:.3f}/{val_metrics['node_f1']:.3f})")
+            # Save based on minimizing Timing Loss (ranking + mse) Use this for fine tuning of cascade path prediction
+            current_timing_loss = val_metrics['timing_loss']
             
-            # Fallback for val_loss if F1s aren't good yet
-            elif val_metrics['loss'] < self.best_val_loss and not f1_is_good:
-                self.best_val_loss = val_metrics['loss']
+            if current_timing_loss < self.best_val_timing_loss:
+                self.best_val_timing_loss = current_timing_loss
                 patience_counter = 0
+                
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'val_loss': val_metrics['loss'],
-                    'val_cascade_f1': val_metrics['cascade_f1'],
-                    'val_node_f1': val_metrics['node_f1'],
-                    'val_time_mae': current_val_mae,
+                    'val_timing_loss': current_timing_loss,
                     'cascade_threshold': self.cascade_threshold,
                     'node_threshold': self.node_threshold,
                     'history': self.history
                 }, f"{self.output_dir}/best_model.pth")
-                print(f"  ✓ Saved best model (val_loss: {val_metrics['loss']:.4f}) - (F1 scores not high enough yet)")
+                
+                print(f"  ✓ Saved best model (New best Timing Loss: {current_timing_loss:.4f})")
                 
             else:
                 patience_counter += 1
                 if patience_counter >= early_stopping_patience:
                     print(f"\nEarly stopping at epoch {epoch + 1}")
                     break
-            # ====================================================================
-            # END: "BEST MODEL" LOGIC
             # ====================================================================
 
             # Save latest checkpoint
@@ -1138,7 +1144,7 @@ class Trainer:
                 'optimizer_state_dict': self.optimizer.state_dict(),
                 'val_loss': val_metrics['loss'],
                 'val_time_mae': val_metrics['time_mae'],
-                'val_mae': current_val_mae,
+                'val_timing_loss': current_timing_loss,
                 'cascade_threshold': self.cascade_threshold,
                 'node_threshold': self.node_threshold,
                 'history': self.history
@@ -1445,13 +1451,24 @@ if __name__ == "__main__":
     # START: "RESUME" FIX (Allows custom checkpoint path)
     # ====================================================================
     if args.resume:
-        checkpoint_path = args.resume # Use the path from the command
+        checkpoint_path = args.resume 
         if os.path.exists(checkpoint_path):
             trainer.load_checkpoint(checkpoint_path)
+            
+            # --- NEW: FORCE LR RESET FOR PHASE 2 ---
+            print(f"\n[PHASE 2 RESET] Manually resetting Learning Rate to {LEARNING_RATE}...")
+            for param_group in trainer.optimizer.param_groups:
+                param_group['lr'] = LEARNING_RATE  # Resets to 0.0001 (or whatever arg you passed)
+            
+            # OPTIONAL: Reset Scheduler to forget "patience" history
+            trainer.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                trainer.optimizer, 'min', patience=5
+            )
+            print("[PHASE 2 RESET] Scheduler reset.")
+            # ---------------------------------------
+
         else:
-            print(f"Warning: Checkpoint file not found at {checkpoint_path}. Starting from scratch.")
-    # ====================================================================
-    # END: "RESUME" FIX
+            print(f"Warning: Checkpoint file not found...")
     # ====================================================================
     
     # Train
