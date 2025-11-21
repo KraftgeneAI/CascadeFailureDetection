@@ -85,7 +85,7 @@ The system ingests all new data and the model recognizes the pattern:
 
 ### Step 4: The Final Inference Report
 
-The inference script produces a detailed report:
+The inference script produces a detailed report: (!the model used for inference here is almost untrained and is used only to showcase the report structure, the inference results of final trained model will be shown in the following section)
 
 **Overall Verdict**: Cascade Predicted (Probability: 0.99)
 
