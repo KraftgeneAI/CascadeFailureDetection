@@ -24,7 +24,7 @@ def find_best_thresholds(checkpoint_path, data_dir):
     
     # 2. Load Validation Data
     val_dataset = CascadeDataset(f"{data_dir}/val", mode='full_sequence')
-    val_loader = DataLoader(val_dataset, batch_size=16, collate_fn=collate_cascade_batch)
+    val_loader = DataLoader(val_dataset, batch_size=4, collate_fn=collate_cascade_batch)
     
     print("Running inference on validation set...")
     all_node_probs = []
@@ -101,6 +101,20 @@ def find_best_thresholds(checkpoint_path, data_dir):
     print(f"Best Node F1:    {best_node_f1:.4f}  at Threshold: {best_node_thresh:.2f}")
     print(f"Best Cascade F1: {best_casc_f1:.4f}  at Threshold: {best_casc_thresh:.2f}")
     print("="*50)
+
+    # ... (after the print statements) ...
+
+    # 5. UPDATE AND SAVE THE CHECKPOINT
+    print(f"\nUpdating checkpoint at {checkpoint_path} with new thresholds...")
+    
+    # Update the dictionary keys
+    checkpoint['cascade_threshold'] = best_casc_thresh
+    checkpoint['node_threshold'] = best_node_thresh
+    
+    # Save the file back to disk
+    torch.save(checkpoint, checkpoint_path)
+    
+    print("✓ Checkpoint updated successfully.")
 
 if __name__ == "__main__":
     # Usage: python find_thresholds.py

@@ -262,7 +262,7 @@ class PhysicsInformedLoss(nn.Module):
         avg_ranking_loss = torch.stack(ranking_losses).mean()
         
         # Combine the two losses. We weight the ranking loss.
-        return mse_loss + (avg_ranking_loss * 3.0)
+        return mse_loss + (avg_ranking_loss * 10.0)
     # ====================================================================
     # END: "CHEATEABLE MAE" BUG FIX
     # ====================================================================
@@ -511,9 +511,9 @@ class Trainer:
             lambda_timing=final_lambdas['lambda_timing'],
             
             pos_weight=1.0, # <-- Set to 1.0 (sampler handles balance)
-            focal_alpha=0.25,
-            focal_gamma=2.0,
-            label_smoothing=0.1,
+            focal_alpha=0.5,
+            focal_gamma=3.0,
+            label_smoothing=0.05,
             use_logits=model_outputs_logits,
             base_mva=self.base_mva,
             base_freq=self.base_freq
@@ -528,7 +528,7 @@ class Trainer:
         self.best_val_loss = float('inf')
         self.best_val_timing_loss = float('inf')
         self.cascade_threshold = 0.35
-        self.node_threshold = 0.35
+        self.node_threshold = 0.45
         self.best_val_f1 = 0.0
         
         self._model_validated = False

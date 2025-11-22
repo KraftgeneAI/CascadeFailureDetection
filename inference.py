@@ -91,7 +91,7 @@ class CascadePredictor:
         
         # Load model
         print(f"Loading model from {model_path}...")
-        checkpoint = torch.load(model_path, map_location=self.device)
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
         
         self.cascade_threshold = checkpoint.get('cascade_threshold', 0.5)
         self.node_threshold = checkpoint.get('node_threshold', 0.5)
@@ -275,19 +275,19 @@ class CascadePredictor:
                 scada_data_raw = safe_get_or_default(ts, 'scada_data', (self.num_nodes, 15)) # Check for 15 first
                 
                 # ====================================================================
-            # START: DATA LEAKAGE FIX (Time + Stress)
-            # ====================================================================
-            if scada_data_raw.shape[1] == 15:
-                scada_data = scada_data_raw[:, :13] # Slice to 13
-            elif scada_data_raw.shape[1] == 14:
-                scada_data = scada_data_raw[:, :13] # Slice to 13
-            elif scada_data_raw.shape[1] == 13:
-                scada_data = scada_data_raw # Already correct
-            else:
-                scada_data = np.zeros(scada_shape, dtype=np.float32) # Fallback
-            # ====================================================================
-            # END: DATA LEAKAGE FIX
-            # ====================================================================
+                # START: DATA LEAKAGE FIX (Time + Stress)
+                # ====================================================================
+                if scada_data_raw.shape[1] == 15:
+                    scada_data = scada_data_raw[:, :13] # Slice to 13
+                elif scada_data_raw.shape[1] == 14:
+                    scada_data = scada_data_raw[:, :13] # Slice to 13
+                elif scada_data_raw.shape[1] == 13:
+                    scada_data = scada_data_raw # Already correct
+                else:
+                    scada_data = np.zeros(scada_shape, dtype=np.float32) # Fallback
+                # ====================================================================
+                # END: DATA LEAKAGE FIX
+                # ====================================================================
                 
                 if scada_data.shape[1] >= 6:
                     scada_data[:, 2] = self._normalize_power(scada_data[:, 2])
