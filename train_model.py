@@ -477,7 +477,7 @@ class Trainer:
             'lambda_frequency': calibrated_lambdas.get('lambda_frequency', 0.1),
             'lambda_reactive': calibrated_lambdas.get('lambda_reactive', 0.1),
             'lambda_risk': calibrated_lambdas.get('lambda_risk', 0.2),       
-            'lambda_timing': 1.0,  # <-- NEW: Set to 1.0 for major focus
+            'lambda_timing': calibrated_lambdas.get('lambda_timing', 0.1),
         }
 
         # Print a clear report
@@ -510,8 +510,8 @@ class Trainer:
             lambda_risk=final_lambdas['lambda_risk'],
             lambda_timing=final_lambdas['lambda_timing'],
             
-            pos_weight=1.0, # <-- Set to 1.0 (sampler handles balance)
-            focal_alpha=0.5,
+            pos_weight=1.0, 
+            focal_alpha=0.25,
             focal_gamma=3.0,
             label_smoothing=0.05,
             use_logits=model_outputs_logits,
@@ -1092,43 +1092,43 @@ class Trainer:
             # ====================================================================
                   
             # Save based on minimizing validation Loss. Use this to pretrain the model for physics understanding
-            # current_val_loss = val_metrics['loss']
-            # if current_val_loss < self.best_val_loss:
-            #     self.best_val_loss = current_val_loss
-            #     patience_counter = 0
-                
-            #     torch.save({
-            #         'epoch': epoch,
-            #         'model_state_dict': self.model.state_dict(),
-            #         'optimizer_state_dict': self.optimizer.state_dict(),
-            #         'val_loss': current_val_loss,
-            #         'val_timing_loss': val_metrics['timing_loss'],
-            #         'cascade_threshold': self.cascade_threshold,
-            #         'node_threshold': self.node_threshold,
-            #         'history': self.history
-            #     }, f"{self.output_dir}/best_model.pth")
-                
-            #     print(f"  ✓ Saved best model (New best Val Loss: {current_val_loss:.4f})")
-
-            # Save based on minimizing Timing Loss (ranking + mse) Use this for fine tuning of cascade path prediction
-            current_timing_loss = val_metrics['timing_loss']
-            
-            if current_timing_loss < self.best_val_timing_loss:
-                self.best_val_timing_loss = current_timing_loss
+            current_val_loss = val_metrics['loss']
+            if current_val_loss < self.best_val_loss:
+                self.best_val_loss = current_val_loss
                 patience_counter = 0
                 
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
-                    'val_loss': val_metrics['loss'],
-                    'val_timing_loss': current_timing_loss,
+                    'val_loss': current_val_loss,
+                    'val_timing_loss': val_metrics['timing_loss'],
                     'cascade_threshold': self.cascade_threshold,
                     'node_threshold': self.node_threshold,
                     'history': self.history
                 }, f"{self.output_dir}/best_model.pth")
                 
-                print(f"  ✓ Saved best model (New best Timing Loss: {current_timing_loss:.4f})")
+                print(f"  ✓ Saved best model (New best Val Loss: {current_val_loss:.4f})")
+
+            # Save based on minimizing Timing Loss (ranking + mse) Use this for fine tuning of cascade path prediction
+            # current_timing_loss = val_metrics['timing_loss']
+            
+            # if current_timing_loss < self.best_val_timing_loss:
+            #     self.best_val_timing_loss = current_timing_loss
+            #     patience_counter = 0
+                
+            #     torch.save({
+            #         'epoch': epoch,
+            #         'model_state_dict': self.model.state_dict(),
+            #         'optimizer_state_dict': self.optimizer.state_dict(),
+            #         'val_loss': val_metrics['loss'],
+            #         'val_timing_loss': current_timing_loss,
+            #         'cascade_threshold': self.cascade_threshold,
+            #         'node_threshold': self.node_threshold,
+            #         'history': self.history
+            #     }, f"{self.output_dir}/best_model.pth")
+                
+            #     print(f"  ✓ Saved best model (New best Timing Loss: {current_timing_loss:.4f})")
                 
             else:
                 patience_counter += 1
@@ -1144,7 +1144,7 @@ class Trainer:
                 'optimizer_state_dict': self.optimizer.state_dict(),
                 'val_loss': val_metrics['loss'],
                 'val_time_mae': val_metrics['time_mae'],
-                'val_timing_loss': current_timing_loss,
+                'val_timing_loss': current_val_loss,
                 'cascade_threshold': self.cascade_threshold,
                 'node_threshold': self.node_threshold,
                 'history': self.history
