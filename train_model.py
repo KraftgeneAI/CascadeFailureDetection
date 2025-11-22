@@ -527,8 +527,8 @@ class Trainer:
         self.best_val_mae = float('inf') 
         self.best_val_loss = float('inf')
         self.best_val_timing_loss = float('inf')
-        self.cascade_threshold = 0.35
-        self.node_threshold = 0.45
+        self.cascade_threshold = 0.25
+        self.node_threshold = 0.25
         self.best_val_f1 = 0.0
         
         self._model_validated = False
@@ -629,8 +629,8 @@ class Trainer:
         self.best_val_mae = checkpoint.get('val_time_mae', float('inf'))
         self.best_val_loss = checkpoint.get('val_loss', float('inf'))
         
-        self.cascade_threshold = checkpoint.get('cascade_threshold', 0.35)
-        self.node_threshold = checkpoint.get('node_threshold', 0.35)
+        self.cascade_threshold = checkpoint.get('cascade_threshold', 0.25)
+        self.node_threshold = checkpoint.get('node_threshold', 0.25)
         
         if 'history' in checkpoint:
             self.history = checkpoint['history']
