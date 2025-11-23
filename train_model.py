@@ -273,6 +273,15 @@ class PhysicsInformedLoss(nn.Module):
                 targets: Dict[str, torch.Tensor],
                 graph_properties: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
         
+        predictions_fp32 = {}
+        for k, v in predictions.items():
+            if isinstance(v, torch.Tensor):
+                predictions_fp32[k] = v.float() # Cast everything to float32
+            else:
+                predictions_fp32[k] = v
+        
+        predictions = predictions_fp32
+
         failure_prob = predictions['failure_probability']
         B, N, _ = failure_prob.shape
         
@@ -511,8 +520,8 @@ class Trainer:
             lambda_timing=final_lambdas['lambda_timing'],
             
             pos_weight=1.0, 
-            focal_alpha=0.75,
-            focal_gamma=1.5,
+            focal_alpha=0.25,
+            focal_gamma=2,
             label_smoothing=0.05,
             use_logits=model_outputs_logits,
             base_mva=self.base_mva,
