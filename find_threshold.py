@@ -18,7 +18,7 @@ def find_best_thresholds(checkpoint_path, data_dir):
         embedding_dim=128, hidden_dim=128, num_gnn_layers=3, heads=4
     ).to(device)
     
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     
@@ -118,4 +118,4 @@ def find_best_thresholds(checkpoint_path, data_dir):
 
 if __name__ == "__main__":
     # Usage: python find_thresholds.py
-    find_best_thresholds("checkpoints/best_model.pth", "data")
+    find_best_thresholds("checkpoints/latest_checkpoint.pth", "data")

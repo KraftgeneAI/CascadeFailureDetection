@@ -511,8 +511,8 @@ class Trainer:
             lambda_timing=final_lambdas['lambda_timing'],
             
             pos_weight=1.0, 
-            focal_alpha=0.25,
-            focal_gamma=3.0,
+            focal_alpha=0.75,
+            focal_gamma=1.5,
             label_smoothing=0.05,
             use_logits=model_outputs_logits,
             base_mva=self.base_mva,
@@ -620,7 +620,7 @@ class Trainer:
             return False
         
         print(f"Loading checkpoint from {checkpoint_path}...")
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])

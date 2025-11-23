@@ -150,40 +150,58 @@ class CascadeDataset(Dataset):
         metadata = scenario.get('metadata', {})
         
         # ====================================================================
-        # START: "CHEAT" FIX - Truncate ALL sequences
+        # START: "CHEAT" FIX v2 - Sliding Window & Random Truncation
         # ====================================================================
         cascade_start_time = metadata.get('cascade_start_time', -1)
         is_cascade = metadata.get('is_cascade', False)
         
-        # Define the "early warning window"
-        # We will predict from 5 timesteps *before* the first failure.
-        WARNING_WINDOW = 5 
-        
         # Define the valid range of sequence lengths
-        min_len = int(len(sequence_original) * 0.3) # e.g., 18
-        max_len = int(len(sequence_original) * 0.95) # e.g., 57
+        # e.g., for 60 steps: min=18, max=57
+        min_len = int(len(sequence_original) * 0.3) 
         
+        # --- 1. Determine the END point (Truncation) ---
         if is_cascade:
-            # Cascade case: Truncate sequence to *before* the failure window
-            # e.g., if start_time = 40, prediction_timestep = 40 - 5 = 35
-            prediction_timestep = int(cascade_start_time) - WARNING_WINDOW
+            # Cascade case: End anywhere before the 5-min warning window.
+            # This creates "Short Cascade" samples that look like "Short Normal".
+            hard_limit = int(cascade_start_time) - 5
             
-            # Ensure it's within the valid range
-            if prediction_timestep < min_len:
-                prediction_timestep = min_len
+            # Safety check to ensure we have enough data
+            if hard_limit < min_len: 
+                hard_limit = min_len
+                
+            # Random end point to overlap distributions
+            end_idx = np.random.randint(min_len, hard_limit + 1)
         else:
-            # Normal/Stressed case: Truncate to a *random* point
-            # This prevents the model from learning "if len < 35, predict cascade"
-            prediction_timestep = np.random.randint(min_len, max_len)
+            # Normal case: End anywhere, but capped to prevent "Long=Safe" leak.
+            # We cap it at the max possible length a cascade could ever be.
+            global_max_cascade_len = int(len(sequence_original) * 0.85) - 5
+            
+            # Ensure bounds are valid
+            if global_max_cascade_len < min_len: 
+                global_max_cascade_len = min_len + 1
+                
+            end_idx = np.random.randint(min_len, global_max_cascade_len + 1)
+            
+        # --- 2. Determine the START point (Sliding Window) ---
+        # This forces the model to learn translation invariance (physics, not time-index).
+        # We ensure the model gets at least 'minimum_model_length' steps.
+        minimum_model_length = 10 
+        max_start = end_idx - minimum_model_length
         
-        # Truncate the sequence
-        sequence = sequence_original[:prediction_timestep]
+        if max_start > 0:
+            start_idx = np.random.randint(0, max_start)
+        else:
+            start_idx = 0
+            
+        # --- 3. Apply the SLIDING WINDOW Slice ---
+        sequence = sequence_original[start_idx : end_idx]
         
+        # Fallback for empty sequences (should not happen with logic above)
         if len(sequence) == 0:
-             # Fallback if truncation results in an empty sequence
              sequence = sequence_original[:min_len]
+             start_idx = 0
         # ====================================================================
-        # END: "CHEAT" FIX
+        # END: "CHEAT" FIX v2
         # ====================================================================
 
         def to_tensor(data):
@@ -222,6 +240,7 @@ class CascadeDataset(Dataset):
         # ====================================================================
         # START: "DATA LEAKAGE" FIX (Set default to 13)
         # ====================================================================
+        # Check the shape of the last step to determine feature count
         scada_shape = (last_step.get('scada_data', np.zeros((118,13))).shape[0], 13)
         # ====================================================================
         # END: "DATA LEAKAGE" FIX
@@ -241,7 +260,7 @@ class CascadeDataset(Dataset):
         label_shape = last_step.get('node_labels', np.zeros(num_nodes)).shape
         timing_shape = last_step.get('cascade_timing', np.zeros(num_nodes)).shape
 
-        for ts in sequence: # Loop over the *truncated* sequence
+        for ts in sequence: # Loop over the *sliced* sequence
             # Use 15-col default for safe_get to load old data
             scada_data_raw = safe_get(ts, 'scada_data', np.zeros((num_nodes, 15))).astype(np.float32)
             
@@ -254,8 +273,11 @@ class CascadeDataset(Dataset):
             # ====================================================================
             # START: "DATA LEAKAGE" FIX (Time + Stress)
             # ====================================================================
-            # Slice off the "cheat" features (time and stress)
-            scada_data = scada_data_raw[:, :13]
+            # Slice off the "cheat" features (time and stress) if present
+            if scada_data_raw.shape[1] > 13:
+                scada_data = scada_data_raw[:, :13]
+            else:
+                scada_data = scada_data_raw
             # ====================================================================
             # END: "DATA LEAKAGE" FIX
             # ====================================================================
@@ -290,8 +312,27 @@ class CascadeDataset(Dataset):
         
         # --- Get the ground truth timing from the *original* cascade start time ---
         original_cascade_start_time = metadata.get('cascade_start_time', -1)
+        
         if is_cascade and 0 <= original_cascade_start_time < len(sequence_original):
             correct_timing_tensor = to_tensor(sequence_original[original_cascade_start_time].get('cascade_timing', np.zeros(timing_shape)))
+            
+            # ====================================================================
+            # START: TIMING SHIFT FIX (Crucial for Sliding Window)
+            # ====================================================================
+            # 1. Filter for nodes that actually fail (target >= 0)
+            mask_failure = correct_timing_tensor >= 0
+            
+            # 2. Shift the timing by start_idx 
+            # If failure is at t=50 and we start at t=10, the model sees failure at t=40.
+            correct_timing_tensor[mask_failure] = correct_timing_tensor[mask_failure] - start_idx
+            
+            # 3. Normalize (Optional: if using 0-1 targets, ensure max_time_horizon is set)
+            if hasattr(self, 'max_time_horizon') and self.max_time_horizon > 0:
+                 correct_timing_tensor[mask_failure] = correct_timing_tensor[mask_failure] / self.max_time_horizon
+            # ====================================================================
+            # END: TIMING SHIFT FIX
+            # ====================================================================
+            
         else:
             correct_timing_tensor = to_tensor(np.full(timing_shape, -1.0, dtype=np.float32))
         
@@ -308,7 +349,7 @@ class CascadeDataset(Dataset):
             'edge_index': to_tensor(edge_index).long(),
             'edge_attr': edge_attr,
             'node_failure_labels': final_labels, # The *real* answer
-            'cascade_timing': correct_timing_tensor, # The *real* answer
+            'cascade_timing': correct_timing_tensor, # The *real* answer (SHIFTED)
             'ground_truth_risk': to_tensor(ground_truth_risk), # The *real* answer
             'graph_properties': self._extract_graph_properties(last_step, metadata, edge_attr),
             'temporal_sequence': torch.stack(scada_seq),
