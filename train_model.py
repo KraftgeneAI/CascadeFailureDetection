@@ -503,7 +503,7 @@ class Trainer:
             lambda_frequency=final_lambdas['lambda_frequency'],
             lambda_reactive=final_lambdas['lambda_reactive'],
             lambda_risk=final_lambdas['lambda_risk'],
-            lambda_timing=final_lambdas['lambda_timing'],
+            lambda_timing=10,
             
             pos_weight=1.0, 
             focal_alpha=0.25,
@@ -631,7 +631,7 @@ class Trainer:
             self.history = checkpoint['history']
         
 
-        print(f"✓ Resumed from epoch {self.start_epoch} (best val_mae: {self.best_val_mae:.4f})")
+        print(f"✓ Resumed from epoch {self.start_epoch}")
         print(f"✓ Loaded thresholds: cascade={self.cascade_threshold:.3f}, node={self.node_threshold:.3f}")
         return True
     
@@ -934,10 +934,9 @@ class Trainer:
         
         return epoch_metrics
     
-    
     def validate(self) -> Dict[str, float]:
         """
-        Validate and find OPTIMAL thresholds (Cascade F1 & Weighted Node Score).
+        Validate and find OPTIMAL thresholds (Cascade F1 & Node F_beta Score).
         """
         self.model.eval()
         
@@ -1032,13 +1031,10 @@ class Trainer:
                     best_thresh = t
             return best_f1, best_thresh
 
-        # Helper 2: Best Weighted Score (70% Prec / 30% Recall) - YOUR FIX
-        def find_best_weighted(probs, targets):
+        # Helper 2: Best F-beta Score (Favors Precision) - YOUR FIX
+        def find_best_fbeta(probs, targets, beta=0.5):
             best_score, best_thresh = 0.0, 0.5
-            
-            # Weights
-            w_prec = 0.7
-            w_rec  = 0.3
+            beta_sq = beta**2
             
             for t in np.arange(0.05, 0.96, 0.05):
                 preds = (probs > t).float()
@@ -1049,8 +1045,8 @@ class Trainer:
                 precision = tp / (tp + fp + 1e-7)
                 recall = tp / (tp + fn + 1e-7)
                 
-                # Calculate Weighted Score
-                score = (w_prec * precision) + (w_rec * recall)
+                # Calculate F-beta Score
+                score = (1 + beta_sq) * (precision * recall) / (beta_sq * precision + recall + 1e-7)
                 
                 if score > best_score:
                     best_score = score.item()
@@ -1060,12 +1056,12 @@ class Trainer:
         # --- 1. Find Thresholds ---
         best_c_f1, best_c_thresh = find_best_f1(global_cascade_probs, global_cascade_labels)
         
-        # Use the Weighted finder for Nodes
-        best_n_score, best_n_thresh = find_best_weighted(global_node_probs, global_node_labels)
+        # Use the F-beta finder for Nodes, with beta=0.5 (Precision focus)
+        best_n_score, best_n_thresh = find_best_fbeta(global_node_probs, global_node_labels, beta=0.5)
         
         # --- 2. Recalculate Metrics ---
         
-        # Node Metrics (using Weighted Threshold)
+        # Node Metrics (using F-beta Threshold)
         final_n_preds = (global_node_probs > best_n_thresh).float()
         node_tp = (final_n_preds * global_node_labels).sum().item()
         node_fp = (final_n_preds * (1-global_node_labels)).sum().item()
@@ -1121,12 +1117,13 @@ class Trainer:
             train_metrics = self.train_epoch()
             val_metrics = self.validate()
             
+            # Note: Scheduler still steps on TOTAL validation loss
             self.scheduler.step(val_metrics['loss'])
             
             current_lr = self.optimizer.param_groups[0]['lr']
             self.history['learning_rate'].append(current_lr)
             
-            # Append history
+            # Append history (all keys)
             self.history['train_loss'].append(train_metrics['loss'])
             self.history['val_loss'].append(val_metrics['loss'])
             self.history['train_cascade_acc'].append(train_metrics['cascade_acc'])
@@ -1162,48 +1159,57 @@ class Trainer:
             print(f"\n  CAUSAL PATH METRICS:")
             print(f"    Timing Loss:       Train {train_metrics['timing_loss']:.4f} | Val {val_metrics['timing_loss']:.4f}")
                   
-            # Save based on minimizing validation Loss
-            current_val_loss = val_metrics['loss']
-            if current_val_loss < self.best_val_loss:
-                self.best_val_loss = current_val_loss
+            # ====================================================================
+            # --- MODIFICATION: SAVE BEST MODEL BASED ON TIMING LOSS ---
+            # ====================================================================
+            
+            # current_val_loss = val_metrics['loss']
+            # if current_val_loss < self.best_val_loss:
+            #     self.best_val_loss = current_val_loss
+            #     patience_counter = 0
+            #     ...
+            #     print(f"  ✓ Saved best model (New best Val Loss: {current_val_loss:.4f})")
+            
+            # --- NEW SAVING LOGIC (YOUR REQUEST) ---
+            current_timing_loss = val_metrics['timing_loss']
+            
+            if current_timing_loss < self.best_val_timing_loss:
+                self.best_val_timing_loss = current_timing_loss
                 patience_counter = 0
                 
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
-                    'val_loss': current_val_loss,
-                    'val_timing_loss': val_metrics['timing_loss'],
+                    'val_loss': val_metrics['loss'],
+                    'val_timing_loss': current_timing_loss, # Save the new best score
                     
-                    # --- FIX: SAVE OPTIMAL THRESHOLDS ---
                     'cascade_threshold': float(val_metrics['best_cascade_thresh']),
                     'node_threshold': float(val_metrics['best_node_thresh']),
-                    # ------------------------------------
                     
                     'history': self.history
                 }, f"{self.output_dir}/best_model.pth")
                 
-                print(f"  ✓ Saved best model (New best Val Loss: {current_val_loss:.4f})")
+                print(f"  ✓ Saved best model (New best Timing Loss: {current_timing_loss:.4f})")
                 
             else:
                 patience_counter += 1
                 if patience_counter >= early_stopping_patience:
                     print(f"\nEarly stopping at epoch {epoch + 1}")
                     break
+            # ====================================================================
 
-            # Save latest checkpoint with updated thresholds too
+            # Save latest checkpoint (always includes the latest optimal thresholds)
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': self.model.state_dict(),
                 'optimizer_state_dict': self.optimizer.state_dict(),
                 'val_loss': val_metrics['loss'],
                 'val_time_mae': val_metrics['time_mae'],
-                'val_timing_loss': current_val_loss,
+                'val_timing_loss': val_metrics['timing_loss'], # Save current timing loss
                 
-                # --- FIX: SAVE OPTIMAL THRESHOLDS ---
                 'cascade_threshold': float(val_metrics['best_cascade_thresh']),
                 'node_threshold': float(val_metrics['best_node_thresh']),
-                # ------------------------------------
                 
                 'history': self.history
             }, f"{self.output_dir}/latest_checkpoint.pth")
@@ -1213,7 +1219,7 @@ class Trainer:
         
         print(f"\n{'='*80}")
         print(f"Training complete!")
-        print(f"  Best validation Loss: {self.best_val_loss:.4f}")
+        print(f"  Best validation Timing Loss: {self.best_val_timing_loss:.4f}")
         print(f"  Training history saved to: {self.output_dir}/training_history.json")
         print(f"  Training curves saved to: {self.output_dir}/training_curves.png")
         print(f"  Best model saved to: {self.output_dir}/best_model.pth")
