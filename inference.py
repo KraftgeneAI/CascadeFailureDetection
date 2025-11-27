@@ -482,15 +482,26 @@ class CascadePredictor:
             
             cascade_path = []
             if cascade_detected:
+                # Filter nodes predicted to fail
+                # Note: failure_timing_node_i is now a "Ranking Score", not minutes.
+                # Lower score = Earlier in the sequence.
                 failure_sequence = [
                     (j, failure_timing_node_i[j]) 
                     for j in range(self.num_nodes) 
                     if high_risk_nodes_mask[j] and failure_timing_node_i[j] >= 0
                 ]
+                
+                # Sort by the Ranking Score (Ascending)
                 failure_sequence.sort(key=lambda x: x[1])
+                
+                # Convert to simple Ordered List (1st, 2nd, 3rd...)
                 cascade_path = [
-                    {'node_id': int(node), 'time_minutes': float(time)} 
-                    for node, time in failure_sequence
+                    {
+                        'order': idx + 1,           # 1-based sequence index
+                        'node_id': int(node),
+                        'ranking_score': float(score) # The raw score (for debugging)
+                    } 
+                    for idx, (node, score) in enumerate(failure_sequence)
                 ]
 
             prediction = {
@@ -972,25 +983,47 @@ def print_single_prediction_report(prediction: Dict, inference_time: float, casc
   """
     print(summary_text)
     
-    print("\n--- 5. Cascade Path Analysis ---")
+    print("\n--- 5. Cascade Path Analysis (Sequence Order) ---")
     pred_path = prediction.get('cascade_path', [])
     actual_path = gt.get('cascade_path', [])
     
     if not pred_path and not actual_path:
         print("  - No cascade path information available.")
     else:
-        print(f"  {'Predicted Time':<15} | {'Predicted Node':<15} | {'Actual Time':<15} | {'Actual Node':<15} | {'Actual Reason'}")
-        print(f"  {'-'*15} | {'-'*15} | {'-'*15} | {'-'*15} | {'-'*15}")
+        # Header
+        print(f"  {'Seq #':<6} | {'Predicted Node':<15} | {'Actual Seq #':<15} | {'Actual Node':<15}")
+        print(f"  {'-'*6} | {'-'*15} | {'-'*15} | {'-'*15}")
         
         max_len = max(len(pred_path), len(actual_path))
+        
+        # Create a map of actual nodes to their sequence order for easy lookup
+        # e.g., {Node92: 1, Node94: 2}
+        actual_node_order_map = {item['node_id']: i+1 for i, item in enumerate(actual_path)}
+        
         for i in range(max_len):
-            pred_t = f"{pred_path[i]['time_minutes']:.2f}m" if i < len(pred_path) else ""
-            pred_n = f"Node {pred_path[i]['node_id']}" if i < len(pred_path) else ""
-            act_t = f"{actual_path[i]['time_minutes']:.2f}m" if i < len(actual_path) else ""
-            act_n = f"Node {actual_path[i]['node_id']}" if i < len(actual_path) else ""
-            act_r = actual_path[i]['reason'] if i < len(actual_path) and 'reason' in actual_path[i] else ""
+            # Predicted Column
+            if i < len(pred_path):
+                seq_num = pred_path[i]['order']
+                pred_n_id = pred_path[i]['node_id']
+                pred_n_str = f"Node {pred_n_id}"
+                
+                # Check if this predicted node was actually in the sequence somewhere
+                actual_rank = actual_node_order_map.get(pred_n_id, "-")
+                match_str = f"(True Rank: {actual_rank})"
+            else:
+                seq_num = ""
+                pred_n_str = ""
+                match_str = ""
+
+            # Actual Column (Just listing the ground truth order)
+            if i < len(actual_path):
+                act_seq = i + 1
+                act_n = f"Node {actual_path[i]['node_id']}"
+            else:
+                act_seq = ""
+                act_n = ""
             
-            print(f"  {pred_t:<15} | {pred_n:<15} | {act_t:<15} | {act_n:<15} | {act_r}")
+            print(f"  {str(seq_num):<6} | {pred_n_str:<15} | {str(act_seq):<15} | {act_n:<15}")
 
     print("=" * 80 + "\n")
 

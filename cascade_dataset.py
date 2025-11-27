@@ -336,9 +336,26 @@ class CascadeDataset(Dataset):
         else:
             correct_timing_tensor = to_tensor(np.full(timing_shape, -1.0, dtype=np.float32))
         
+        # ====================================================================
+        # START: DATA AUGMENTATION (Input Noise)
+        # ====================================================================
+        # Only add noise if this is the TRAINING set to prevent overfitting.
+        # We check self.mode (which you pass as 'full_sequence' usually), 
+        # so we might need to check the folder path or add a flag.
+        # Assuming you separate datasets by folder:
+        is_training = 'train' in str(self.data_dir)
+        
+        scada_tensor = torch.stack(scada_seq)
+        
+        if is_training:
+            # Add Gaussian noise with 0.01 standard deviation (1% noise)
+            noise = torch.randn_like(scada_tensor) * 0.01
+            scada_tensor = scada_tensor + noise
+        # ====================================================================
+
         return {
             'satellite_data': torch.stack(satellite_seq),
-            'scada_data': torch.stack(scada_seq),
+            'scada_data': scada_tensor, # <--- USE THE NOISY TENSOR
             'weather_sequence': torch.stack(weather_seq),
             'threat_indicators': torch.stack(threat_seq),
             'visual_data': torch.stack(visual_seq),
