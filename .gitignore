@@ -1,0 +1,11 @@
+# Ignore everything
+*
+
+# But exclude these specific file types
+!*.py
+!*.pdf
+!*.md
+!*.txt
+
+# And exclude the .gitignore file itself
+!.gitignore

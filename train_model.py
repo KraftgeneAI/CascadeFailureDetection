@@ -505,7 +505,7 @@ class Trainer:
             lambda_risk=final_lambdas['lambda_risk'],
             lambda_timing=10,
             
-            pos_weight=1.0, 
+            pos_weight=10.0, 
             focal_alpha=0.25,
             focal_gamma=1,
             label_smoothing=0.05,

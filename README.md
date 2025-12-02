@@ -85,36 +85,40 @@ The system ingests all new data and the model recognizes the pattern:
 
 ### Step 4: The Final Inference Report
 
-The inference script produces a detailed report: (The model used for inference here is almost untrained and is used only to showcase the report structure, the inference results of final trained model will be shown in the following section)
+The inference script produces a detailed report. Below is an example output from a trained model analyzing a complex cascade scenario.
 
-**Overall Verdict**: Cascade Predicted (Probability: 0.99)
+**Overall Verdict**: ✅ Correctly detected a cascade.
+**Prediction**: True (Prob: 0.416 / Thresh: 0.050)
 
-**Time-to-Cascade**: Predicted Lead Time: 0.15 minutes (9 seconds until first subsequent failure)
+**Critical Information**:
+- System Frequency: 73.42 Hz (Severe Deviation)
+- Voltage Range: [0.941, 1.068] p.u.
 
-**Top 5 High-Risk Nodes**:
-- Node 35: 0.998 (The first overload)
-- Node 47: 0.997 (The second overload)
-- Node 33: 0.980 (Part of the initial event)
-- Node 40: 0.979 (Part of the initial event)
-- Node 51: 0.850 (The next node in the cascade path)
+**Top High-Risk Nodes**:
+- Node 107: 0.4157 ✓ (Actual Failure)
+- Node 115: 0.4109 ✓ (Actual Failure)
+- Node 111: 0.4093 ✓ (Actual Failure)
 
 **Aggregated Risk Assessment**:
-- Threat: 0.85 (Critical) - from the landslide
-- Vulnerability: 0.92 (Critical) - from the line outage
-- Impact: 0.90 (Critical) - from the high power reroute
-- CascadeProb: 0.95 (Critical) - the model sees the dominoes
+- Threat: 0.932 (Critical)
+- Vulnerability: 0.768 (Severe)
+- Impact: 0.809 (Critical)
+- Urgency: 0.811 (Critical)
 
-**Cascade Path Analysis (The Causal Chain)**:
+**Cascade Path Analysis (Sequence Order)**:
+The model predicts the *causal sequence* of failures by ranking nodes based on their failure priority score.
 
-| Predicted Time | Predicted Node | Predicted Risk | Actual Time | Actual Node | Actual Cause |
-|:--------------|:---------------|:---------------|:------------|:------------|:-------------|
-| 0.15m | Node 35 | Vulnerability: 0.92 | 0.00m | Node 33 | Environmental |
-| 0.18m | Node 47 | Vulnerability: 0.90 | 0.00m | Node 40 | Environmental |
-| 0.45m | Node 51 | CascadeProb: 0.85 | 0.16m | Node 35 | Loading |
-| 0.62m | Node 29 | CascadeProb: 0.78 | 0.21m | Node 47 | Loading |
-| — | — | — | 0.48m | Node 51 | Loading |
+| Seq # | Predicted Node | Score | Actual Seq # | Actual Node | Delta T (min) |
+|:------|:---------------|:------|:-------------|:------------|:--------------|
+| 1 | Node 97 | 0.542 | 1 | Node 79 | 0.00 |
+| 1 | Node 91 | 0.559 | 2 | Node 81 | 0.25 |
+| 1 | Node 117 | 0.561 | 2 | Node 70 | 0.29 |
+| 2 | Node 35 | 0.595 | 5 | Node 62 | 0.71 |
+| 2 | Node 89 | 0.598 | 5 | Node 84 | 0.74 |
+| 3 | Node 51 | 0.645 | 8 | Node 38 | 1.04 |
+| ... | ... | ... | ... | ... | ... |
 
-This report doesn't just say "there is a problem." It tells you **what** will fail (Nodes 35, 47, 51...), **when** it will fail (0.15m, 0.45m...), and **why** (high Vulnerability from the outage, then high CascadeProb from subsequent overloads).
+This report doesn't just say "there is a problem." It tells you **what** will fail (Nodes 97, 91, 117...), and provides a **priority ranking** of the failure sequence, allowing operators to focus on the root causes (Seq #1) before the cascading effects (Seq #3+).
 
 
 ## Quick Start
@@ -151,21 +155,21 @@ Now, generate the full dataset using the master topology file. Thousands of samp
 
 ```bash
 # Generate 10,000 scenarios for training/validation/testing
-python multimodal_data_generator.py --normal 6000 --cascade 4000 --batch-size 100 --output-dir data --topology-file data/grid_topology.pkl
+python multimodal_data_generator.py --normal 5000 --cascade 4000 --stressed 1000 --output-dir data --topology-file data/grid_topology.pkl
 ```
 
 To generate data on multiple machines (Parallel Generation):
 
-Copy the grid_topology.pkl file to all machines.
+Copy the data/grid_topology.pkl file to all machines.
 
 Run the generator on each machine with a different start_batch number.
 
 ```bash
 # Machine 1
-python multimodal_data_generator.py --normal 3000 --cascade 2000 --output-dir data_p1 --start_batch 0 --topology-file grid_topology.pkl
+python multimodal_data_generator.py --normal 2000 --cascade 2000 --stressed 1000  --output-dir data_p1 --start_batch 0 --topology-file data/grid_topology.pkl
 
 # Machine 2
-python multimodal_data_generator.py --normal 3000 --cascade 2000 --output-dir data_p2 --start_batch 5000 --topology-file grid_topology.pkl
+python multimodal_data_generator.py --normal 3000 --cascade 2000 --stressed 1000 --output-dir data_p2 --start_batch 5000 --topology-file data/grid_topology.pkl
 ```
 Then, merge the data_p1 and data_p2 train, val, and test folders.
 
@@ -174,11 +178,11 @@ Start training with automatic loss calibration. This script will use the new tim
 
 ```bash
 
-# Recommended training command
-python train_model.py --data_dir ./data --output_dir ./checkpoints --epochs 100 --batch_size 8 --lr 0.0001
+# Recommended training command (batch size of 4 for cpu, 16 or 32 or 64 for gpus)
+python train_model.py --data_dir ./data --output_dir ./checkpoints --epochs 100 --batch_size 4 --lr 0.0001
 
-# Resume training from a checkpoint
-python train_model.py --resume
+# Resume training from the latest checkpoint
+python train_model.py --resume checkpoints/latest_checkpoint.pth
 ```
 The script will:
 
@@ -220,7 +224,7 @@ Project Structure
 ├── checkpoints/
 │   ├── best_model.pth           # Best model weights
 │   ├── training_curves.png      # Training/validation metrics chart
-│   └── training_history.json    # Raw metrics per epoch
+│   └── latest_checkpoint.pth    # Raw metrics per epoch
 │
 ├── data/
 │   ├── grid_topology.pkl        # The MASTER grid topology file
