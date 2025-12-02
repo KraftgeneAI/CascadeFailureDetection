@@ -113,9 +113,9 @@ The model predicts the *causal sequence* of failures by ranking nodes based on t
 | 1 | Node 97 | 0.542 | 1 | Node 79 | 0.00 |
 | 1 | Node 91 | 0.559 | 2 | Node 81 | 0.25 |
 | 1 | Node 117 | 0.561 | 2 | Node 70 | 0.29 |
-| 2 | Node 35 | 0.595 | 5 | Node 62 | 0.71 |
-| 2 | Node 89 | 0.598 | 5 | Node 84 | 0.74 |
-| 3 | Node 51 | 0.645 | 8 | Node 38 | 1.04 |
+| 2 | Node 35 | 0.595 | 3 | Node 62 | 0.71 |
+| 2 | Node 89 | 0.598 | 3 | Node 84 | 0.74 |
+| 3 | Node 51 | 0.645 | 4 | Node 38 | 1.04 |
 | ... | ... | ... | ... | ... | ... |
 
 This report doesn't just say "there is a problem." It tells you **what** will fail (Nodes 97, 91, 117...), and provides a **priority ranking** of the failure sequence, allowing operators to focus on the root causes (Seq #1) before the cascading effects (Seq #3+).
