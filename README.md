@@ -1,6 +1,6 @@
 # AI-Driven Predictive Cascade Failure Analysis （End-To-End）
 
-We present a Graph Neural Network (GNN) architecture for predictive cascade failure analysis in electrical power grids, capable of forecasting the **causal chain of failures** (e.g., `Node B -> Node A -> Node C`) minutes before they occur.
+We present an end-to-end Graph Neural Network (GNN) architecture for predictive cascade failure analysis in electrical power grids, capable of forecasting the **causal chain of failures** (e.g., `Node B -> Node A -> Node C`) minutes before they occur.
 
 This system achieves a holistic view by fusing multi-modal data. For example, it can correlate **robotic data** (a drone spotting a landslide) with **environmental data** (heavy rain) and **infrastructure data** (line flow rerouting) to predict not just *that* a failure will happen, but the *exact sequence* of subsequent overloads and failures.
 
