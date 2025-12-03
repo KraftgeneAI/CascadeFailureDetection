@@ -85,7 +85,7 @@ The system ingests all new data and the model recognizes the pattern:
 
 ### Step 4: The Final Inference Report
 
-The inference script produces a detailed report. Below is an example output from a trained model analyzing a complex cascade scenario.
+The inference script produces a detailed report. Below is an example output from a partially trained model analyzing a complex cascade scenario.
 
 **Overall Verdict**: ✅ Correctly detected a cascade.
 **Prediction**: True (Prob: 0.416 / Thresh: 0.050)
