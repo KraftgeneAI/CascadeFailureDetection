@@ -676,9 +676,10 @@ def collate_cascade_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor
             # START: "COLLATION" FIX (from >= 4 to >= 3)
             # ====================================================================
             # --- NEW: Added 'edge_mask' to this list ---
-            if items[0].dim() >= 3 and key in ['satellite_data', 'visual_data', 'thermal_data', 
-                                                 'scada_data', 'weather_sequence', 'threat_indicators',
-                                                 'equipment_status', 'pmu_sequence', 'sensor_data', 'edge_mask']:
+            # Allow edge_mask (dim 2) or standard data (dim 3+) to enter the padding block
+            if (items[0].dim() >= 3 or key == 'edge_mask') and key in ['satellite_data', 'visual_data', 'thermal_data', 
+                                                'scada_data', 'weather_sequence', 'threat_indicators',
+                                                'equipment_status', 'pmu_sequence', 'sensor_data', 'edge_mask']:
             # ====================================================================
             # END: "COLLATION" FIX
             # ====================================================================
