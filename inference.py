@@ -64,11 +64,14 @@ class CascadePredictor:
         with open(topology_path, 'rb') as f:
             topology = pickle.load(f)
             
+            # --- START IMPROVEMENT ---
             if not isinstance(topology['edge_index'], torch.Tensor):
-                edge_index_numpy = topology['edge_index']
-                self.edge_index = torch.from_numpy(edge_index_numpy).long()
+                self.edge_index_np = topology['edge_index'] # Cache numpy version for fast masking
+                self.edge_index = torch.from_numpy(self.edge_index_np).long()
             else:
                 self.edge_index = topology['edge_index']
+                self.edge_index_np = self.edge_index.cpu().numpy() # Cache numpy version
+            # --- END IMPROVEMENT ---
 
             if 'num_nodes' in topology:
                 self.num_nodes = topology['num_nodes']
@@ -177,10 +180,8 @@ class CascadePredictor:
                 if not hasattr(data, 'shape'): return np.zeros(default_shape, dtype=dtype)
                 return data.astype(dtype)
 
-            # DATA LEAKAGE FIX
-            last_step = sequence[-1]
+            # Define shapes
             scada_shape = (self.num_nodes, 13)
-            
             sat_shape = (self.num_nodes, 12, 16, 16)
             weather_shape_raw = (self.num_nodes, 10, 8)
             threat_shape = (self.num_nodes, 6)
@@ -190,6 +191,7 @@ class CascadePredictor:
             therm_shape = (self.num_nodes, 1, 32, 32)
             sensor_shape = (self.num_nodes, 12)
             
+            # Edge attributes
             edge_attr_data = sequence[-1].get('edge_attr')
             if edge_attr_data is None: edge_attr_data = scenario.get('edge_attr')
             
@@ -200,13 +202,19 @@ class CascadePredictor:
             elif edge_attr_data.shape != edge_shape: edge_attr = np.zeros(edge_shape, dtype=np.float32)
             else: edge_attr = edge_attr_data.astype(np.float32)
 
-            satellite_sequence = np.stack([safe_get_or_default(ts, 'satellite_data', sat_shape) for ts in sequence])
-            weather_sequence_raw = np.stack([safe_get_or_default(ts, 'weather_sequence', weather_shape_raw) for ts in sequence])
-            weather_sequence = weather_sequence_raw.reshape(weather_sequence_raw.shape[0], self.num_nodes, -1)
-            threat_sequence = np.stack([safe_get_or_default(ts, 'threat_indicators', threat_shape) for ts in sequence])
-            
+            # Initialize Lists
+            satellite_sequence = [] # Changed from np.stack for consistency
+            weather_sequence_raw_list = []
+            threat_sequence = []
             scada_sequence = []
+            pmu_sequence = []
+            
+            #### NEW: Initialize Mask List ####
+            edge_mask_sequence = [] 
+            ###################################
+
             for ts in sequence:
+                # --- SCADA ---
                 scada_data_raw = safe_get_or_default(ts, 'scada_data', (self.num_nodes, 15)) 
                 if scada_data_raw.shape[1] >= 13: scada_data = scada_data_raw[:, :13] 
                 else: scada_data = np.zeros(scada_shape, dtype=np.float32)
@@ -217,22 +225,58 @@ class CascadePredictor:
                     scada_data[:, 4] = self._normalize_power(scada_data[:, 4])
                     scada_data[:, 5] = self._normalize_power(scada_data[:, 5])
                 scada_sequence.append(scada_data)
-            scada_sequence = np.stack(scada_sequence)
-            
-            pmu_sequence = []
-            for ts in sequence:
+                
+                # --- PMU ---
                 pmu_data = safe_get_or_default(ts, 'pmu_sequence', pmu_shape)
                 if pmu_data.shape[1] >= 6: pmu_data[:, 5] = self._normalize_frequency(pmu_data[:, 5])
                 pmu_sequence.append(pmu_data)
+
+                # --- Others ---
+                satellite_sequence.append(safe_get_or_default(ts, 'satellite_data', sat_shape))
+                weather_sequence_raw_list.append(safe_get_or_default(ts, 'weather_sequence', weather_shape_raw))
+                threat_sequence.append(safe_get_or_default(ts, 'threat_indicators', threat_shape))
+
+                #### NEW: DYNAMIC TOPOLOGY MASKING LOGIC ####
+                # Create default mask (all 1.0 = active)
+                current_edge_mask = np.ones(num_edges, dtype=np.float32)
+                
+                # Check history for failed nodes
+                node_status = ts.get('node_labels')
+                if node_status is not None:
+                    # Identify failed nodes (value > 0.5)
+                    failed_node_indices = np.where(node_status > 0.5)[0]
+                    
+                    if len(failed_node_indices) > 0:
+                        # Use cached numpy edge index
+                        src, dst = self.edge_index.cpu().numpy()
+                        # If src OR dst is failed, the line is effectively dead
+                        edge_failed_mask = np.isin(src, failed_node_indices) | np.isin(dst, failed_node_indices)
+                        current_edge_mask[edge_failed_mask] = 0.0
+                
+                edge_mask_sequence.append(current_edge_mask)
+                #############################################
+
+            # Stack all sequences
+            scada_sequence = np.stack(scada_sequence)
             pmu_sequence = np.stack(pmu_sequence)
+            satellite_sequence = np.stack(satellite_sequence)
+            threat_sequence = np.stack(threat_sequence)
+            
+            weather_sequence_raw = np.stack(weather_sequence_raw_list)
+            weather_sequence = weather_sequence_raw.reshape(weather_sequence_raw.shape[0], self.num_nodes, -1)
             
             equipment_sequence = np.stack([safe_get_or_default(ts, 'equipment_status', equip_shape) for ts in sequence])
             visual_sequence = np.stack([safe_get_or_default(ts, 'visual_data', vis_shape) for ts in sequence])
             thermal_sequence = np.stack([safe_get_or_default(ts, 'thermal_data', therm_shape) for ts in sequence])
             sensor_sequence = np.stack([safe_get_or_default(ts, 'sensor_data', sensor_shape) for ts in sequence])
             
+            #### NEW: Stack Mask ####
+            edge_mask_sequence = np.stack(edge_mask_sequence)
+            #########################
+            
             if edge_attr.shape[1] >= 2: edge_attr[:, 1] = self._normalize_power(edge_attr[:, 1])
 
+            # ... (Ground Truth extraction logic remains identical) ...
             ground_truth = {}
             if 'metadata' in scenario:
                 metadata = scenario['metadata']
@@ -276,6 +320,9 @@ class CascadePredictor:
                 'thermal_data': to_tensor(thermal_sequence),
                 'sensor_data': to_tensor(sensor_sequence),
                 'edge_attr': to_tensor(edge_attr),
+                #### NEW: Add mask to return dict ####
+                'edge_mask': to_tensor(edge_mask_sequence),
+                #####################################
                 'edge_index': scenario['edge_index'].long(),
                 'ground_truth': ground_truth,
                 'sequence_length': len(sequence),
@@ -287,7 +334,7 @@ class CascadePredictor:
             import traceback
             print(f"Error extracting scenario: {e}\n{traceback.format_exc()}")
             return None
-    
+            
     def predict_batch(self, batch_of_scenarios: List[Dict]) -> List[Dict]:
         if not batch_of_scenarios: return []
         ground_truths = [s.pop('ground_truth', {}) for s in batch_of_scenarios]

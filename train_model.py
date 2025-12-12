@@ -955,10 +955,10 @@ class Trainer:
             pbar.set_postfix({
                 'cF1': f"{running_metrics['cascade_f1']:.3f}",
                 'nF1': f"{running_metrics['node_f1']:.3f}",
-                'tMAE': f"{running_metrics['time_mae']:.2f}m",
+                # 'tMAE': f"{running_metrics['time_mae']:.2f}m",
                 'rMSE': f"{running_metrics['risk_mse']:.3f}",
                 'pL': f"{loss_components.get('prediction', 0):.3f}",
-                'tL': f"{loss_components.get('timing', 0):.3f}",
+                #'tL': f"{loss_components.get('timing', 0):.3f}",
             })
             
 
@@ -1208,8 +1208,8 @@ class Trainer:
             print(f"    Node F1:    {val_metrics['node_f1']:.4f} (Thresh: {val_metrics['best_node_thresh']:.2f})")
             print(f"    Node Prec:  {val_metrics['node_precision']:.4f} | Node Rec: {val_metrics['node_recall']:.4f}")
             
-            print(f"\n  CAUSAL PATH METRICS:")
-            print(f"    Timing Loss:       Train {train_metrics['timing_loss']:.4f} | Val {val_metrics['timing_loss']:.4f}")
+            # print(f"\n  CAUSAL PATH METRICS:")
+            # print(f"    Timing Loss:       Train {train_metrics['timing_loss']:.4f} | Val {val_metrics['timing_loss']:.4f}")
                   
             # ====================================================================
             # --- MODIFICATION: SAVE BEST MODEL BASED ON VAL LOSS ---
