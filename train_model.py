@@ -46,7 +46,7 @@ class PhysicsInformedLoss(nn.Module):
                  lambda_reactive: float = 0.1, 
                  lambda_risk: float = 0.2,
                  lambda_timing: float = 0.1,
-                 pos_weight: float = 10.0, focal_alpha: float = 0.25, focal_gamma: float = 2.0,
+                 pos_weight: float = 1.0, focal_alpha: float = 0.25, focal_gamma: float = 2.0,
                  label_smoothing: float = 0.15, use_logits: bool = False,
                  base_mva: float = 100.0, base_freq: float = 60.0):
         super(PhysicsInformedLoss, self).__init__()
@@ -391,7 +391,7 @@ class Trainer:
         train_loader: DataLoader,
         val_loader: DataLoader,
         device: torch.device,
-        learning_rate: float = 0.003,
+        learning_rate: float = 0.0001,
         output_dir: str = "checkpoints",
         max_grad_norm: float = 5.0,
         use_amp: bool = False,
@@ -503,12 +503,12 @@ class Trainer:
             lambda_frequency=final_lambdas['lambda_frequency'],
             lambda_reactive=final_lambdas['lambda_reactive'],
             lambda_risk=final_lambdas['lambda_risk'],
-            lambda_timing=10,
+            lambda_timing=final_lambdas['lambda_timing'],
             
-            pos_weight=10.0, 
-            focal_alpha=0.25,
-            focal_gamma=1,
-            label_smoothing=0.05,
+            pos_weight=1.0, 
+            focal_alpha=0.5,
+            focal_gamma=2,
+            label_smoothing=0.0,
             use_logits=model_outputs_logits,
             base_mva=self.base_mva,
             base_freq=self.base_freq
@@ -1160,37 +1160,47 @@ class Trainer:
             print(f"    Timing Loss:       Train {train_metrics['timing_loss']:.4f} | Val {val_metrics['timing_loss']:.4f}")
                   
             # ====================================================================
-            # --- MODIFICATION: SAVE BEST MODEL BASED ON TIMING LOSS ---
+            # --- MODIFICATION: SAVE BEST MODEL BASED ON VAL LOSS ---
             # ====================================================================
             
-            # current_val_loss = val_metrics['loss']
-            # if current_val_loss < self.best_val_loss:
-            #     self.best_val_loss = current_val_loss
-            #     patience_counter = 0
-            #     ...
-            #     print(f"  ✓ Saved best model (New best Val Loss: {current_val_loss:.4f})")
-            
-            # --- NEW SAVING LOGIC (YOUR REQUEST) ---
-            current_timing_loss = val_metrics['timing_loss']
-            
-            if current_timing_loss < self.best_val_timing_loss:
-                self.best_val_timing_loss = current_timing_loss
+            if val_metrics['loss'] < self.best_val_loss:
+                self.best_val_loss = val_metrics['loss']
                 patience_counter = 0
-                
+
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'val_loss': val_metrics['loss'],
-                    'val_timing_loss': current_timing_loss, # Save the new best score
+                    'val_timing_loss': val_metrics['timing_loss'], 
                     
                     'cascade_threshold': float(val_metrics['best_cascade_thresh']),
                     'node_threshold': float(val_metrics['best_node_thresh']),
                     
                     'history': self.history
                 }, f"{self.output_dir}/best_model.pth")
+                print(f"  ✓ Saved best model (New best Val Loss: {val_metrics['loss']:.4f})")
+            
+            # --- NEW SAVING LOGIC  ---
+            
+            # if val_metrics['timing_loss'] < self.best_val_timing_loss:
+            #     self.best_val_timing_loss = val_metrics['timing_loss']
+            #     patience_counter = 0
                 
-                print(f"  ✓ Saved best model (New best Timing Loss: {current_timing_loss:.4f})")
+            #     torch.save({
+            #         'epoch': epoch,
+            #         'model_state_dict': self.model.state_dict(),
+            #         'optimizer_state_dict': self.optimizer.state_dict(),
+            #         'val_loss': val_metrics['loss'],
+            #         'val_timing_loss': val_metrics['timing_loss'], # Save the new best score
+                    
+            #         'cascade_threshold': float(val_metrics['best_cascade_thresh']),
+            #         'node_threshold': float(val_metrics['best_node_thresh']),
+                    
+            #         'history': self.history
+            #     }, f"{self.output_dir}/best_model.pth")
+                
+            #     print(f"  ✓ Saved best model (New best Timing Loss: {val_metrics['timing_loss']:.4f})")
                 
             else:
                 patience_counter += 1
@@ -1338,13 +1348,13 @@ if __name__ == "__main__":
                         help="Root directory containing train/val/test data folders")
     parser.add_argument('--output_dir', type=str, default="checkpoints", 
                         help="Directory to save checkpoints and logs")
-    parser.add_argument('--epochs', type=int, default=200, 
+    parser.add_argument('--epochs', type=int, default=100, 
                         help="Number of epochs to train")
     parser.add_argument('--batch_size', type=int, default=4, 
                         help="Training and validation batch size")
     parser.add_argument('--lr', type=float, default=0.0001, 
                         help="Initial learning rate")
-    parser.add_argument('--grad_clip', type=float, default=10.0, 
+    parser.add_argument('--grad_clip', type=float, default=1.0, 
                         help="Max gradient norm for clipping")
     parser.add_argument('--patience', type=int, default=10, 
                         help="Epochs for early stopping patience")

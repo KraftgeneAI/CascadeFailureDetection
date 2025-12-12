@@ -873,9 +873,9 @@ class PhysicsBasedGridSimulator:
         
         base_threat = stress_level * 0.2
         threat_indicators += base_threat
-        
+        precursor_duration = np.random.randint(8, 20)
         if timestep >= cascade_start - 15:
-            precursor_strength = 1.0 - (cascade_start - timestep) / 15.0
+            precursor_strength = 1.0 - (cascade_start - timestep) / precursor_duration
             precursor_strength = max(0, precursor_strength)
             
             if failed_nodes:
@@ -983,8 +983,9 @@ class PhysicsBasedGridSimulator:
             
             sensor_data[node_idx, 11] = (1.0 - self.equipment_condition[node_idx]) * 0.5 + np.random.randn() * 0.1
         
+        precursor_duration = np.random.randint(8, 20)
         if timestep >= cascade_start - 10:
-            precursor_strength = 1.0 - (cascade_start - timestep) / 10.0
+            precursor_strength = 1.0 - (cascade_start - timestep) / precursor_duration
             precursor_strength = max(0, precursor_strength)
             
             for node in failed_nodes:
@@ -1586,7 +1587,7 @@ def main():
     # ====================================================================
     
     parser.add_argument('--grid-size', type=int, default=118, help='Number of nodes in grid')
-    parser.add_argument('--sequence-length', type=int, default=60, help='Sequence length (timesteps)')
+    parser.add_argument('--sequence-length', type=int, default=30, help='Sequence length (timesteps)')
     parser.add_argument('--batch-size', type=int, default=1, help='Number of scenarios to save in each .pkl file')
     parser.add_argument('--output-dir', type=str, default='data', help='Output directory')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
