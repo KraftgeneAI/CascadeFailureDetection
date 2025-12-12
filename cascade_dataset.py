@@ -221,6 +221,7 @@ class CascadeDataset(Dataset):
         sensor_seq = []
         pmu_seq = []
         equipment_seq = []
+        edge_mask_seq = [] # <--- NEW: Init mask list
         
         last_step = sequence[-1] # Use last step of the *truncated* sequence
         
@@ -299,6 +300,33 @@ class CascadeDataset(Dataset):
             thermal_seq.append(to_tensor(safe_get(ts, 'thermal_data', np.zeros(therm_shape))))
             sensor_seq.append(to_tensor(safe_get(ts, 'sensor_data', np.zeros(sensor_shape))))
             equipment_seq.append(to_tensor(safe_get(ts, 'equipment_status', np.zeros(equip_shape))))
+
+            # ====================================================================
+            # START: DYNAMIC TOPOLOGY MASK INFERENCE (NEW)
+            # ====================================================================
+            # 1. Get current node labels (1.0 = failed, 0.0 = ok)
+            node_status = safe_get(ts, 'node_labels', np.zeros(num_nodes))
+            failed_node_indices = np.where(node_status > 0.5)[0]
+            
+            # 2. Create Mask (Default = 1.0 = Active)
+            current_edge_mask = np.ones(num_edges, dtype=np.float32)
+            
+            # 3. If nodes failed, turn off connected edges
+            if len(failed_node_indices) > 0:
+                # Ensure edge_index is numpy for this operation
+                if isinstance(edge_index, torch.Tensor):
+                    src, dst = edge_index.cpu().numpy()
+                else:
+                    src, dst = edge_index
+                
+                # Check if src OR dst is in failed_node_indices
+                edge_failed_mask = np.isin(src, failed_node_indices) | np.isin(dst, failed_node_indices)
+                current_edge_mask[edge_failed_mask] = 0.0
+            
+            edge_mask_seq.append(to_tensor(current_edge_mask))
+            # ====================================================================
+            # END: DYNAMIC TOPOLOGY MASK INFERENCE
+            # ====================================================================
             
         edge_attr = safe_get(last_step, 'edge_attr', np.zeros((num_edges, 5))).astype(np.float32)
         if edge_attr.shape[1] >= 2:
@@ -365,6 +393,7 @@ class CascadeDataset(Dataset):
             'equipment_status': torch.stack(equipment_seq),
             'edge_index': to_tensor(edge_index).long(),
             'edge_attr': edge_attr,
+            'edge_mask': torch.stack(edge_mask_seq), # <--- NEW: RETURN MASK
             'node_failure_labels': final_labels, # The *real* answer
             'cascade_timing': correct_timing_tensor, # The *real* answer (SHIFTED)
             'ground_truth_risk': to_tensor(ground_truth_risk), # The *real* answer
@@ -407,6 +436,10 @@ class CascadeDataset(Dataset):
         thermal_data = torch.randn(T, num_nodes, 1, 32, 32)
         sensor_data = torch.randn(T, num_nodes, 12)
         edge_attr = torch.randn(num_edges, 5)
+        
+        # --- NEW: Default Mask for Metadata format ---
+        edge_mask = torch.ones(T, num_edges)
+        # ---------------------------------------------
 
         edge_attr[:, 1] = self._normalize_power(edge_attr[:, 1])
         scada_data[..., 2:6] = self._normalize_power(scada_data[..., 2:6])
@@ -427,6 +460,7 @@ class CascadeDataset(Dataset):
             'equipment_status': equipment_status[0],
             'edge_index': to_tensor(edge_index).long(),
             'edge_attr': edge_attr,
+            'edge_mask': edge_mask, # <--- NEW
             'node_failure_labels': to_tensor(node_failure_labels),
             'cascade_timing': torch.zeros(num_nodes),
             'ground_truth_risk': to_tensor(ground_truth_risk),
@@ -434,7 +468,8 @@ class CascadeDataset(Dataset):
         }
         
         if self.mode == 'full_sequence':
-            for key in ['satellite_data', 'scada_data', 'weather_sequence', 'threat_indicators', 'visual_data', 'thermal_data', 'sensor_data', 'pmu_sequence', 'equipment_status']:
+            # --- NEW: Added edge_mask to unsqueeze list ---
+            for key in ['satellite_data', 'scada_data', 'weather_sequence', 'threat_indicators', 'visual_data', 'thermal_data', 'sensor_data', 'pmu_sequence', 'equipment_status', 'edge_mask']:
                 item[key] = item[key].unsqueeze(0)
             item['temporal_sequence'] = item['scada_data']
             item['sequence_length'] = 1
@@ -640,9 +675,10 @@ def collate_cascade_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor
             # ====================================================================
             # START: "COLLATION" FIX (from >= 4 to >= 3)
             # ====================================================================
+            # --- NEW: Added 'edge_mask' to this list ---
             if items[0].dim() >= 3 and key in ['satellite_data', 'visual_data', 'thermal_data', 
                                                  'scada_data', 'weather_sequence', 'threat_indicators',
-                                                 'equipment_status', 'pmu_sequence', 'sensor_data']:
+                                                 'equipment_status', 'pmu_sequence', 'sensor_data', 'edge_mask']:
             # ====================================================================
             # END: "COLLATION" FIX
             # ====================================================================

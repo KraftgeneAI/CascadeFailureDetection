@@ -19,6 +19,10 @@ Combines ALL features:
 *** - Removed hard-coded scaling (voltage, angle, frequency)
 *** - Added a dedicated head for reactive_flow.
 *** This forces the model to learn the real physics.
+
+*** IMPROVEMENT 3: DYNAMIC TOPOLOGY MASKING
+*** - Added 'edge_mask' support to GAT layers to simulate line failures
+*** - Allows "zeroing out" connections without rebuilding graph objects
 """
 
 import torch
@@ -363,7 +367,8 @@ class GraphAttentionLayer(MessagePassing):
         nn.init.zeros_(self.bias)
     
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor,
-                edge_attr: Optional[torch.Tensor] = None) -> torch.Tensor:
+                edge_attr: Optional[torch.Tensor] = None,
+                edge_mask: Optional[torch.Tensor] = None) -> torch.Tensor: # <--- Added edge_mask
         B, N, C = x.shape
         H, C_out = self.heads, self.out_channels
         
@@ -394,9 +399,18 @@ class GraphAttentionLayer(MessagePassing):
         else:
              edge_attr_propagated = edge_attr_transformed # Use as is (either [E,H,C] or None)
 
+        # --- NEW: Process Edge Mask for Batching ---
+        edge_mask_propagated = None
+        if edge_mask is not None:
+             # edge_mask comes in as [B, E]
+             # Flatten to [B*E, 1] to match the batched graph
+             edge_mask_propagated = edge_mask.reshape(-1, 1)
+        # -------------------------------------------
         
         if True:  # add_self_loops
             edge_index_batched, _ = add_self_loops(edge_index_batched, num_nodes=B * N)
+            
+            # Handle Self Loop Attributes
             if edge_attr_propagated is not None:
                 num_self_loops = B * N
                 self_loop_attr = torch.zeros(num_self_loops, H, C_out, device=edge_attr_propagated.device)
@@ -406,12 +420,21 @@ class GraphAttentionLayer(MessagePassing):
                     edge_attr_propagated = edge_attr_propagated.repeat(B, 1, 1)
 
                 edge_attr_propagated = torch.cat([edge_attr_propagated, self_loop_attr], dim=0)
+
+            # --- NEW: Handle Mask for Self Loops ---
+            if edge_mask_propagated is not None:
+                # Self loops are always "active" (1.0)
+                # We need to append B*N ones
+                mask_self_loops = torch.ones(B * N, 1, device=edge_mask.device)
+                edge_mask_propagated = torch.cat([edge_mask_propagated, mask_self_loops], dim=0)
+            # ---------------------------------------
         
         out = self.propagate(
             edge_index_batched,
             x=x_transformed,
             edge_attr=edge_attr_propagated,
-            size=(B * N, B * N)
+            size=(B * N, B * N),
+            edge_mask=edge_mask_propagated # <--- Pass mask to propagate
         )
         
         out = out.reshape(B, N, H, C_out)
@@ -427,7 +450,9 @@ class GraphAttentionLayer(MessagePassing):
     
     def message(self, x_i: torch.Tensor, x_j: torch.Tensor,
                 edge_index_i: torch.Tensor, size_i: Optional[int],
-                edge_attr: Optional[torch.Tensor] = None) -> torch.Tensor:
+                edge_attr: Optional[torch.Tensor] = None,
+                edge_mask: Optional[torch.Tensor] = None) -> torch.Tensor: # <--- Added edge_mask
+        
         alpha_src = (x_j * self.att_src).sum(dim=-1)
         alpha_dst = (x_i * self.att_dst).sum(dim=-1)
         alpha = alpha_src + alpha_dst
@@ -440,7 +465,16 @@ class GraphAttentionLayer(MessagePassing):
         alpha = softmax(alpha, edge_index_i, num_nodes=size_i)
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
         
-        return x_j * alpha.unsqueeze(-1)
+        # --- NEW: Apply Masking ---
+        msg = x_j * alpha.unsqueeze(-1)
+        
+        if edge_mask is not None:
+            # edge_mask is [Total_Edges, 1]
+            # Broadcast to [Total_Edges, Heads, Channels]
+            mask_broadcast = edge_mask.unsqueeze(1) 
+            msg = msg * mask_broadcast # Zero out messages from failed edges
+        
+        return msg
 
 
 # ============================================================================
@@ -483,10 +517,12 @@ class TemporalGNNCell(nn.Module):
     
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor,
                 edge_attr: Optional[torch.Tensor] = None,
+                edge_mask: Optional[torch.Tensor] = None, # <--- Added edge_mask
                 h_prev: Optional[Tuple[torch.Tensor, torch.Tensor]] = None) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         B, N, _ = x.shape
         
-        spatial_features = self.gat(x, edge_index, edge_attr)
+        # Pass mask to GAT
+        spatial_features = self.gat(x, edge_index, edge_attr, edge_mask=edge_mask)
         
         if self.projection is not None:
             spatial_features = self.projection(spatial_features)
@@ -914,7 +950,11 @@ class UnifiedCascadePredictionModel(nn.Module):
         # Handle unbatched edge_attr (e.g., from dataloader in single-step mode)
         if edge_attr_input.dim() == 2 and env_emb.dim() > 2: # [E, D] vs [B, N, D]
              edge_attr_input = edge_attr_input.unsqueeze(0).expand(env_emb.shape[0], -1, -1)
-
+        
+        # --- NEW: Get Mask ---
+        # If temporal, mask is [B, T, E]. If not, [B, E].
+        edge_mask_input = batch.get('edge_mask') 
+        # ---------------------
 
         if has_temporal:
             B, T, N, D = env_emb.shape
@@ -952,7 +992,14 @@ class UnifiedCascadePredictionModel(nn.Module):
             
             for t in range(T):
                 x_t = fused_sequence[:, t, :, :]  # [B, N, D]
-                h_t, lstm_state = self.temporal_gnn(x_t, batch['edge_index'], edge_embedded, lstm_state)
+                
+                # --- NEW: Slice mask for this timestep ---
+                mask_t = edge_mask_input[:, t, :] if edge_mask_input is not None else None
+                
+                # Pass to Temporal GNN
+                h_t, lstm_state = self.temporal_gnn(x_t, batch['edge_index'], edge_embedded, 
+                                                  edge_mask=mask_t, # <--- Pass here
+                                                  h_prev=lstm_state)
                 h_states.append(h_t)
             
             h = torch.stack(h_states, dim=2)  # [B, N, T, D]
@@ -977,12 +1024,18 @@ class UnifiedCascadePredictionModel(nn.Module):
             logging.debug(f"Edge embedding shape: {edge_embedded.shape}")
             
             # Single timestep processing
-            h, _ = self.temporal_gnn(fused, batch['edge_index'], edge_embedded)
+            h, _ = self.temporal_gnn(fused, batch['edge_index'], edge_embedded, edge_mask=edge_mask_input)
             logging.debug(f"Final hidden state (non-temporal) shape: {h.shape}")
+        
+        # --- NEW: Final Mask for Spatial Layers ---
+        # If input was temporal [B, T, E], use last step. If [B, E], use as is.
+        final_mask = edge_mask_input[:, -1, :] if (edge_mask_input is not None and edge_mask_input.dim() == 3) else edge_mask_input
+        # ------------------------------------------
         
         # Additional GNN layers
         for i, (gnn_layer, layer_norm) in enumerate(zip(self.gnn_layers, self.layer_norms)):
-            h_new = gnn_layer(h, batch['edge_index'], edge_embedded)
+            # Pass mask here too
+            h_new = gnn_layer(h, batch['edge_index'], edge_embedded, edge_mask=final_mask)
             h = layer_norm(h + h_new)
             logging.debug(f"Shape after GNN layer {i+1}: {h.shape}")
         

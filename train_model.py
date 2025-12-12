@@ -101,7 +101,8 @@ class PhysicsInformedLoss(nn.Module):
                               edge_index: torch.Tensor, 
                               power_injection: torch.Tensor,
                               num_nodes: int,
-                              batch_size: int) -> torch.Tensor:
+                              batch_size: int,
+                              edge_mask: torch.Tensor = None) -> torch.Tensor:
         """
         Computes power flow loss by summing the model's *predicted* line flows (P)
         at each node and comparing to the ground truth power injection.
@@ -111,6 +112,14 @@ class PhysicsInformedLoss(nn.Module):
         
         P_ij_squeezed = predicted_line_flows.squeeze(-1)  # [B, E]
         
+        # ====================================================================
+        # START: DYNAMIC TOPOLOGY MASKING
+        # ====================================================================
+        if edge_mask is not None:
+            # edge_mask is [B, E]. Zero out flows on failed lines.
+            P_ij_squeezed = P_ij_squeezed * edge_mask
+        # ====================================================================
+
         P_calc_flat = torch.zeros(batch_size * num_nodes, device=predicted_line_flows.device)
         
         batch_offset = torch.arange(0, batch_size, device=predicted_line_flows.device) * num_nodes
@@ -166,7 +175,8 @@ class PhysicsInformedLoss(nn.Module):
                                  edge_index: torch.Tensor, 
                                  reactive_injection: torch.Tensor,
                                  num_nodes: int,
-                                 batch_size: int) -> torch.Tensor:
+                                 batch_size: int,
+                                 edge_mask: torch.Tensor = None) -> torch.Tensor:
         """
         Computes reactive power flow loss by summing the model's *predicted* reactive flows (Q)
         """
@@ -174,7 +184,12 @@ class PhysicsInformedLoss(nn.Module):
         num_edges = edge_index.shape[1]
         
         Q_ij_squeezed = predicted_reactive_flows.squeeze(-1)  # [B, E]
-        
+        # ====================================================================
+        # START: DYNAMIC TOPOLOGY MASKING
+        # ====================================================================
+        if edge_mask is not None:
+             Q_ij_squeezed = Q_ij_squeezed * edge_mask
+        # ====================================================================
         Q_calc_flat = torch.zeros(batch_size * num_nodes, device=predicted_reactive_flows.device)
         
         batch_offset = torch.arange(0, batch_size, device=predicted_reactive_flows.device) * num_nodes
@@ -257,7 +272,8 @@ class PhysicsInformedLoss(nn.Module):
     # --- Merged Forward Pass ---
     def forward(self, predictions: Dict[str, torch.Tensor],
                 targets: Dict[str, torch.Tensor],
-                graph_properties: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
+                graph_properties: Dict[str, torch.Tensor], 
+                edge_mask=None) -> Tuple[torch.Tensor, Dict[str, float]]:
         
         predictions_fp32 = {}
         for k, v in predictions.items():
@@ -301,7 +317,8 @@ class PhysicsInformedLoss(nn.Module):
                 edge_index=graph_properties['edge_index'],
                 power_injection=get_prop('power_injection'),
                 num_nodes=N,
-                batch_size=B
+                batch_size=B,
+                edge_mask=edge_mask
             )
             L_powerflow = torch.clamp(L_powerflow, 0.0, 10.0) 
             total_loss += self.lambda_powerflow * L_powerflow
@@ -333,7 +350,8 @@ class PhysicsInformedLoss(nn.Module):
                 edge_index=graph_properties['edge_index'],
                 reactive_injection=get_prop('reactive_injection'),
                 num_nodes=N,
-                batch_size=B
+                batch_size=B,
+                edge_mask=edge_mask
             )
             L_reactive = torch.clamp(L_reactive, 0.0, 10.0)
             total_loss += self.lambda_reactive * L_reactive
@@ -503,7 +521,7 @@ class Trainer:
             lambda_frequency=final_lambdas['lambda_frequency'],
             lambda_reactive=final_lambdas['lambda_reactive'],
             lambda_risk=final_lambdas['lambda_risk'],
-            lambda_timing=final_lambdas['lambda_timing'],
+            lambda_timing=0.0,
             
             pos_weight=1.0, 
             focal_alpha=0.5,
@@ -585,10 +603,18 @@ class Trainer:
                     'cascade_timing': batch_device.get('cascade_timing')
                 }
 
+                # === ADD THIS BLOCK ===
+                edge_mask = batch_device.get('edge_mask')
+                if edge_mask is not None and edge_mask.dim() == 3:
+                     # Take the last timestep to match the model's prediction
+                    edge_mask = edge_mask[:, -1, :] 
+                # ======================
+
                 _, loss_components = dummy_criterion(
                     outputs, 
                     targets,
-                    graph_properties
+                    graph_properties,
+                    edge_mask=edge_mask
                 )
                 
                 for key, val in loss_components.items():
@@ -860,10 +886,19 @@ class Trainer:
                         self._validate_model_outputs(outputs, batch_device)
                         self._model_validated = True
                     
+                    # ========================================================
+                    # START: EXTRACT EDGE MASK (Same for non-AMP block)
+                    # ========================================================
+                    edge_mask = batch_device.get('edge_mask')
+                    if edge_mask is not None and edge_mask.dim() == 3:
+                        edge_mask = edge_mask[:, -1, :]
+                    # ========================================================
+
                     loss, loss_components = self.criterion(
                         outputs, 
                         targets,
-                        graph_properties
+                        graph_properties,
+                        edge_mask=edge_mask
                     )
                 
                 self.scaler.scale(loss).backward()
@@ -879,10 +914,19 @@ class Trainer:
                     self._validate_model_outputs(outputs, batch_device)
                     self._model_validated = True
                 
+                # ========================================================
+                # START: EXTRACT EDGE MASK (Same for non-AMP block)
+                # ========================================================
+                edge_mask = batch_device.get('edge_mask')
+                if edge_mask is not None and edge_mask.dim() == 3:
+                    edge_mask = edge_mask[:, -1, :]
+                # ========================================================
+
                 loss, loss_components = self.criterion(
                     outputs, 
                     targets,
-                    graph_properties
+                    graph_properties,
+                    edge_mask=edge_mask
                 )
                 
                 loss.backward()
@@ -983,7 +1027,15 @@ class Trainer:
                     'cascade_timing': batch_device.get('cascade_timing')
                 }
                 
-                loss, loss_components = self.criterion(outputs, targets, graph_properties)
+                # ========================================================
+                # START: EXTRACT EDGE MASK
+                # ========================================================
+                edge_mask = batch_device.get('edge_mask')
+                if edge_mask is not None and edge_mask.dim() == 3:
+                    edge_mask = edge_mask[:, -1, :]
+                # ========================================================
+
+                loss, loss_components = self.criterion(outputs, targets, graph_properties, edge_mask=edge_mask)
                 total_loss += loss.item()
                 total_timing_loss_sum += loss_components.get('timing', 0.0)
                 
