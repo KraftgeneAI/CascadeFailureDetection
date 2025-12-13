@@ -8,5 +8,7 @@
 !*.txt
 !*.pth
 
+!checkpoints/
+
 # And exclude the .gitignore file itself
 !.gitignore
