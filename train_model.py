@@ -1402,7 +1402,7 @@ if __name__ == "__main__":
                         help="Directory to save checkpoints and logs")
     parser.add_argument('--epochs', type=int, default=100, 
                         help="Number of epochs to train")
-    parser.add_argument('--batch_size', type=int, default=4, 
+    parser.add_argument('--batch_size', type=int, default=8, 
                         help="Training and validation batch size")
     parser.add_argument('--lr', type=float, default=0.0001, 
                         help="Initial learning rate")
