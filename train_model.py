@@ -521,10 +521,10 @@ class Trainer:
             lambda_frequency=final_lambdas['lambda_frequency'],
             lambda_reactive=final_lambdas['lambda_reactive'],
             lambda_risk=final_lambdas['lambda_risk'],
-            lambda_timing=0.0,
+            lambda_timing=final_lambdas['lambda_timing'],
             
             pos_weight=1.0, 
-            focal_alpha=0.25,
+            focal_alpha=0.5,
             focal_gamma=3,
             label_smoothing=0.1,
             use_logits=model_outputs_logits,

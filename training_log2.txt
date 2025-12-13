@@ -1,0 +1,20 @@
+nohup: ignoring input
+================================================================================
+CASCADE FAILURE PREDICTION - TRAINING SCRIPT (IMPROVED)
+================================================================================
+
+Configuration:
+  Data directory: data
+  Output directory: checkpoints
+  Batch size: 8
+  Epochs: 100
+  Learning rate: 0.0001
+  Device: cuda
+  Gradient clipping: 5.0
+  Mixed precision: True
+  Resume training: False
+
+Loading datasets...
+Indexing scenarios from: data/train
+Physics normalization: base_mva=100.0, base_frequency=60.0
+Scanning 2700 files for cascade labels...

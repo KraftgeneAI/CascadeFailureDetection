@@ -7,6 +7,7 @@ Memory-efficient dataset loader for pre-generated cascade failure/normal data.
 - Removes "t / sequence_length" data leakage (slices to 13)
 - Removes "cascade_start_time" data leakage (does NOT pass to model)
 - Fixes ground truth timing/label loading
+- FIX: Dynamic Topology Masking now uses t-1 (prevents edge_mask leakage)
 =============================================================================
 
 Author: Kraftgene AI Inc. (R&D)
@@ -21,8 +22,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional
 import numpy as np
 import gc
-import glob # Added glob
-
+import glob
 
 class CascadeDataset(Dataset):
     """
@@ -39,7 +39,6 @@ class CascadeDataset(Dataset):
         
         self.base_mva = base_mva
         self.base_frequency = base_frequency
-        
         
         # Find all individual scenario files
         print(f"Indexing scenarios from: {data_dir}")
@@ -156,13 +155,11 @@ class CascadeDataset(Dataset):
         is_cascade = metadata.get('is_cascade', False)
         
         # Define the valid range of sequence lengths
-        # e.g., for 60 steps: min=18, max=57
         min_len = int(len(sequence_original) * 0.3) 
         
         # --- 1. Determine the END point (Truncation) ---
         if is_cascade:
             # Cascade case: End anywhere before the 5-min warning window.
-            # This creates "Short Cascade" samples that look like "Short Normal".
             hard_limit = int(cascade_start_time) - 5
             
             # Safety check to ensure we have enough data
@@ -173,7 +170,6 @@ class CascadeDataset(Dataset):
             end_idx = np.random.randint(min_len, hard_limit + 1)
         else:
             # Normal case: End anywhere, but capped to prevent "Long=Safe" leak.
-            # We cap it at the max possible length a cascade could ever be.
             global_max_cascade_len = int(len(sequence_original) * 0.85) - 5
             
             # Ensure bounds are valid
@@ -183,8 +179,6 @@ class CascadeDataset(Dataset):
             end_idx = np.random.randint(min_len, global_max_cascade_len + 1)
             
         # --- 2. Determine the START point (Sliding Window) ---
-        # This forces the model to learn translation invariance (physics, not time-index).
-        # We ensure the model gets at least 'minimum_model_length' steps.
         minimum_model_length = 10 
         max_start = end_idx - minimum_model_length
         
@@ -196,7 +190,7 @@ class CascadeDataset(Dataset):
         # --- 3. Apply the SLIDING WINDOW Slice ---
         sequence = sequence_original[start_idx : end_idx]
         
-        # Fallback for empty sequences (should not happen with logic above)
+        # Fallback for empty sequences
         if len(sequence) == 0:
              sequence = sequence_original[:min_len]
              start_idx = 0
@@ -221,7 +215,7 @@ class CascadeDataset(Dataset):
         sensor_seq = []
         pmu_seq = []
         equipment_seq = []
-        edge_mask_seq = [] # <--- NEW: Init mask list
+        edge_mask_seq = [] 
         
         last_step = sequence[-1] # Use last step of the *truncated* sequence
         
@@ -238,15 +232,8 @@ class CascadeDataset(Dataset):
                 return default_val
             return data
 
-        # ====================================================================
-        # START: "DATA LEAKAGE" FIX (Set default to 13)
-        # ====================================================================
         # Check the shape of the last step to determine feature count
         scada_shape = (last_step.get('scada_data', np.zeros((118,13))).shape[0], 13)
-        # ====================================================================
-        # END: "DATA LEAKAGE" FIX
-        # ====================================================================
-        
         num_nodes = scada_shape[0]
         num_edges = edge_index.shape[1]
         
@@ -261,7 +248,7 @@ class CascadeDataset(Dataset):
         label_shape = last_step.get('node_labels', np.zeros(num_nodes)).shape
         timing_shape = last_step.get('cascade_timing', np.zeros(num_nodes)).shape
 
-        for ts in sequence: # Loop over the *sliced* sequence
+        for i, ts in enumerate(sequence): # Loop over the *sliced* sequence
             # Use 15-col default for safe_get to load old data
             scada_data_raw = safe_get(ts, 'scada_data', np.zeros((num_nodes, 15))).astype(np.float32)
             
@@ -271,17 +258,11 @@ class CascadeDataset(Dataset):
                 scada_data_raw[:, 4] = self._normalize_power(scada_data_raw[:, 4]) # load_values
                 scada_data_raw[:, 5] = self._normalize_power(scada_data_raw[:, 5]) # reactive_load
             
-            # ====================================================================
-            # START: "DATA LEAKAGE" FIX (Time + Stress)
-            # ====================================================================
             # Slice off the "cheat" features (time and stress) if present
             if scada_data_raw.shape[1] > 13:
                 scada_data = scada_data_raw[:, :13]
             else:
                 scada_data = scada_data_raw
-            # ====================================================================
-            # END: "DATA LEAKAGE" FIX
-            # ====================================================================
             
             scada_seq.append(to_tensor(scada_data))
             
@@ -302,17 +283,24 @@ class CascadeDataset(Dataset):
             equipment_seq.append(to_tensor(safe_get(ts, 'equipment_status', np.zeros(equip_shape))))
 
             # ====================================================================
-            # START: DYNAMIC TOPOLOGY MASK INFERENCE (NEW)
+            # START: DYNAMIC TOPOLOGY MASKING (FIXED: Uses PREVIOUS t-1)
             # ====================================================================
-            # 1. Get current node labels (1.0 = failed, 0.0 = ok)
-            node_status = safe_get(ts, 'node_labels', np.zeros(num_nodes))
-            failed_node_indices = np.where(node_status > 0.5)[0]
+            # Calculate the global index to look up the PAST
+            global_idx = start_idx + i
             
-            # 2. Create Mask (Default = 1.0 = Active)
+            prev_failed_node_indices = []
+            
+            # Only look for failures if we are past the first step of the simulation
+            if global_idx > 0:
+                prev_ts = sequence_original[global_idx - 1]
+                prev_status = safe_get(prev_ts, 'node_labels', np.zeros(num_nodes))
+                prev_failed_node_indices = np.where(prev_status > 0.5)[0]
+            
+            # Create Mask (Default = 1.0 = Active)
             current_edge_mask = np.ones(num_edges, dtype=np.float32)
             
-            # 3. If nodes failed, turn off connected edges
-            if len(failed_node_indices) > 0:
+            # If nodes failed in the PAST, turn off connected edges NOW
+            if len(prev_failed_node_indices) > 0:
                 # Ensure edge_index is numpy for this operation
                 if isinstance(edge_index, torch.Tensor):
                     src, dst = edge_index.cpu().numpy()
@@ -320,12 +308,12 @@ class CascadeDataset(Dataset):
                     src, dst = edge_index
                 
                 # Check if src OR dst is in failed_node_indices
-                edge_failed_mask = np.isin(src, failed_node_indices) | np.isin(dst, failed_node_indices)
+                edge_failed_mask = np.isin(src, prev_failed_node_indices) | np.isin(dst, prev_failed_node_indices)
                 current_edge_mask[edge_failed_mask] = 0.0
             
             edge_mask_seq.append(to_tensor(current_edge_mask))
             # ====================================================================
-            # END: DYNAMIC TOPOLOGY MASK INFERENCE
+            # END: DYNAMIC TOPOLOGY MASKING
             # ====================================================================
             
         edge_attr = safe_get(last_step, 'edge_attr', np.zeros((num_edges, 5))).astype(np.float32)
@@ -367,10 +355,6 @@ class CascadeDataset(Dataset):
         # ====================================================================
         # START: DATA AUGMENTATION (Input Noise)
         # ====================================================================
-        # Only add noise if this is the TRAINING set to prevent overfitting.
-        # We check self.mode (which you pass as 'full_sequence' usually), 
-        # so we might need to check the folder path or add a flag.
-        # Assuming you separate datasets by folder:
         is_training = 'train' in str(self.data_dir)
         
         scada_tensor = torch.stack(scada_seq)
@@ -383,7 +367,7 @@ class CascadeDataset(Dataset):
 
         return {
             'satellite_data': torch.stack(satellite_seq),
-            'scada_data': scada_tensor, # <--- USE THE NOISY TENSOR
+            'scada_data': scada_tensor, 
             'weather_sequence': torch.stack(weather_seq),
             'threat_indicators': torch.stack(threat_seq),
             'visual_data': torch.stack(visual_seq),
@@ -393,13 +377,13 @@ class CascadeDataset(Dataset):
             'equipment_status': torch.stack(equipment_seq),
             'edge_index': to_tensor(edge_index).long(),
             'edge_attr': edge_attr,
-            'edge_mask': torch.stack(edge_mask_seq), # <--- NEW: RETURN MASK
-            'node_failure_labels': final_labels, # The *real* answer
-            'cascade_timing': correct_timing_tensor, # The *real* answer (SHIFTED)
-            'ground_truth_risk': to_tensor(ground_truth_risk), # The *real* answer
+            'edge_mask': torch.stack(edge_mask_seq), # <--- RETURN FIXED MASK
+            'node_failure_labels': final_labels,
+            'cascade_timing': correct_timing_tensor,
+            'ground_truth_risk': to_tensor(ground_truth_risk),
             'graph_properties': self._extract_graph_properties(last_step, metadata, edge_attr),
             'temporal_sequence': torch.stack(scada_seq),
-            'sequence_length': len(sequence) # The *truncated* length
+            'sequence_length': len(sequence)
         }
     
     def _process_metadata_format(self, scenario: Dict) -> Dict[str, Any]:
@@ -678,8 +662,8 @@ def collate_cascade_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor
             # --- NEW: Added 'edge_mask' to this list ---
             # Allow edge_mask (dim 2) or standard data (dim 3+) to enter the padding block
             if (items[0].dim() >= 3 or key == 'edge_mask') and key in ['satellite_data', 'visual_data', 'thermal_data', 
-                                                'scada_data', 'weather_sequence', 'threat_indicators',
-                                                'equipment_status', 'pmu_sequence', 'sensor_data', 'edge_mask']:
+                                                                'scada_data', 'weather_sequence', 'threat_indicators',
+                                                                'equipment_status', 'pmu_sequence', 'sensor_data', 'edge_mask']:
             # ====================================================================
             # END: "COLLATION" FIX
             # ====================================================================
