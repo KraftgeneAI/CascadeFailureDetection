@@ -524,9 +524,9 @@ class Trainer:
             lambda_timing=0.0,
             
             pos_weight=1.0, 
-            focal_alpha=0.5,
-            focal_gamma=2,
-            label_smoothing=0.0,
+            focal_alpha=0.25,
+            focal_gamma=3,
+            label_smoothing=0.1,
             use_logits=model_outputs_logits,
             base_mva=self.base_mva,
             base_freq=self.base_freq
@@ -1406,7 +1406,7 @@ if __name__ == "__main__":
                         help="Training and validation batch size")
     parser.add_argument('--lr', type=float, default=0.0001, 
                         help="Initial learning rate")
-    parser.add_argument('--grad_clip', type=float, default=1.0, 
+    parser.add_argument('--grad_clip', type=float, default=5.0, 
                         help="Max gradient norm for clipping")
     parser.add_argument('--patience', type=int, default=10, 
                         help="Epochs for early stopping patience")
