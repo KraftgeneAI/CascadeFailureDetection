@@ -6,6 +6,7 @@
 !*.pdf
 !*.md
 !*.txt
+!*.pth
 
 # And exclude the .gitignore file itself
 !.gitignore
