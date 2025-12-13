@@ -761,7 +761,6 @@ def main():
 
         with open(args.output, 'w') as f:
             json.dump(prediction, f, indent=2, cls=NumpyEncoder)
-
-
+#123
 if __name__ == "__main__":
     main()
