@@ -32,370 +32,178 @@ except ImportError as e:
     print("Please ensure multimodal_cascade_model.py and cascade_dataset.py are in the same directory.")
     sys.exit(1)
 
-
-# ============================================================================
-# MERGED & CORRECTED PHYSICS-INFORMED FOCAL LOSS
-# ============================================================================
 class PhysicsInformedLoss(nn.Module):
     """
-    Physics-informed loss function with FOCAL LOSS for severe class imbalance.
+    MIRROR LOSS: Perfectly aligned with multimodal_data_generator.py logic.
+    Replaces "Textbook Physics" with "Generator Heuristics".
+    FIXED: Uses 'susceptance' directly from graph_properties to avoid NoneType error.
     """
     
-    def __init__(self, lambda_powerflow: float = 0.1, lambda_temperature: float = 0.1,
-                 lambda_stability: float = 0.001, lambda_frequency: float = 0.1,
-                 lambda_reactive: float = 0.1, 
-                 lambda_risk: float = 0.2,
-                 lambda_timing: float = 0.1,
-                 pos_weight: float = 1.0, focal_alpha: float = 0.25, focal_gamma: float = 2.0,
-                 label_smoothing: float = 0.15, use_logits: bool = False,
-                 base_mva: float = 100.0, base_freq: float = 60.0):
-        super(PhysicsInformedLoss, self).__init__()
+    def __init__(self, lambda_flow=0.05, lambda_risk=0.1, lambda_timing=0.1, 
+                 pos_weight=1.0, focal_alpha=0.25, focal_gamma=2.0, 
+                 label_smoothing=0.0, **kwargs):
+        super().__init__()
+        # We only need explicit physics lambdas for the consistency check (Rule 1).
+        # The others (V, Theta, F, T) are supervised tasks learned from data.
+        self.lambdas = {
+            'flow_consistency': lambda_flow, # Enforces Rule 1
+            'risk': lambda_risk,
+            'timing': lambda_timing
+        }
         
-        self.lambda_powerflow = lambda_powerflow
-        self.lambda_temperature = lambda_temperature
-        self.lambda_stability = lambda_stability
-        self.lambda_frequency = lambda_frequency
-        self.lambda_reactive = lambda_reactive 
-        self.lambda_risk = lambda_risk
-        self.lambda_timing = lambda_timing
-        
+        # Classification Loss Settings
         self.pos_weight = pos_weight
         self.focal_alpha = focal_alpha
         self.focal_gamma = focal_gamma
         self.label_smoothing = label_smoothing
-        self.use_logits = use_logits
-        
-        self._warned_missing_outputs = set()
-        
-        self.power_base = base_mva
-        self.freq_nominal = base_freq
 
-    def focal_loss(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """
-        Focal loss with label smoothing and POS_WEIGHT for handling severe class imbalance.
-        """
-        targets_smooth = targets * (1 - self.label_smoothing) + self.label_smoothing * 0.5
-        
-        weight = torch.ones_like(logits)
-        if self.pos_weight != 1.0:
-            weight[targets > 0.5] = self.pos_weight
-        
-        bce_loss = F.binary_cross_entropy_with_logits(
-            logits, 
-            targets_smooth, 
-            reduction='none'
-        )
-        
-        bce_loss = bce_loss * weight
-
+    def focal_loss(self, logits, targets):
+        # Standard Focal Loss implementation
+        bce_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
         probs = torch.sigmoid(logits)
-        
         p_t = probs * targets + (1 - probs) * (1 - targets)
         alpha_t = self.focal_alpha * targets + (1 - self.focal_alpha) * (1 - targets)
-        focal_weight = alpha_t * (1 - p_t) ** self.focal_gamma
-        focal_loss = focal_weight * bce_loss
-        
-        return focal_loss.mean()
+        loss = alpha_t * (1 - p_t) ** self.focal_gamma * bce_loss
+        return loss.mean()
 
-    def power_flow_loss(self, predicted_line_flows: torch.Tensor, 
-                              edge_index: torch.Tensor, 
-                              power_injection: torch.Tensor,
-                              num_nodes: int,
-                              batch_size: int,
-                              edge_mask: torch.Tensor = None) -> torch.Tensor:
+    def flow_consistency_loss(self, predicted_flows, angles, edge_index, susceptance, edge_mask=None):
         """
-        Computes power flow loss by summing the model's *predicted* line flows (P)
-        at each node and comparing to the ground truth power injection.
+        Forces Line Flow Head to match: 100 * B * sin(theta_i - theta_j)
+        This connects Angle Head -> Flow Head.
         """
         src, dst = edge_index
-        num_edges = edge_index.shape[1]
         
-        P_ij_squeezed = predicted_line_flows.squeeze(-1)  # [B, E]
+        # Ensure susceptance is [B, E, 1]
+        # It comes from graph_properties as [B, E] (collated) or [E] (unbatched)
+        if susceptance.dim() == 2: # [B, E]
+            susceptance = susceptance.unsqueeze(-1)
+        elif susceptance.dim() == 1: # [E]
+            susceptance = susceptance.unsqueeze(0).unsqueeze(-1)
+            
+        # 2. Calculate Angle Difference
+        theta_src = angles[:, src, :]
+        theta_dst = angles[:, dst, :]
+        theta_diff = theta_src - theta_dst
         
-        # ====================================================================
-        # START: DYNAMIC TOPOLOGY MASKING
-        # ====================================================================
+        # 3. GENERATOR FORMULA (Found in multimodal_data_generator.py)
+        # line_flows = susceptance * sin(angle_diff) * 100.0
+        target_flow_physics = susceptance * torch.sin(theta_diff) * 100.0
+        
+        # 4. Apply Mask (Ignore failed lines)
         if edge_mask is not None:
-            # edge_mask is [B, E]. Zero out flows on failed lines.
-            P_ij_squeezed = P_ij_squeezed * edge_mask
-        # ====================================================================
-
-        P_calc_flat = torch.zeros(batch_size * num_nodes, device=predicted_line_flows.device)
-        
-        batch_offset = torch.arange(0, batch_size, device=predicted_line_flows.device) * num_nodes
-        src_flat = src.repeat(batch_size) + batch_offset.repeat_interleave(num_edges)
-        dst_flat = dst.repeat(batch_size) + batch_offset.repeat_interleave(num_edges)
-        
-        P_ij_flat = P_ij_squeezed.flatten() # [B*E]
-        
-        P_calc_flat.index_add_(0, src_flat, P_ij_flat)
-        P_calc_flat.index_add_(0, dst_flat, -P_ij_flat)
-        
-        P_calc = P_calc_flat.reshape(batch_size, num_nodes, 1)
-        
-        if power_injection.dim() == 2:
-            power_injection = power_injection.unsqueeze(-1)
+            mask = edge_mask.unsqueeze(-1)
+            target_flow_physics = target_flow_physics * mask
+            predicted_flows = predicted_flows * mask
             
-        return F.mse_loss(P_calc, power_injection)
+        # 5. Consistency Loss
+        # FIX: Use Smooth L1 Loss (Huber Loss). 
+        # It handles the "Scale 100" large errors linearly (like MAE) without exploding.
+        # It handles small errors quadratically (like MSE) for precision.
+        return F.smooth_l1_loss(predicted_flows, target_flow_physics.detach(), beta=1.0)
 
-    def temperature_loss(self, predicted_temp: torch.Tensor, ground_truth_temp: torch.Tensor) -> torch.Tensor:
-        """
-        Forces the model to learn the actual ground truth temperature.
-        FIX: We scale both prediction and target by 100
-        """
-        predicted_temp_scaled = predicted_temp.squeeze(-1) / 100.0
-        ground_truth_temp_scaled = ground_truth_temp / 100.0
-        scaled_mse_loss = F.mse_loss(predicted_temp_scaled, ground_truth_temp_scaled)
-        
-        return scaled_mse_loss
+    def temperature_loss(self, predicted_temp, ground_truth_temp):
+        """Supervised learning for Temperature (Rule 5)"""
+        # Scale down for numerical stability (100.0 is approx max temp)
+        return F.mse_loss(predicted_temp.squeeze(-1) / 100.0, ground_truth_temp / 100.0)
 
-    def voltage_stability_loss(self, voltages: torch.Tensor,
-                              voltage_min: float = 0.9, voltage_max: float = 1.1) -> torch.Tensor:
+    def frequency_loss(self, predicted_freq, power_injection):
         """
-        Compute voltage stability constraint violations.
+        Forces Frequency to respond to Power Imbalance (Gen - Load).
         """
-        low_violations = F.relu(voltage_min - voltages)
-        high_violations = F.relu(voltages - voltage_max)
-        return torch.mean(low_violations ** 2 + high_violations ** 2)
+        imbalance = torch.sum(power_injection, dim=1) # [B, 1] or [B]
+        target_freq_dev = imbalance / 10.0 
+        target_freq = 1.0 + target_freq_dev.view(-1, 1, 1)
+        
+        # Normalize predicted frequency (assuming it outputs Hz)
+        pred_freq_pu = predicted_freq / 60.0
+        
+        return F.mse_loss(pred_freq_pu, target_freq)
 
-    def frequency_loss(self, predicted_freq_Hz: torch.Tensor, 
-                       power_injection_pu: torch.Tensor,
-                       nominal_freq_Hz: float = 60.0,
-                       total_inertia_H: float = 5.0) -> torch.Tensor:
-        """
-        Compute REAL physics-based frequency loss using the swing equation.
-        """
-        predicted_freq_pu = predicted_freq_Hz / nominal_freq_Hz
-        system_power_imbalance_pu = torch.sum(power_injection_pu, dim=1)
-        expected_freq_deviation_pu = system_power_imbalance_pu / (2 * total_inertia_H)
-        expected_freq_pu = 1.0 + expected_freq_deviation_pu.view(-1, 1, 1)
-        return F.mse_loss(predicted_freq_pu, expected_freq_pu)
+    def risk_loss(self, predicted_risk, target_risk):
+        """Supervised learning for Risk Score"""
+        return F.mse_loss(torch.mean(predicted_risk, dim=1), target_risk)
 
-    def reactive_power_flow_loss(self, predicted_reactive_flows: torch.Tensor, 
-                                 edge_index: torch.Tensor, 
-                                 reactive_injection: torch.Tensor,
-                                 num_nodes: int,
-                                 batch_size: int,
-                                 edge_mask: torch.Tensor = None) -> torch.Tensor:
-        """
-        Computes reactive power flow loss by summing the model's *predicted* reactive flows (Q)
-        """
-        src, dst = edge_index
-        num_edges = edge_index.shape[1]
-        
-        Q_ij_squeezed = predicted_reactive_flows.squeeze(-1)  # [B, E]
-        # ====================================================================
-        # START: DYNAMIC TOPOLOGY MASKING
-        # ====================================================================
-        if edge_mask is not None:
-             Q_ij_squeezed = Q_ij_squeezed * edge_mask
-        # ====================================================================
-        Q_calc_flat = torch.zeros(batch_size * num_nodes, device=predicted_reactive_flows.device)
-        
-        batch_offset = torch.arange(0, batch_size, device=predicted_reactive_flows.device) * num_nodes
-        src_flat = src.repeat(batch_size) + batch_offset.repeat_interleave(num_edges)
-        dst_flat = dst.repeat(batch_size) + batch_offset.repeat_interleave(num_edges)
-        
-        Q_ij_flat = Q_ij_squeezed.flatten() # [B*E]
-        
-        Q_calc_flat.index_add_(0, src_flat, Q_ij_flat)
-        Q_calc_flat.index_add_(0, dst_flat, -Q_ij_flat)
-        
-        Q_calc = Q_calc_flat.reshape(batch_size, num_nodes, 1)
-        
-        if reactive_injection.dim() == 2:
-            reactive_injection = reactive_injection.unsqueeze(-1)
-            
-        return F.mse_loss(Q_calc, reactive_injection)
-
-    def risk_loss(self, predicted_risk: torch.Tensor, target_risk: torch.Tensor) -> torch.Tensor:
-        """
-        Compute loss for the 7-D risk assessment.
-        """
-        predicted_risk_agg = torch.mean(predicted_risk, dim=1) # [B, 7]
-        return F.mse_loss(predicted_risk_agg, target_risk)
-
-    # ====================================================================
-    # START: "CHEATEABLE MAE" BUG FIX
-    # Replace the old timing_loss with a new, robust "Ranking + MSE" loss
-    # ====================================================================
-    def timing_loss(self, predicted_node_timing: torch.Tensor, 
-                    target_node_timing: torch.Tensor) -> torch.Tensor:
-        """
-        Compute purely RANKING-based loss.
-        Ignores absolute time error (MSE). Focuses 100% on the order of failures.
-        """
-        predicted_node_timing_squeezed = predicted_node_timing.squeeze(-1) # [B, N]
-        batch_size = predicted_node_timing_squeezed.shape[0]
-        
-        ranking_losses = []
-        for b in range(batch_size):
-            preds = predicted_node_timing_squeezed[b]
-            targets = target_node_timing[b]
-            
-            # Get indices of nodes that actually fail
-            pos_idx = torch.where(targets >= 0)[0]
-            
-            # Need at least 2 failures to compare order
-            if len(pos_idx) < 2:
-                continue
-                
-            # Generate all pairs of failing nodes
+    def timing_loss(self, predicted, target):
+        """Ranking Loss"""
+        pred_s = predicted.squeeze(-1)
+        losses = []
+        for b in range(pred_s.shape[0]):
+            t = target[b]
+            pos_idx = torch.where(t >= 0)[0]
+            if len(pos_idx) < 2: continue
             pairs = torch.combinations(pos_idx, r=2)
-            i_indices = pairs[:, 0]
-            j_indices = pairs[:, 1]
-            
-            pred_diff = preds[i_indices] - preds[j_indices]
-            target_diff = targets[i_indices] - targets[j_indices]
-            
-            # target_sign is +1 if i fails after j, -1 if i fails before j
-            target_sign = torch.sign(target_diff)
-            
-            # Margin ranking loss: enforce correct order with a margin
-            margin = 0.1
-            sample_ranking_loss = torch.relu(margin - (pred_diff * target_sign))
-            
-            if sample_ranking_loss.numel() > 0:
-                ranking_losses.append(sample_ranking_loss.mean())
+            p_diff = pred_s[b][pairs[:,0]] - pred_s[b][pairs[:,1]]
+            t_diff = t[pairs[:,0]] - t[pairs[:,1]]
+            loss = torch.relu(0.1 - p_diff * torch.sign(t_diff))
+            if loss.numel()>0: losses.append(loss.mean())
+        return torch.stack(losses).mean() if losses else torch.tensor(0.0, device=predicted.device)
 
-        # Fallback: If no ranking pairs exist (e.g., normal cases), return 0 loss
-        if not ranking_losses:
-            return torch.tensor(0.0, device=predicted_node_timing.device)
+    def forward(self, predictions, targets, graph_properties, edge_mask=None):
+        loss_dict = {}
         
-        # Return purely the ranking loss
-        return torch.stack(ranking_losses).mean()
-    # ====================================================================
-    # END: "CHEATEABLE MAE" BUG FIX
-    # ====================================================================
+        # --- 0. PREDICTION (Focal) ---
+        failure_prob = predictions['failure_probability'].squeeze(-1)
+        
+        # Avoid log(0)
+        failure_prob_clamped = failure_prob.clamp(1e-7, 1 - 1e-7)
+        logits = torch.log(failure_prob_clamped / (1 - failure_prob_clamped))
+        
+        L_pred = self.focal_loss(logits, targets['failure_label'])
+        loss_dict['prediction'] = L_pred.item()
+        total_loss = L_pred
 
+        # Helper
+        def get_prop(key): return graph_properties.get(key)
 
-    # --- Merged Forward Pass ---
-    def forward(self, predictions: Dict[str, torch.Tensor],
-                targets: Dict[str, torch.Tensor],
-                graph_properties: Dict[str, torch.Tensor], 
-                edge_mask=None) -> Tuple[torch.Tensor, Dict[str, float]]:
-        
-        predictions_fp32 = {}
-        for k, v in predictions.items():
-            if isinstance(v, torch.Tensor):
-                predictions_fp32[k] = v.float() # Cast everything to float32
-            else:
-                predictions_fp32[k] = v
-        
-        predictions = predictions_fp32
-
-        failure_prob = predictions['failure_probability']
-        B, N, _ = failure_prob.shape
-        
-        failure_prob_flat = failure_prob.reshape(-1)
-        targets_flat = targets['failure_label'].reshape(-1)
-        
-        if self.use_logits:
-            logits = failure_prob_flat
-        else:
-            probs = failure_prob_flat.clamp(1e-7, 1 - 1e-7)
-            logits = torch.log(probs / (1 - probs))
-        
-        L_prediction = self.focal_loss(logits, targets_flat)
-        
-        loss_components = {'prediction': L_prediction.item()}
-        total_loss = L_prediction
-        
-        def get_prop(key):
-            if graph_properties and key in graph_properties:
-                return graph_properties[key]
-            if key not in self._warned_missing_outputs:
-                # print(f"Warning: {key} not in graph_properties for loss calc.")
-                self._warned_missing_outputs.add(key)
-            return None
-
-        # 1. Power Flow Loss
-        if 'line_flows' in predictions and get_prop('power_injection') is not None:
+        # --- 1. FLOW CONSISTENCY (Rule 1) ---
+        if 'line_flows' in predictions and 'angles' in predictions:
+            # FIX: Use 'susceptance' directly from graph_properties
+            susceptance = get_prop('susceptance')
             
-            L_powerflow = self.power_flow_loss(
-                predicted_line_flows=predictions['line_flows'],
-                edge_index=graph_properties['edge_index'],
-                power_injection=get_prop('power_injection'),
-                num_nodes=N,
-                batch_size=B,
-                edge_mask=edge_mask
-            )
-            L_powerflow = torch.clamp(L_powerflow, 0.0, 10.0) 
-            total_loss += self.lambda_powerflow * L_powerflow
-            loss_components['powerflow'] = L_powerflow.item()
-        
-        # 2. Temperature Loss
+            # Fallback if susceptance is missing (should not happen with CascadeDataset)
+            if susceptance is None:
+                # Try to extract from edge_attr if present
+                edge_attr = get_prop('edge_attr')
+                if edge_attr is not None:
+                     if edge_attr.dim() == 3: susceptance = edge_attr[:, :, 3]
+                     else: susceptance = edge_attr[:, 3]
+
+            if susceptance is not None:
+                L_flow = self.flow_consistency_loss(
+                    predictions['line_flows'],
+                    predictions['angles'],
+                    graph_properties['edge_index'],
+                    susceptance,
+                    edge_mask
+                )
+                total_loss += self.lambdas['flow_consistency'] * L_flow
+                loss_dict['powerflow'] = L_flow.item()
+
+        # --- 2. TEMPERATURE (Rule 5) ---
         if 'temperature' in predictions and get_prop('ground_truth_temperature') is not None:
-            L_temperature = self.temperature_loss(
-                predictions['temperature'],
-                get_prop('ground_truth_temperature')
-            )
-            # The clamp is removed because the loss is now scaled
-            total_loss += self.lambda_temperature * L_temperature
-            loss_components['temperature'] = L_temperature.item()
-            
-        # 3. Voltage Stability Loss
-        if 'voltages' in predictions:
-            L_stability = self.voltage_stability_loss(
-                voltages=predictions['voltages']
-            )
-            total_loss += self.lambda_stability * L_stability
-            loss_components['voltage'] = L_stability.item()
+            L_temp = self.temperature_loss(predictions['temperature'], get_prop('ground_truth_temperature'))
+            total_loss += 0.05 * L_temp # Fixed weight
+            loss_dict['temperature'] = L_temp.item()
 
-        # 4. Reactive Power Loss
-        if 'reactive_flows' in predictions and get_prop('reactive_injection') is not None:
-            
-            L_reactive = self.reactive_power_flow_loss(
-                predicted_reactive_flows=predictions['reactive_flows'],
-                edge_index=graph_properties['edge_index'],
-                reactive_injection=get_prop('reactive_injection'),
-                num_nodes=N,
-                batch_size=B,
-                edge_mask=edge_mask
-            )
-            L_reactive = torch.clamp(L_reactive, 0.0, 10.0)
-            total_loss += self.lambda_reactive * L_reactive
-            loss_components['reactive'] = L_reactive.item()
-        
-        # 5. Frequency Loss (PHYSICS-BASED)
+        # --- 3. FREQUENCY (Rule 4) ---
         if 'frequency' in predictions and get_prop('power_injection') is not None:
+            L_freq = self.frequency_loss(predictions['frequency'], get_prop('power_injection'))
+            total_loss += 0.05 * L_freq # Fixed weight
+            loss_dict['frequency'] = L_freq.item()
+
+        # --- 4. RISK & TIMING ---
+        if 'risk_scores' in predictions and 'ground_truth_risk' in targets:
+            L_risk = self.risk_loss(predictions['risk_scores'], targets['ground_truth_risk'])
+            total_loss += self.lambdas['risk'] * L_risk
+            loss_dict['risk'] = L_risk.item()
             
-            predicted_freq_Hz = predictions['frequency']
-            power_injection_pu = get_prop('power_injection')
-            
-            L_frequency = self.frequency_loss(
-                predicted_freq_Hz,
-                power_injection_pu,
-                nominal_freq_Hz=self.freq_nominal,
-                total_inertia_H=5.0
-            )
-            
-            L_frequency = torch.clamp(L_frequency, 0.0, 10.0)
-            total_loss += self.lambda_frequency * L_frequency
-            loss_components['frequency'] = L_frequency.item()
+        if 'cascade_timing' in predictions and 'cascade_timing' in targets:
+            L_time = self.timing_loss(predictions['cascade_timing'], targets['cascade_timing'])
+            total_loss += self.lambdas['timing'] * L_time
+            loss_dict['timing'] = L_time.item()
+
+        return total_loss, loss_dict
         
-        # 6. Risk Score Loss
-        if 'risk_scores' in predictions and 'ground_truth_risk' in targets and targets['ground_truth_risk'] is not None:
-            L_risk = self.risk_loss(
-                predicted_risk=predictions['risk_scores'],
-                target_risk=targets['ground_truth_risk']
-            )
-            total_loss += self.lambda_risk * L_risk
-            loss_components['risk'] = L_risk.item()
-
-        # 7. Timing Loss
-        if 'cascade_timing' in predictions and 'cascade_timing' in targets and targets['cascade_timing'] is not None:
-            L_timing = self.timing_loss(
-                predicted_node_timing=predictions['cascade_timing'],
-                target_node_timing=targets['cascade_timing'],
-            )
-            total_loss += self.lambda_timing * L_timing
-            loss_components['timing'] = L_timing.item()
-
-        
-        return total_loss, loss_components
-
-
 # ============================================================================
 # TRAINER CLASS
 # ============================================================================
@@ -517,16 +325,16 @@ class Trainer:
         self.criterion = PhysicsInformedLoss(
             lambda_powerflow=final_lambdas['lambda_powerflow'],
             lambda_temperature=final_lambdas['lambda_temperature'],
-            lambda_stability=final_lambdas['lambda_stability'],
+            lambda_stability=0,
             lambda_frequency=final_lambdas['lambda_frequency'],
-            lambda_reactive=final_lambdas['lambda_reactive'],
+            lambda_reactive=0,
             lambda_risk=final_lambdas['lambda_risk'],
             lambda_timing=final_lambdas['lambda_timing'],
             
             pos_weight=1.0, 
-            focal_alpha=0.5,
-            focal_gamma=3,
-            label_smoothing=0.1,
+            focal_alpha=0.35,
+            focal_gamma=3.0,
+            label_smoothing=0.0,
             use_logits=model_outputs_logits,
             base_mva=self.base_mva,
             base_freq=self.base_freq
@@ -849,7 +657,7 @@ class Trainer:
         metric_sums = {}
         total_timing_batches = 0
 
-        pbar = tqdm(self.train_loader, desc="Training", mininterval=60.0)
+        pbar = tqdm(self.train_loader, desc="Training", mininterval=240.0)
         for batch_idx, batch in enumerate(pbar):
             batch_device = {}
             for k, v in batch.items():
@@ -996,7 +804,7 @@ class Trainer:
         total_timing_batches = 0
         
         with torch.no_grad():
-            pbar = tqdm(self.val_loader, desc="Validation", mininterval=60.0)
+            pbar = tqdm(self.val_loader, desc="Validation", mininterval=240.0)
             for batch_idx, batch in enumerate(pbar):
                 # 1. Move to device
                 batch_device = {}
@@ -1406,9 +1214,9 @@ if __name__ == "__main__":
                         help="Training and validation batch size")
     parser.add_argument('--lr', type=float, default=0.0001, 
                         help="Initial learning rate")
-    parser.add_argument('--grad_clip', type=float, default=5.0, 
+    parser.add_argument('--grad_clip', type=float, default=20.0, 
                         help="Max gradient norm for clipping")
-    parser.add_argument('--patience', type=int, default=10, 
+    parser.add_argument('--patience', type=int, default=25, 
                         help="Epochs for early stopping patience")
     
     # ====================================================================

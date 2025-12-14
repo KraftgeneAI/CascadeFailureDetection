@@ -1002,8 +1002,27 @@ class UnifiedCascadePredictionModel(nn.Module):
                                                   h_prev=lstm_state)
                 h_states.append(h_t)
             
-            h = torch.stack(h_states, dim=2)  # [B, N, T, D]
-            h = h[:, :, -1, :]  # Use last timestep for predictions
+            h_stack = torch.stack(h_states, dim=2)
+            if 'sequence_length' in batch:
+                lengths = batch['sequence_length'] # [B]
+                h_final_list = []
+                
+                for b in range(B):
+                    # Get valid length for this sample
+                    # Clamp to ensure we don't go out of bounds
+                    valid_idx = lengths[b] - 1
+                    if valid_idx < 0: valid_idx = 0
+                    if valid_idx >= T: valid_idx = T - 1
+                    
+                    # Extract the hidden state at the true end of the sequence
+                    h_final_list.append(h_stack[b, :, valid_idx, :])
+                
+                # Re-stack into [B, N, D]
+                h = torch.stack(h_final_list, dim=0)
+            else:
+                # Fallback if length is missing (e.g. single step)
+                h = h_stack[:, :, -1, :]
+            
             logging.debug(f"Final hidden state (temporal) shape: {h.shape}")
 
         else:

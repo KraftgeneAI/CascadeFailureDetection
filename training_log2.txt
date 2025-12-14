@@ -10,11 +10,80 @@ Configuration:
   Epochs: 100
   Learning rate: 0.0001
   Device: cuda
-  Gradient clipping: 5.0
+  Gradient clipping: 20.0
   Mixed precision: True
-  Resume training: False
+  Resume training: True
 
 Loading datasets...
 Indexing scenarios from: data/train
+Loading labels from cache: data/train/metadata_cache.json
 Physics normalization: base_mva=100.0, base_frequency=60.0
-Scanning 2700 files for cascade labels...
+Indexed 2700 scenarios.
+  Cascade scenarios: 905 (33.5%)
+  Normal scenarios: 1795 (66.5%)
+Ultra-memory-efficient mode: Loading 1 file per sample.
+Indexing scenarios from: data/val
+Loading labels from cache: data/val/metadata_cache.json
+Physics normalization: base_mva=100.0, base_frequency=60.0
+Indexed 491 scenarios.
+  Cascade scenarios: 170 (34.6%)
+  Normal scenarios: 321 (65.4%)
+Ultra-memory-efficient mode: Loading 1 file per sample.
+  Training samples: 2700
+  Validation samples: 491
+  Mode: full_sequence (utilizing 3-layer LSTM for temporal modeling)
+
+Computing sample weights for balanced sampling...
+  Positive samples: 905 (33.5%)
+  Negative samples: 1795 (66.5%)
+  Calculated weights -> Pos: 2.98, Neg: 1.50 (creates ~1:1 batch balance)
+
+Initializing model...
+  Total parameters: 806,463
+  Trainable parameters: 806,463
+
+================================================================================
+STARTING DYNAMIC LOSS WEIGHT CALIBRATION
+================================================================================
+Running loss calibration for 20 batches...
+  Average raw loss components (unweighted):
+    frequency      :   1.394977
+    powerflow      :   2.509267
+    prediction     :   0.180586
+    risk           :   0.108158
+    temperature    :   0.094657
+    timing         :   0.064287
+================================================================================
+CALIBRATION COMPLETE
+================================================================================
+
+Balancing loss weights dynamically...
+  Target Magnitude (from prediction loss): 0.1806
+
+  Final Loss Weights (Fully Dynamic):
+  Component       | Raw Loss     | Final Lambda | Initial Weighted Loss
+  --------------- | ------------ | ------------ | --------------------
+  Timing          | 0.0643       | 2.8091       |       0.1806
+  Powerflow       | 2.5093       | 0.0720       |       0.1806
+  Temperature     | 0.0947       | 1.9078       |       0.1806
+  Reactive        | 0.0000       | 1.0000       |       0.0000
+  Voltage         | 0.0000       | 1.0000       |       0.0000
+  Frequency       | 1.3950       | 0.1295       |       0.1806
+  Risk            | 0.1082       | 1.6697       |       0.1806
+
+✓ PhysicsInformedLoss initialized with FINAL dynamic weights.
+Loading checkpoint from checkpoints/latest_checkpoint.pth...
+✓ Resumed from epoch 3
+✓ Loaded thresholds: cascade=0.050, node=0.050
+
+[PHASE 2 RESET] Manually resetting Learning Rate to 0.0001...
+[PHASE 2 RESET] Scheduler reset.
+
+================================================================================
+STARTING TRAINING
+================================================================================
+
+
+Epoch 4/100
+--------------------------------------------------------------------------------
+Training:   0%|          | 0/338 [00:00<?, ?it/s]
