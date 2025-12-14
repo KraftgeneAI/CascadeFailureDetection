@@ -849,7 +849,7 @@ class Trainer:
         metric_sums = {}
         total_timing_batches = 0
 
-        pbar = tqdm(self.train_loader, desc="Training")
+        pbar = tqdm(self.train_loader, desc="Training", mininterval=60.0)
         for batch_idx, batch in enumerate(pbar):
             batch_device = {}
             for k, v in batch.items():
@@ -958,7 +958,7 @@ class Trainer:
                 # 'tMAE': f"{running_metrics['time_mae']:.2f}m",
                 'rMSE': f"{running_metrics['risk_mse']:.3f}",
                 'pL': f"{loss_components.get('prediction', 0):.3f}",
-                #'tL': f"{loss_components.get('timing', 0):.3f}",
+                'tL': f"{loss_components.get('timing', 0):.3f}",
             })
             
 
@@ -996,7 +996,7 @@ class Trainer:
         total_timing_batches = 0
         
         with torch.no_grad():
-            pbar = tqdm(self.val_loader, desc="Validation")
+            pbar = tqdm(self.val_loader, desc="Validation", mininterval=60.0)
             for batch_idx, batch in enumerate(pbar):
                 # 1. Move to device
                 batch_device = {}
@@ -1525,22 +1525,25 @@ if __name__ == "__main__":
     
     train_loader = DataLoader(
         train_dataset,
-        batch_size=BATCH_SIZE,
-        sampler=sampler,
-        num_workers=0,
-        pin_memory=False,
+        batch_size=BATCH_SIZE,  # (Should be 256 or 512 for your L40S GPU)
+        sampler=sampler,        # <--- KEEP THIS (It handles balancing AND shuffling)
+        shuffle=False,          # <--- SET THIS TO FALSE (or remove it entirely)
+        num_workers=4,          # <--- Optimization
+        pin_memory=True,        # <--- Optimization
         collate_fn=collate_cascade_batch,
-        persistent_workers=False
+        persistent_workers=True, # Recommended for speed
+        prefetch_factor=2
     )
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=False,
+        batch_size=BATCH_SIZE * 2, # Validation can use double batch size
+        shuffle=False,          # Validation never needs shuffling
+        num_workers=4,
+        pin_memory=True,
         collate_fn=collate_cascade_batch,
-        persistent_workers=False
+        persistent_workers=True,
+        prefetch_factor=2
     )
     
     # Initialize model

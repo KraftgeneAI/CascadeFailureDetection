@@ -23,6 +23,8 @@ from typing import Dict, List, Any, Tuple, Optional
 import numpy as np
 import gc
 import glob
+from tqdm import tqdm
+import json
 
 class CascadeDataset(Dataset):
     """
@@ -40,61 +42,86 @@ class CascadeDataset(Dataset):
         self.base_mva = base_mva
         self.base_frequency = base_frequency
         
-        # Find all individual scenario files
+        # 1. Find all individual scenario files
         print(f"Indexing scenarios from: {data_dir}")
+        # Look for both naming patterns just in case
         self.scenario_files = sorted(glob.glob(str(self.data_dir / "scenario_*.pkl")))
-        
-        if len(self.scenario_files) == 0:
-            old_files = sorted(glob.glob(str(self.data_dir / "scenarios_batch_*.pkl")))
-            if old_files:
-                self.scenario_files = old_files
-            else:
-                raise ValueError(f"No 'scenario_*.pkl' or 'scenarios_batch_*.pkl' files found in {data_dir}.")
+        if not self.scenario_files:
+             self.scenario_files = sorted(glob.glob(str(self.data_dir / "scenarios_batch_*.pkl")))
 
-        print(f"Physics normalization: base_mva={base_mva}, base_frequency={base_frequency}")
+        # 2. Define Cache Path
+        cache_file = self.data_dir / "metadata_cache.json"
         
-        print(f"Scanning {len(self.scenario_files)} files for cascade labels...")
         self.cascade_labels = []
-        
-        for scenario_file in self.scenario_files:
-            try:
-                with open(scenario_file, 'rb') as f:
-                    scenario_data = pickle.load(f)
 
-                if isinstance(scenario_data, list):
-                    if len(scenario_data) == 0:
-                        self.cascade_labels.append(False) 
+        # --- FAST PATH: Load from cache ---
+        if os.path.exists(cache_file):
+            print(f"Loading labels from cache: {cache_file}")
+            with open(cache_file, 'r') as f:
+                self.cascade_labels = json.load(f)
+            
+            # Safety check: Ensure cache matches file count
+            if len(self.cascade_labels) != len(self.scenario_files):
+                print("Warning: Cache length mismatch. Re-scanning...")
+                self.cascade_labels = [] # Force re-scan
+        
+        # --- SLOW PATH: Scan files (First time only) ---
+        if not self.cascade_labels:
+            print(f"Scanning {len(self.scenario_files)} files for metadata (First Run)...")
+            
+            for scenario_file in tqdm(self.scenario_files):
+                try:
+                    with open(scenario_file, 'rb') as f:
+                        scenario_data = pickle.load(f)
+
+                    # Handle list vs dict wrapper
+                    if isinstance(scenario_data, list):
+                        if len(scenario_data) == 0: 
+                            self.cascade_labels.append(False)
+                            continue
+                        scenario = scenario_data[0]
+                    else:
+                        scenario = scenario_data
+                    
+                    if not isinstance(scenario, dict):
+                        self.cascade_labels.append(False)
                         continue
-                    scenario = scenario_data[0]
-                else:
-                    scenario = scenario_data
-                
-                if not isinstance(scenario, dict):
-                    self.cascade_labels.append(False)
-                    continue
 
-                if 'metadata' in scenario and 'is_cascade' in scenario['metadata']:
-                    has_cascade = scenario['metadata']['is_cascade']
-                elif 'sequence' in scenario and len(scenario['sequence']) > 0:
-                    last_step = scenario['sequence'][-1]
-                    has_cascade = bool(np.max(last_step.get('node_labels', np.zeros(1))) > 0.5)
-                else:
-                    has_cascade = False
-                
-                self.cascade_labels.append(has_cascade)
-                
-            except (IOError, pickle.UnpicklingError) as e:
-                print(f"Warning: Skipping corrupted or unreadable file: {scenario_file}. Error: {e}")
-                self.cascade_labels.append(False)
-        
+                    # Extract Label
+                    if 'metadata' in scenario and 'is_cascade' in scenario['metadata']:
+                        has_cascade = scenario['metadata']['is_cascade']
+                    elif 'sequence' in scenario and len(scenario['sequence']) > 0:
+                        # Fallback: check last timestep labels
+                        last_step = scenario['sequence'][-1]
+                        has_cascade = bool(np.max(last_step.get('node_labels', np.zeros(1))) > 0.5)
+                    else:
+                        has_cascade = False
+                    
+                    self.cascade_labels.append(has_cascade)
+
+                except (IOError, pickle.UnpicklingError, EOFError) as e:
+                    print(f"Warning: Skipping corrupted file: {scenario_file}")
+                    self.cascade_labels.append(False) # Assume False for bad files to keep index alignment
+            
+            # Save cache for next time
+            try:
+                with open(cache_file, 'w') as f:
+                    json.dump(self.cascade_labels, f)
+                print(f"Saved metadata cache to {cache_file}")
+            except Exception as e:
+                print(f"Warning: Could not save cache: {e}")
+
+        # 3. Print Stats
+        print(f"Physics normalization: base_mva={base_mva}, base_frequency={base_frequency}")
         print(f"Indexed {len(self.scenario_files)} scenarios.")
         
         if len(self.cascade_labels) == 0:
             print(f"  [WARNING] No valid scenarios found!")
         else:
             positive_count = sum(self.cascade_labels)
-            print(f"  Cascade scenarios: {positive_count} ({positive_count/len(self.cascade_labels)*100:.1f}%)")
-            print(f"  Normal scenarios: {len(self.cascade_labels) - positive_count} ({(len(self.cascade_labels) - positive_count)/len(self.cascade_labels)*100:.1f}%)")
+            total = len(self.cascade_labels)
+            print(f"  Cascade scenarios: {positive_count} ({positive_count/total*100:.1f}%)")
+            print(f"  Normal scenarios: {total - positive_count} ({(total - positive_count)/total*100:.1f}%)")
         
         print(f"Ultra-memory-efficient mode: Loading 1 file per sample.")
 
