@@ -332,8 +332,8 @@ class Trainer:
             lambda_timing=final_lambdas['lambda_timing'],
             
             pos_weight=1.0, 
-            focal_alpha=0.35,
-            focal_gamma=3.0,
+            focal_alpha=0.25,
+            focal_gamma=4.0,
             label_smoothing=0.0,
             use_logits=model_outputs_logits,
             base_mva=self.base_mva,
@@ -1016,12 +1016,24 @@ class Trainer:
             print(f"    Node F1:    {val_metrics['node_f1']:.4f} (Thresh: {val_metrics['best_node_thresh']:.2f})")
             print(f"    Node Prec:  {val_metrics['node_precision']:.4f} | Node Rec: {val_metrics['node_recall']:.4f}")
             
-            # print(f"\n  CAUSAL PATH METRICS:")
-            # print(f"    Timing Loss:       Train {train_metrics['timing_loss']:.4f} | Val {val_metrics['timing_loss']:.4f}")
-                  
-            # ====================================================================
-            # --- MODIFICATION: SAVE BEST MODEL BASED ON VAL LOSS ---
-            # ====================================================================
+            current_f1 = (val_metrics['cascade_f1'] + val_metrics['node_f1']) / 2.0
+            
+            if current_f1 > self.best_val_f1:
+                self.best_val_f1 = current_f1
+                
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'val_loss': val_metrics['loss'],
+                    'cascade_f1': val_metrics['cascade_f1'],
+                    'node_f1': val_metrics['node_f1'],
+                    'cascade_threshold': float(val_metrics['best_cascade_thresh']),
+                    'node_threshold': float(val_metrics['best_node_thresh']),
+                    'history': self.history
+                }, f"{self.output_dir}/best_f1_model.pth")
+                
+                print(f"  ★ SAVED BEST F1 MODEL (Avg F1: {current_f1:.4f} | cF1: {val_metrics['cascade_f1']:.3f}, nF1: {val_metrics['node_f1']:.3f})")
             
             if val_metrics['loss'] < self.best_val_loss:
                 self.best_val_loss = val_metrics['loss']

@@ -6,8 +6,8 @@
 !*.pdf
 !*.md
 !*.txt
-# !*.pth
-# !checkpoints/
+!*.pth
+!checkpoints/
 
 # And exclude the .gitignore file itself
 !.gitignore
