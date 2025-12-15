@@ -333,7 +333,7 @@ class Trainer:
             
             pos_weight=1.0, 
             focal_alpha=0.25,
-            focal_gamma=4.0,
+            focal_gamma=2.0,
             label_smoothing=0.0,
             use_logits=model_outputs_logits,
             base_mva=self.base_mva,
@@ -1016,7 +1016,9 @@ class Trainer:
             print(f"    Node F1:    {val_metrics['node_f1']:.4f} (Thresh: {val_metrics['best_node_thresh']:.2f})")
             print(f"    Node Prec:  {val_metrics['node_precision']:.4f} | Node Rec: {val_metrics['node_recall']:.4f}")
             
-            current_f1 = (val_metrics['cascade_f1'] + val_metrics['node_f1']) / 2.0
+            #current_f1 = (val_metrics['cascade_f1'] + val_metrics['node_f1']) / 2.0
+            # At later stage of fine-tuning node f1
+            current_f1 = val_metrics['node_f1']
             
             if current_f1 > self.best_val_f1:
                 self.best_val_f1 = current_f1
