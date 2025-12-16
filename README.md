@@ -89,11 +89,11 @@ The inference script produces a detailed report. Below is an example output from
 
 **Overall Verdict**: 
 ✅ Correctly detected a cascade.
-Prediction: True (Prob: 0.401 / Thresh: 0.100)
-Ground Truth: True
+- Prediction: True (Prob: 0.401 / Thresh: 0.100)
+- Ground Truth: True
 **Node-Level Analysis**: 
-Predicted Nodes at Risk: 95 (Thresh: 0.350)
-Actual Failed Nodes:     69
+- Predicted Nodes at Risk: 95 (Thresh: 0.350)
+- Actual Failed Nodes:     69
   - Correctly Identified (TP): 69
   - Missed Nodes (FN):         0
   - False Alarms (FP):         26
@@ -125,9 +125,6 @@ Risk Definitions
   Critical (0.8+): Immediate Failure | Severe (0.6+): High Danger | Medium (0.3+): Caution
   Dimensions: Threat (Stress), Vulnerability (Weakness), Impact (Consequence),
               Cascade Prob (Propagation), Urgency (Time Sensitivity).
-
-**Cascade Path Analysis (Sequence Order)**:
-The model predicts the *causal sequence* of failures by ranking nodes based on their failure priority score.
 
 **Cascade Path Analysis (Sequence Order)**:
 The model predicts the *causal sequence* of failures by ranking nodes based on their failure priority score.
