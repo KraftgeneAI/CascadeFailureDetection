@@ -100,8 +100,8 @@ The inference script produces a detailed report. Below is an example output from
   - False Alarms (FP):         26
 
 **Critical Information**:
-System Frequency: 64.84 Hz
-Voltage Range:    [0.000, 0.217] p.u.
+  - System Frequency: 64.84 Hz
+  - Voltage Range:    [0.000, 0.217] p.u.
 
 
 **Top High-Risk Nodes**:
