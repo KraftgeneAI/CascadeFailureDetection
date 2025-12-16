@@ -122,9 +122,9 @@ Ground Truth Risk Assessment:
   - Cascade Prob: 0.792 (Severe)   | Response: 0.000 (Low)      | Safety: 0.000 (Low)     
   - Urgency: 0.900 (Critical)
 
-Risk Definitions 
-  Critical (0.8+): Immediate Failure | Severe (0.6+): High Danger | Medium (0.3+): Caution
-  Dimensions: Threat (Stress), Vulnerability (Weakness), Impact (Consequence),
+Risk Definitions: 
+  - Critical (0.8+): Immediate Failure | Severe (0.6+): High Danger | Medium (0.3+): Caution
+  - Dimensions: Threat (Stress), Vulnerability (Weakness), Impact (Consequence),
               Cascade Prob (Propagation), Urgency (Time Sensitivity).
 
 **Cascade Path Analysis (Sequence Order)**:
