@@ -88,9 +88,9 @@ The system ingests all new data and the model recognizes the pattern:
 The inference script produces a detailed report. Below is an example output from an early-stage trained model analyzing a complex cascade scenario.
 
 **Overall Verdict**: 
-    ✅ Correctly detected a cascade.
-    - Prediction: True (Prob: 0.401 / Thresh: 0.100)
-    - Ground Truth: True
+  - ✅ Correctly detected a cascade.
+  - Prediction: True (Prob: 0.401 / Thresh: 0.100)
+  - Ground Truth: True
 
 **Node-Level Analysis**: 
   - Predicted Nodes at Risk: 95 (Thresh: 0.350)
