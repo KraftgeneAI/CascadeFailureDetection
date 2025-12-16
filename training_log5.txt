@@ -1,0 +1,110 @@
+nohup: ignoring input
+================================================================================
+CASCADE FAILURE PREDICTION - TRAINING SCRIPT (IMPROVED)
+================================================================================
+
+Configuration:
+  Data directory: data
+  Output directory: checkpoints
+  Batch size: 8
+  Epochs: 100
+  Learning rate: 0.0001
+  Device: cuda
+  Gradient clipping: 20.0
+  Mixed precision: True
+  Resume training: True
+
+Loading datasets...
+Indexing scenarios from: data/train
+Loading labels from cache: data/train/metadata_cache.json
+Physics normalization: base_mva=100.0, base_frequency=60.0
+Indexed 2700 scenarios.
+  Cascade scenarios: 905 (33.5%)
+  Normal scenarios: 1795 (66.5%)
+Ultra-memory-efficient mode: Loading 1 file per sample.
+Indexing scenarios from: data/val
+Loading labels from cache: data/val/metadata_cache.json
+Physics normalization: base_mva=100.0, base_frequency=60.0
+Indexed 491 scenarios.
+  Cascade scenarios: 170 (34.6%)
+  Normal scenarios: 321 (65.4%)
+Ultra-memory-efficient mode: Loading 1 file per sample.
+  Training samples: 2700
+  Validation samples: 491
+  Mode: full_sequence (utilizing 3-layer LSTM for temporal modeling)
+
+Computing sample weights for balanced sampling...
+  Positive samples: 905 (33.5%)
+  Negative samples: 1795 (66.5%)
+  Calculated weights -> Pos: 2.98, Neg: 1.50 (creates ~1:1 batch balance)
+
+Initializing model...
+  Total parameters: 806,463
+  Trainable parameters: 806,463
+
+================================================================================
+STARTING DYNAMIC LOSS WEIGHT CALIBRATION
+================================================================================
+Running loss calibration for 20 batches...
+  Average raw loss components (unweighted):
+    frequency      :   1.400968
+    powerflow      :   1.600615
+    prediction     :   0.099932
+    risk           :   0.113065
+    temperature    :   0.092093
+    timing         :   0.040313
+================================================================================
+CALIBRATION COMPLETE
+================================================================================
+
+Balancing loss weights dynamically...
+  Target Magnitude (from prediction loss): 0.0999
+
+  Final Loss Weights (Fully Dynamic):
+  Component       | Raw Loss     | Final Lambda | Initial Weighted Loss
+  --------------- | ------------ | ------------ | --------------------
+  Timing          | 0.0403       | 2.4789       |       0.0999
+  Powerflow       | 1.6006       | 0.0624       |       0.0999
+  Temperature     | 0.0921       | 1.0851       |       0.0999
+  Reactive        | 0.0000       | 1.0000       |       0.0000
+  Voltage         | 0.0000       | 1.0000       |       0.0000
+  Frequency       | 1.4010       | 0.0713       |       0.0999
+  Risk            | 0.1131       | 0.8838       |       0.0999
+
+✓ PhysicsInformedLoss initialized with FINAL dynamic weights.
+Loading checkpoint from checkpoints/latest_checkpoint.pth...
+✓ Resumed from epoch 52
+✓ Loaded thresholds: cascade=0.100, node=0.300
+
+[PHASE 2 RESET] Manually resetting Learning Rate to 0.0001...
+[PHASE 2 RESET] Scheduler reset.
+
+================================================================================
+STARTING TRAINING
+================================================================================
+
+
+Epoch 53/100
+--------------------------------------------------------------------------------
+Training:   0%|          | 0/338 [00:00<?, ?it/s]
+================================================================================
+MODEL OUTPUT VALIDATION (First Batch)
+================================================================================
+Checking required outputs for loss calculation...
+  ✓ failure_probability: shape (8, 118, 1) (Matches expected)
+  ✓ voltages: shape (8, 118, 1) (Matches expected)
+  ✓ angles: shape (8, 118, 1) (Matches expected)
+  ✓ line_flows: shape (8, 686, 1) (Matches expected)
+  ✓ frequency: shape (8, 1, 1) (Matches expected)
+  ✓ risk_scores: shape (8, 118, 7) (Matches expected)
+  ✓ cascade_timing: shape (8, 118, 1) (Matches expected)
+  ✓ temperature: shape (8, 118, 1) (Matches expected)
+
+Checking other model outputs...
+  ✓ reactive_flows: shape (8, 686, 1) (Matches expected)
+
+Temporal sequence detected: B=8, T=36, N=118
+  ✓ 3-layer LSTM IS BEING UTILIZED.
+================================================================================
+
+Training (Loss: 2.1736, Grad: 3.01):   0%|          | 0/338 [00:38<?, ?it/s]Training (Loss: 2.1736, Grad: 3.01):   0%|          | 0/338 [00:39<?, ?it/s, cF1=0.933, nF1=0.546, rMSE=0.006, pL=0.038, tL=0.098]Training (Loss: 2.2262, Grad: 6.80):   0%|          | 0/338 [00:40<?, ?it/s, cF1=0.933, nF1=0.546, rMSE=0.006, pL=0.038, tL=0.098]Training (Loss: 2.2262, Grad: 6.80):   0%|          | 0/338 [00:40<?, ?it/s, cF1=0.815, nF1=0.491, rMSE=0.006, pL=0.022, tL=0.000]Training (Loss: 2.4022, Grad: 4.82):   0%|          | 0/338 [00:41<?, ?it/s, cF1=0.815, nF1=0.491, rMSE=0.006, pL=0.022, tL=0.000]Training (Loss: 2.4022, Grad: 4.82):   0%|          | 0/338 [00:41<?, ?it/s, cF1=0.769, nF1=0.513, rMSE=0.006, pL=0.026, tL=0.000]Training (Loss: 2.6157, Grad: 5.44):   0%|          | 0/338 [00:42<?, ?it/s, cF1=0.769, nF1=0.513, rMSE=0.006, pL=0.026, tL=0.000]Training (Loss: 2.6157, Grad: 5.44):   0%|          | 0/338 [00:42<?, ?it/s, cF1=0.745, nF1=0.499, rMSE=0.006, pL=0.022, tL=0.000]Training (Loss: 2.3365, Grad: 5.76):   0%|          | 0/338 [00:48<?, ?it/s, cF1=0.745, nF1=0.499, rMSE=0.006, pL=0.022, tL=0.000]Training (Loss: 2.3365, Grad: 5.76):   0%|          | 0/338 [00:48<?, ?it/s, cF1=0.710, nF1=0.523, rMSE=0.006, pL=0.020, tL=0.000]Training (Loss: 2.2870, Grad: nan):   0%|          | 0/338 [00:49<?, ?it/s, cF1=0.710, nF1=0.523, rMSE=0.006, pL=0.020, tL=0.000] Training (Loss: 2.2870, Grad: nan):   0%|          | 0/338 [00:49<?, ?it/s, cF1=0.703, nF1=0.522, rMSE=0.007, pL=0.024, tL=0.104]Training (Loss: 2.7355, Grad: 5.92):   0%|          | 0/338 [00:50<?, ?it/s, cF1=0.703, nF1=0.522, rMSE=0.007, pL=0.024, tL=0.104]Training (Loss: 2.7355, Grad: 5.92):   0%|          | 0/338 [00:50<?, ?it/s, cF1=0.667, nF1=0.517, rMSE=0.007, pL=0.013, tL=0.096]Training (Loss: 2.7308, Grad: 9.56):   0%|          | 0/338 [00:51<?, ?it/s, cF1=0.667, nF1=0.517, rMSE=0.007, pL=0.013, tL=0.096]Training (Loss: 2.7308, Grad: 9.56):   0%|          | 0/338 [00:52<?, ?it/s, cF1=0.667, nF1=0.510, rMSE=0.007, pL=0.022, tL=0.108]Training (Loss: 2.5316, Grad: 6.84):   0%|          | 0/338 [00:58<?, ?it/s, cF1=0.667, nF1=0.510, rMSE=0.007, pL=0.022, tL=0.108]Training (Loss: 2.5316, Grad: 6.84):   0%|          | 0/338 [00:58<?, ?it/s, cF1=0.654, nF1=0.504, rMSE=0.007, pL=0.016, tL=0.000]Training (Loss: 2.1346, Grad: 5.21):   0%|          | 0/338 [00:58<?, ?it/s, cF1=0.654, nF1=0.504, rMSE=0.007, pL=0.016, tL=0.000]Training (Loss: 2.1346, Grad: 5.21):   0%|          | 0/338 [00:59<?, ?it/s, cF1=0.655, nF1=0.493, rMSE=0.007, pL=0.022, tL=0.099]Training (Loss: 2.2579, Grad: 4.52):   0%|          | 0/338 [00:59<?, ?it/s, cF1=0.655, nF1=0.493, rMSE=0.007, pL=0.022, tL=0.099]Training (Loss: 2.2579, Grad: 4.52):   0%|          | 0/338 [00:59<?, ?it/s, cF1=0.646, nF1=0.496, rMSE=0.007, pL=0.016, tL=0.000]Training (Loss: 2.4780, Grad: 8.86):   0%|          | 0/338 [01:00<?, ?it/s, cF1=0.646, nF1=0.496, rMSE=0.007, pL=0.016, tL=0.000]Training (Loss: 2.4780, Grad: 8.86):   0%|          | 0/338 [01:00<?, ?it/s, cF1=0.648, nF1=0.482, rMSE=0.007, pL=0.025, tL=0.091]Training (Loss: 2.5690, Grad: 5.85):   0%|          | 0/338 [01:09<?, ?it/s, cF1=0.648, nF1=0.482, rMSE=0.007, pL=0.025, tL=0.091]Training (Loss: 2.5690, Grad: 5.85):   0%|          | 0/338 [01:09<?, ?it/s, cF1=0.649, nF1=0.480, rMSE=0.007, pL=0.022, tL=0.105]Training (Loss: 2.6064, Grad: 5.07):   0%|          | 0/338 [01:10<?, ?it/s, cF1=0.649, nF1=0.480, rMSE=0.007, pL=0.022, tL=0.105]Training (Loss: 2.6064, Grad: 5.07):   0%|          | 0/338 [01:10<?, ?it/s, cF1=0.642, nF1=0.475, rMSE=0.007, pL=0.018, tL=0.100]Training (Loss: 2.1840, Grad: 7.69):   0%|          | 0/338 [01:12<?, ?it/s, cF1=0.642, nF1=0.475, rMSE=0.007, pL=0.018, tL=0.100]Training (Loss: 2.1840, Grad: 7.69):   0%|          | 0/338 [01:12<?, ?it/s, cF1=0.644, nF1=0.473, rMSE=0.007, pL=0.024, tL=0.099]Training (Loss: 2.6996, Grad: 4.32):   0%|          | 0/338 [01:13<?, ?it/s, cF1=0.644, nF1=0.473, rMSE=0.007, pL=0.024, tL=0.099]Training (Loss: 2.6996, Grad: 4.32):   0%|          | 0/338 [01:13<?, ?it/s, cF1=0.638, nF1=0.474, rMSE=0.007, pL=0.021, tL=0.102]Training (Loss: 2.3011, Grad: 3.32):   0%|          | 0/338 [01:23<?, ?it/s, cF1=0.638, nF1=0.474, rMSE=0.007, pL=0.021, tL=0.102]Training (Loss: 2.3011, Grad: 3.32):   0%|          | 0/338 [01:23<?, ?it/s, cF1=0.633, nF1=0.469, rMSE=0.007, pL=0.015, tL=0.000]Training (Loss: 2.4066, Grad: 3.91):   0%|          | 0/338 [01:24<?, ?it/s, cF1=0.633, nF1=0.469, rMSE=0.007, pL=0.015, tL=0.000]Training (Loss: 2.4066, Grad: 3.91):   0%|          | 0/338 [01:24<?, ?it/s, cF1=0.629, nF1=0.466, rMSE=0.007, pL=0.017, tL=0.000]Training (Loss: 2.5822, Grad: 6.73):   0%|          | 0/338 [01:25<?, ?it/s, cF1=0.629, nF1=0.466, rMSE=0.007, pL=0.017, tL=0.000]Training (Loss: 2.5822, Grad: 6.73):   0%|          | 0/338 [01:25<?, ?it/s, cF1=0.606, nF1=0.466, rMSE=0.007, pL=0.001, tL=0.000]Training (Loss: 2.2779, Grad: inf):   0%|          | 0/338 [01:26<?, ?it/s, cF1=0.606, nF1=0.466, rMSE=0.007, pL=0.001, tL=0.000] Training (Loss: 2.2779, Grad: inf):   0%|          | 0/338 [01:26<?, ?it/s, cF1=0.603, nF1=0.463, rMSE=0.007, pL=0.019, tL=0.000]

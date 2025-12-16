@@ -321,18 +321,20 @@ class Trainer:
         print_row("Frequency", "frequency", "lambda_frequency")
         print_row("Risk", "risk", "lambda_risk")
         
-        # Initialize the criterion with the FINAL weights
+        scaling_factor = 0.1 # to make the model focus on prediction rather than physics (at later training phase)
+
+        # Initialized the criterion with the FINAL weight
         self.criterion = PhysicsInformedLoss(
-            lambda_powerflow=final_lambdas['lambda_powerflow'],
-            lambda_temperature=final_lambdas['lambda_temperature'],
+            lambda_powerflow=final_lambdas['lambda_powerflow'] * scaling_factor,
+            lambda_temperature=final_lambdas['lambda_temperature'] * scaling_factor,
             lambda_stability=0,
-            lambda_frequency=final_lambdas['lambda_frequency'],
+            lambda_frequency=final_lambdas['lambda_frequency'] * scaling_factor,
             lambda_reactive=0,
-            lambda_risk=final_lambdas['lambda_risk'],
-            lambda_timing=final_lambdas['lambda_timing'],
+            lambda_risk=final_lambdas['lambda_risk'] * scaling_factor,
+            lambda_timing=final_lambdas['lambda_timing'] * scaling_factor,
             
             pos_weight=1.0, 
-            focal_alpha=0.25,
+            focal_alpha=0.15,
             focal_gamma=2.0,
             label_smoothing=0.0,
             use_logits=model_outputs_logits,
