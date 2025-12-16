@@ -131,7 +131,7 @@ Risk Definitions:
 The model predicts the *causal sequence* of failures by ranking nodes based on their failure priority score.
 
 ```bash
-  Sequence   | Predicted Node  | Score    | Actual Sequence  | Actual Node     | Delta T (min)  
+  Seq.   | Predicted Node  | Score    | Actual Seq.     | Actual Node     | Delta T (min)  
   ------ | --------------- | -------- | --------------- | --------------- | ---------------
   1      | Node 82         | 0.401    | 1               | Node 82         | 0.00           
   2      | Node 115        | 0.396    | 2               | Node 115        | 0.22           
