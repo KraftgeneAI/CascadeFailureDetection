@@ -85,7 +85,7 @@ The system ingests all new data and the model recognizes the pattern:
 
 ### Step 4: The Final Inference Report
 
-The inference script produces a detailed report. 
+The inference script produces a detailed report. Below is an example output from an early-stage trained model analyzing a complex cascade scenario.
 
 **Overall Verdict**: 
 ✅ Correctly detected a cascade.
@@ -129,7 +129,11 @@ Risk Definitions
 **Cascade Path Analysis (Sequence Order)**:
 The model predicts the *causal sequence* of failures by ranking nodes based on their failure priority score.
 
-  Seq #  | Predicted Node  | Score    | Actual Seq #    | Actual Node     | Delta T (min)  
+**Cascade Path Analysis (Sequence Order)**:
+The model predicts the *causal sequence* of failures by ranking nodes based on their failure priority score.
+
+```bash
+   Seq   | Predicted Node  | Score    | Actual Seq     | Actual Node     | Delta T (min)  
   ------ | --------------- | -------- | --------------- | --------------- | ---------------
   1      | Node 82         | 0.401    | 1               | Node 82         | 0.00           
   2      | Node 115        | 0.396    | 2               | Node 115        | 0.22           
@@ -227,7 +231,7 @@ The model predicts the *causal sequence* of failures by ranking nodes based on t
   14     | Node 1          | 0.356    |                 |                 |                
   15     | Node 86         | 0.350    |                 |                 |                
 ================================================================================
-
+```
 This report doesn't just say "there is a problem." It tells you **what** will fail, and provides a **priority ranking** of the failure sequence, allowing operators to focus on the root causes (Seq #) before the cascading effects.
 
 
