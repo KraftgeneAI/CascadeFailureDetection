@@ -45,7 +45,7 @@ The model is a multi-task spatio-temporal GNN. An input scenario is processed in
     * **Physics Heads**: `voltage_head`, `angle_head`, `line_flow_head`, etc.
 
 ![Figure 5: Seven-Dimensional Risk Assessment Framework](./images/f5.JPG)
-
+![Figure 6: End-to-End System Data Flow](./images/f6.JPG)
 ## The Multi-Component Loss Function
 
 The "enormous gaps" in timing are fixed by training the model on a comprehensive loss function that grades *all* of its predictions, not just the final yes/no answer.
@@ -55,7 +55,7 @@ The "enormous gaps" in timing are fixed by training the model on a comprehensive
 * **`risk_loss`**: Trains the `risk_head`. (Is the predicted *reason* for the failure correct?)
 * **Physics Losses** (`powerflow_loss`, `capacity_loss`, etc.): Trains the physics heads. (Are the predicted voltages and line flows physically possible?)
 
-![Figure 6: End-to-End System Data Flow](./images/f6.JPG)
+![Figure 7: Multi-Component Loss Function](./images/f7.JPG)
 
 ## Detailed Example: The Landslide Scenario
 
