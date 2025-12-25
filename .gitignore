@@ -7,7 +7,9 @@
 !*.md
 !*.txt
 !*.pth
+!*.JPG
 !checkpoints/
+!images/
 
 # And exclude the .gitignore file itself
 !.gitignore
