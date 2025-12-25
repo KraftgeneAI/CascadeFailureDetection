@@ -20,14 +20,22 @@ This specific implementation validates the core GNN and its physics-informed lea
 
 The model is a multi-task spatio-temporal GNN. An input scenario is processed in parallel by three encoders, fused, and then passed through a GNN-LSTM core to make simultaneous predictions.
 
+![Figure 1: High-Level System Architecture](./images/f1.JPG)
+
 1.  **Feature Extraction Layer (Multi-Modal Encoders)**:
     * `EnvironmentalEmbedding`: CNNs process satellite imagery and threat maps.
     * `InfrastructureEmbedding`: MLPs process SCADA/PMU time-series data.
     * `RoboticEmbedding`: CNNs process visual/thermal drone imagery and sensor data.
 
+![Figure 2: Data Source Integration Architecture](./images/f2.JPG)
+
+![Figure 3: Fusion Processing Architecture](./images/f3.JPG)
+
 2.  **Spatio-Temporal Prediction Layer (The "Brain")**:
     * An attention mechanism fuses the three embeddings into a single vector for each node.
     * `TemporalGNNCell`: A **Graph Attention (GAT)** layer shares information between neighboring nodes, while an **LSTM** processes the *sequence* of these messages over time. This is what allows the model to learn `B -> A -> C` causal relationships.
+
+![Figure 4: Sample Grid Graph Representation](./images/f4.JPG)
 
 3.  **Multi-Task Decision Layer (The "Output")**:
     The final node embeddings are fed into parallel heads to predict:
@@ -35,6 +43,8 @@ The model is a multi-task spatio-temporal GNN. An input scenario is processed in
     * **`failure_time_head`**: *When* will it fail? (Causal Path)
     * **`risk_head`**: *Why* will it fail? (7-D Risk Vector)
     * **Physics Heads**: `voltage_head`, `angle_head`, `line_flow_head`, etc.
+
+![Figure 5: Seven-Dimensional Risk Assessment Framework](./images/f5.JPG)
 
 ## The Multi-Component Loss Function
 
@@ -44,6 +54,8 @@ The "enormous gaps" in timing are fixed by training the model on a comprehensive
 * **`timing_loss`**: Trains the `failure_time_head`. (Is the predicted causal path `B -> A -> C` correct?)
 * **`risk_loss`**: Trains the `risk_head`. (Is the predicted *reason* for the failure correct?)
 * **Physics Losses** (`powerflow_loss`, `capacity_loss`, etc.): Trains the physics heads. (Are the predicted voltages and line flows physically possible?)
+
+![Figure 6: End-to-End System Data Flow](./images/f6.JPG)
 
 ## Detailed Example: The Landslide Scenario
 
