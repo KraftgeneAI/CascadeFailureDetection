@@ -8,6 +8,8 @@
 !*.txt
 !*.pth
 !*.JPG
+!agentic_cascade_system/
+!agentic_cascade_system/agents/
 !checkpoints/
 !images/
 
