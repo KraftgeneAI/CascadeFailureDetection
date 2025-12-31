@@ -135,7 +135,10 @@ class DataAcquisitionAgent(BaseAgent):
             
             self.edge_index = topology['edge_index']
             self.num_edges = self.edge_index.shape[1]
-            self.num_nodes = int(np.max(self.edge_index)) + 1
+            if isinstance(self.edge_index, torch.Tensor):
+                self.num_nodes = int(self.edge_index.max().item()) + 1
+            else:
+                self.num_nodes = int(np.max(self.edge_index)) + 1
             
             # Store additional topology info if available
             self.internal_state['topology'] = {
