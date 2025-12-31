@@ -1,0 +1,226 @@
+2025-12-31 23:30:43 | asyncio                   | DEBUG    | Using proactor: IocpProactor
+2025-12-31 23:30:43 | AgenticSystem             | INFO     | ============================================================
+2025-12-31 23:30:43 | AgenticSystem             | INFO     | AGENTIC CASCADE FAILURE DETECTION SYSTEM
+2025-12-31 23:30:43 | AgenticSystem             | INFO     | ============================================================
+2025-12-31 23:30:43 | AgenticSystem             | INFO     | Creating agents...
+2025-12-31 23:30:43 | Agent.CoordinationAgent   | DEBUG    | Registered capability: agent_management
+2025-12-31 23:30:43 | Agent.CoordinationAgent   | DEBUG    | Registered capability: task_scheduling
+2025-12-31 23:30:43 | Agent.CoordinationAgent   | DEBUG    | Registered capability: pipeline_coordination
+2025-12-31 23:30:43 | Agent.DataAcquisitionAgent | DEBUG    | Registered capability: environmental_data_acquisition
+2025-12-31 23:30:43 | Agent.DataAcquisitionAgent | DEBUG    | Registered capability: infrastructure_data_acquisition
+2025-12-31 23:30:43 | Agent.DataAcquisitionAgent | DEBUG    | Registered capability: robotic_data_acquisition
+2025-12-31 23:30:43 | Agent.PredictionAgent     | DEBUG    | Registered capability: cascade_prediction
+2025-12-31 23:30:43 | Agent.PredictionAgent     | DEBUG    | Registered capability: node_risk_assessment
+2025-12-31 23:30:43 | Agent.RiskAssessmentAgent | DEBUG    | Registered capability: risk_aggregation
+2025-12-31 23:30:43 | Agent.RiskAssessmentAgent | DEBUG    | Registered capability: alert_generation
+2025-12-31 23:30:43 | Agent.RiskAssessmentAgent | DEBUG    | Registered capability: mitigation_planning
+2025-12-31 23:30:43 | AgenticSystem             | INFO     | All agents created
+2025-12-31 23:30:43 | AgenticSystem             | INFO     | Registering agents with coordinator...
+2025-12-31 23:30:43 | MessageBus                | INFO     | Registered agent: DataAcquisitionAgent (data_acquisition)
+2025-12-31 23:30:43 | Agent.CoordinationAgent   | INFO     | Registered agent: DataAcquisitionAgent (data_acquisition)
+2025-12-31 23:30:43 | MessageBus                | INFO     | Registered agent: PredictionAgent (prediction)
+2025-12-31 23:30:43 | Agent.CoordinationAgent   | INFO     | Registered agent: PredictionAgent (prediction)
+2025-12-31 23:30:43 | MessageBus                | INFO     | Registered agent: RiskAssessmentAgent (risk_assessment)
+2025-12-31 23:30:43 | Agent.CoordinationAgent   | INFO     | Registered agent: RiskAssessmentAgent (risk_assessment)
+2025-12-31 23:30:43 | AgenticSystem             | INFO     | All agents registered
+2025-12-31 23:30:43 | AgenticSystem             | INFO     | Starting multi-agent system...
+2025-12-31 23:30:43 | Agent.CoordinationAgent   | INFO     | Starting agent: CoordinationAgent
+2025-12-31 23:30:43 | Agent.CoordinationAgent   | INFO     | Initializing Coordination Agent...
+2025-12-31 23:30:43 | MessageBus                | INFO     | Registered agent: CoordinationAgent (coordinator)
+2025-12-31 23:30:43 | Agent.CoordinationAgent   | INFO     | Coordination Agent initialized
+2025-12-31 23:30:43 | Agent.CoordinationAgent   | INFO     | Coordination Agent starting execution...
+2025-12-31 23:30:43 | Agent.CoordinationAgent   | INFO     | Starting 3 agents...
+2025-12-31 23:30:43 | Agent.DataAcquisitionAgent | INFO     | Starting agent: DataAcquisitionAgent
+2025-12-31 23:30:43 | Agent.DataAcquisitionAgent | INFO     | Initializing Data Acquisition Agent...
+2025-12-31 23:30:43 | Agent.DataAcquisitionAgent | INFO     | Loaded topology: 118 nodes, 686 edges
+2025-12-31 23:30:44 | Agent.DataAcquisitionAgent | INFO     | Data Acquisition initialized: 118 nodes, 686 edges
+2025-12-31 23:30:44 | Agent.DataAcquisitionAgent | INFO     | Starting data acquisition loop...
+2025-12-31 23:30:44 | Agent.PredictionAgent     | INFO     | Starting agent: PredictionAgent
+2025-12-31 23:30:44 | Agent.PredictionAgent     | INFO     | Initializing Prediction Agent on cpu...
+2025-12-31 23:30:44 | Agent.PredictionAgent     | INFO     | Removing 6 mismatched keys to allow loading.
+2025-12-31 23:30:44 | Agent.PredictionAgent     | INFO     | Loaded trained model weights (Partial load due to architecture update)
+2025-12-31 23:30:44 | Agent.PredictionAgent     | INFO     | Model loaded [TRAINED]. Thresholds: cascade=0.100, node=0.350
+2025-12-31 23:30:44 | Agent.PredictionAgent     | INFO     | Prediction Agent ready for inference requests...
+2025-12-31 23:30:44 | Agent.RiskAssessmentAgent | INFO     | Starting agent: RiskAssessmentAgent
+2025-12-31 23:30:44 | Agent.RiskAssessmentAgent | INFO     | Initializing Risk Assessment Agent...
+2025-12-31 23:30:44 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment Agent initialized
+2025-12-31 23:30:44 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment Agent running...
+2025-12-31 23:30:44 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:44 | Agent.CoordinationAgent   | INFO     | All agents started
+2025-12-31 23:30:44 | Agent.CoordinationAgent   | DEBUG    | Scheduled task: health_check (every 30.0s)
+2025-12-31 23:30:44 | Agent.CoordinationAgent   | DEBUG    | Scheduled task: prediction_pipeline (every 1.0s)
+2025-12-31 23:30:44 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:30:44 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:44 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1915)
+2025-12-31 23:30:45 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:46 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:30:46 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:46 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1915)
+2025-12-31 23:30:46 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:47 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:30:47 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:47 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:30:47 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:30:47 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:47 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:30:48 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:49 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0676
+2025-12-31 23:30:49 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:49 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1915)
+2025-12-31 23:30:49 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:50 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0676
+2025-12-31 23:30:50 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1915)
+2025-12-31 23:30:50 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:50 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:51 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:30:51 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:30:51 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:51 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:52 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:30:52 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:52 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:30:52 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:53 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:30:53 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:30:53 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:53 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:54 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0676
+2025-12-31 23:30:54 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1915)
+2025-12-31 23:30:54 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:54 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:55 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:30:55 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:30:55 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:55 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:56 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:30:56 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:56 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:30:56 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:58 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:30:58 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:58 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:30:58 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0676
+2025-12-31 23:30:58 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1915)
+2025-12-31 23:30:58 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:59 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:59 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0676
+2025-12-31 23:30:59 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:30:59 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1915)
+2025-12-31 23:31:00 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:01 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0676
+2025-12-31 23:31:01 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:01 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1915)
+2025-12-31 23:31:02 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:31:02 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:02 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:31:02 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:31:02 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:02 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:31:03 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:03 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0676
+2025-12-31 23:31:03 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:03 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1915)
+2025-12-31 23:31:04 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:04 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0676
+2025-12-31 23:31:04 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:04 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1915)
+2025-12-31 23:31:05 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:05 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:31:05 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:05 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:31:06 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:07 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:31:07 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:07 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:31:07 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:08 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:31:08 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:08 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:31:08 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:09 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:31:09 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:31:09 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:09 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:10 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0676
+2025-12-31 23:31:10 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:10 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1915)
+2025-12-31 23:31:11 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:31:11 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:11 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:31:11 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:12 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:31:12 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:12 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:31:12 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:13 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:31:13 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:13 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:31:14 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0676
+2025-12-31 23:31:14 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:14 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1915)
+2025-12-31 23:31:14 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:15 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0676
+2025-12-31 23:31:15 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:15 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:31:15 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:16 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:31:16 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:31:16 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:16 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:17 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:31:17 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:17 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:31:17 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:18 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0676
+2025-12-31 23:31:18 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:18 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:31:19 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:19 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0676
+2025-12-31 23:31:19 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:19 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1915)
+2025-12-31 23:31:20 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:20 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:31:20 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:20 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1915)
+2025-12-31 23:31:21 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:21 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:21 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0676
+2025-12-31 23:31:21 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1915)
+2025-12-31 23:31:22 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:22 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:31:22 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:22 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:31:23 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:23 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0676
+2025-12-31 23:31:23 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1915)
+2025-12-31 23:31:23 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:24 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:24 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0676
+2025-12-31 23:31:24 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:24 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1915)
+2025-12-31 23:31:25 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0676
+2025-12-31 23:31:25 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:25 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1915)
+2025-12-31 23:31:26 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:26 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:31:26 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:26 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:31:27 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:27 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:31:27 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:27 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:31:28 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:29 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0677
+2025-12-31 23:31:29 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:29 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1916)
+2025-12-31 23:31:29 | Agent.PredictionAgent     | INFO     | Prediction cycle complete. Max Cascade Probability: 0.0676
+2025-12-31 23:31:29 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:29 | Agent.RiskAssessmentAgent | INFO     | Risk Assessment: LOW (Risk Score: 0.1915)
+2025-12-31 23:31:30 | Agent.CoordinationAgent   | DEBUG    | DATA message received from data_acquisition
+2025-12-31 23:31:30 | AgenticSystem             | INFO     | Stopping multi-agent system...
+2025-12-31 23:31:30 | Agent.CoordinationAgent   | INFO     | Stopping all agents...
+2025-12-31 23:31:30 | Agent.DataAcquisitionAgent | INFO     | Stopping agent: DataAcquisitionAgent
+2025-12-31 23:31:30 | Agent.PredictionAgent     | INFO     | Stopping agent: PredictionAgent
+2025-12-31 23:31:30 | Agent.RiskAssessmentAgent | INFO     | Stopping agent: RiskAssessmentAgent
+2025-12-31 23:31:30 | Agent.CoordinationAgent   | INFO     | Stopping agent: CoordinationAgent
+2025-12-31 23:31:30 | AgenticSystem             | INFO     | System stopped

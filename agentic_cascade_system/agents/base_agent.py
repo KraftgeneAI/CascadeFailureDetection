@@ -358,14 +358,12 @@ class MessageBus:
                 self.agents[message.receiver].receive_message(message)
                 return
             
-            # Broadcast to subscribers of this message type
-            subscribers = self.subscriptions.get(message.type, [])
+            subscribers = self.subscriptions.get(message.message_type, [])
+            delivered = False
             for agent_id in subscribers:
                 if agent_id != message.sender and agent_id in self.agents:
                     self.agents[agent_id].receive_message(message)
+                    delivered = True
             
-            # If no specific subscribers, broadcast to all
-            if not subscribers and not message.receiver:
-                for agent_id, agent in self.agents.items():
-                    if agent_id != message.sender:
-                        agent.receive_message(message)
+            if not delivered and not message.receiver:
+                self.logger.debug(f"No subscribers for message type: {message.message_type.value}")

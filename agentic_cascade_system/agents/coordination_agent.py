@@ -95,6 +95,7 @@ class CoordinationAgent(BaseAgent):
         self.message_handlers[MessageType.ALERT] = self._handle_alert
         self.message_handlers[MessageType.PREDICTION] = self._handle_prediction
         self.message_handlers[MessageType.COORDINATION] = self._handle_coordination
+        self.message_handlers[MessageType.DATA] = self._handle_data  # New handler registration
     
     def _register_capabilities(self):
         """Register orchestrator capabilities"""
@@ -148,6 +149,7 @@ class CoordinationAgent(BaseAgent):
         # Subscribe to important message types
         self.message_bus.subscribe(self.agent_id, MessageType.ALERT)
         self.message_bus.subscribe(self.agent_id, MessageType.PREDICTION)
+        self.message_bus.subscribe(self.agent_id, MessageType.DATA)  # Subscribe to DATA messages
         
         self.system_state['status'] = 'initialized'
         self.logger.info("Coordination Agent initialized")
@@ -182,13 +184,13 @@ class CoordinationAgent(BaseAgent):
         """Start all registered agents"""
         self.logger.info(f"Starting {len(self.managed_agents)} agents...")
         
-        tasks = []
+        # Start each agent in the background without waiting
         for agent_id, agent in self.managed_agents.items():
             if agent_id != self.agent_id:
-                tasks.append(asyncio.create_task(agent.start()))
+                asyncio.create_task(agent.start())
         
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        # Give agents a moment to initialize
+        await asyncio.sleep(0.5)
         
         self.system_state['agents_running'] = len(self.managed_agents)
         self.system_state['status'] = 'running'
@@ -293,7 +295,7 @@ class CoordinationAgent(BaseAgent):
                 return
             
             # Request batch data
-            data_response = await self._request_data(data_agent, window_size=30)
+            data_response = await self._request_data(data_agent, window_size=12)
             if not data_response or 'batch_data' not in data_response:
                 return
             
@@ -410,6 +412,13 @@ class CoordinationAgent(BaseAgent):
                 message_type=MessageType.RESPONSE,
                 payload={'status': 'pipeline_stopped'}
             )
+        
+        return None
+    
+    async def _handle_data(self, message: AgentMessage) -> Optional[AgentMessage]:
+        """Handle data messages"""
+        self.logger.debug(f"DATA message received from {message.sender}")
+        # Implement data handling logic here if needed
         
         return None
     

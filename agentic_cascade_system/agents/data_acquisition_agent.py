@@ -45,7 +45,7 @@ class DataAcquisitionAgent(BaseAgent):
     - Autonomous robotic platforms (visual, thermal, sensors)
     """
     
-    def __init__(self, agent_id: str, data_dir: str = "./data", topology_path: str = None):
+    def __init__(self, agent_id: str = "data_acquisition", data_dir: str = "./data", topology_path: str = None):
         super().__init__(
             agent_id=agent_id,
             name="DataAcquisitionAgent",
@@ -81,7 +81,7 @@ class DataAcquisitionAgent(BaseAgent):
         
         # Register message handlers
         self.message_handlers[MessageType.DATA] = self._handle_data_request
-        self.message_handlers[MessageType.QUERY] = self._handle_query
+        self.message_handlers[MessageType.QUERY] = self._handle_query  # Register handler for QUERY messages for data requests
     
     def _register_capabilities(self):
         """Register agent capabilities"""
@@ -387,8 +387,9 @@ class DataAcquisitionAgent(BaseAgent):
             self.sequence_buffer.pop(0)
     
     async def _broadcast_data_ready(self):
-        """Broadcast that new data is available"""
+        """Notify coordinator that new data is available"""
         await self.send_message(AgentMessage(
+            receiver="coordinator",  # Specify receiver to avoid broadcast warnings
             message_type=MessageType.DATA,
             payload={
                 "event": "data_ready",
@@ -462,25 +463,44 @@ class DataAcquisitionAgent(BaseAgent):
                         'thermal_data', 'sensor_data']
         
         batch_data = {}
-        actual_window = min(window_size, len(self.sequence_buffer))
+        current_len = len(self.sequence_buffer)
         
+        # --- NEW LOGIC: Handle padding/slicing ---
         for key in sequence_keys:
-            tensors = [step[key] for step in self.sequence_buffer[-actual_window:]]
+            if current_len < window_size:
+                # Pad with the first frame repeated to fill the window
+                padding_count = window_size - current_len
+                first_frame = self.sequence_buffer[0][key]
+                # Create a list of tensors for padding
+                padding = [first_frame.clone() for _ in range(padding_count)]
+                # Combine padding + actual data
+                tensors = padding + [step[key] for step in self.sequence_buffer]
+            else:
+                # Take the last 'window_size' frames
+                tensors = [step[key] for step in self.sequence_buffer[-window_size:]]
+            
             stacked = torch.stack(tensors, dim=0)  # (seq_len, num_nodes, features)
             batch_data[key] = stacked.unsqueeze(0)  # Add batch dimension
+        # -----------------------------------------
         
         # Edge data from latest timestep
         batch_data['edge_attr'] = self.sequence_buffer[-1]['edge_attr'].unsqueeze(0)
-        batch_data['edge_index'] = torch.from_numpy(self.edge_index).long()
+        
+        # Handle edge_index (Tensor vs Numpy fix from before)
+        if isinstance(self.edge_index, torch.Tensor):
+            batch_data['edge_index'] = self.edge_index.long()
+        else:
+            batch_data['edge_index'] = torch.from_numpy(self.edge_index).long()
+            
         batch_data['edge_mask'] = torch.ones(1, self.num_edges)
-        batch_data['sequence_length'] = torch.tensor([actual_window])
+        batch_data['sequence_length'] = torch.tensor([window_size]) # Fixed length
         batch_data['temporal_sequence'] = batch_data['scada_data']
         
         return {
             "batch_data": {k: v.numpy().tolist() for k, v in batch_data.items()},
             "num_nodes": self.num_nodes,
             "num_edges": self.num_edges,
-            "sequence_length": actual_window
+            "sequence_length": window_size
         }
     
     async def _handle_query(self, message: AgentMessage) -> Optional[AgentMessage]:

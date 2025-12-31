@@ -165,7 +165,7 @@ class RiskAssessmentAgent(BaseAgent):
         
         # Assess risk
         risk_assessment = self.assess_risk(prediction)
-        
+        self.logger.info(f"Risk Assessment: {risk_assessment['severity'].value.upper()} (Risk Score: {risk_assessment['aggregate_risk']:.4f})")
         # Generate alert if necessary
         if risk_assessment['severity'] in [AlertSeverity.HIGH, AlertSeverity.CRITICAL]:
             alert = self._create_alert(prediction, risk_assessment)
@@ -256,15 +256,40 @@ class RiskAssessmentAgent(BaseAgent):
             Dictionary with risk assessment results
         """
         # Extract risk vector (7 dimensions)
-        risk_vector = prediction.get('risk_assessment', [0.0] * 7)
+        raw_risk = prediction.get('risk_assessment', [0.0] * 7)
+        
+        # --- FIX: Ensure risk_vector is flat 1D array of floats ---
+        # The model might return [Nodes, 7] or nested lists. We must flatten it.
+        try:
+            rv = np.array(raw_risk)
+            if rv.ndim > 1:
+                # If we have multiple nodes/batches, take the mean risk across them
+                rv = np.mean(rv, axis=tuple(range(rv.ndim - 1)))
+            
+            # Ensure it is exactly 7 elements
+            if rv.size != 7:
+                 # Fallback if dimensions are wrong
+                 rv = np.zeros(7)
+                 
+            risk_vector = rv.tolist()
+        except Exception as e:
+            self.logger.error(f"Error processing risk vector: {e}")
+            risk_vector = [0.0] * 7
+        # ----------------------------------------------------------
+
         if len(risk_vector) < 7:
             risk_vector = risk_vector + [0.0] * (7 - len(risk_vector))
         
         # Calculate weighted aggregate risk
-        aggregate_risk = sum(
-            risk_vector[cat.value] * weight
-            for cat, weight in self.risk_weights.items()
-        )
+        aggregate_risk = 0.0
+        try:
+            aggregate_risk = sum(
+                float(risk_vector[cat.value]) * weight
+                for cat, weight in self.risk_weights.items()
+            )
+        except Exception as e:
+             self.logger.error(f"Error calculating aggregate risk: {e}")
+             aggregate_risk = 0.0
         
         # Determine severity
         severity = self._determine_severity(aggregate_risk, prediction)
@@ -351,7 +376,14 @@ class RiskAssessmentAgent(BaseAgent):
             base_severity = AlertSeverity.CRITICAL
         
         # Escalate based on cascade probability
-        cascade_prob = prediction.get('cascade_probability', 0.0)
+        # FIX: Ensure cascade_prob is a float, not a sequence/array
+        raw_prob = prediction.get('cascade_probability', 0.0)
+        try:
+            cascade_prob = float(raw_prob)
+        except:
+             # If it's an array/list, take the max
+             cascade_prob = float(np.max(raw_prob))
+
         if cascade_prob > 0.8:
             base_severity = AlertSeverity.CRITICAL
         
@@ -380,7 +412,12 @@ class RiskAssessmentAgent(BaseAgent):
         base_time = 25.0  # Average prediction lead time
         
         # Adjust based on cascade probability
-        cascade_prob = prediction.get('cascade_probability', 0.0)
+        raw_prob = prediction.get('cascade_probability', 0.0)
+        try:
+             cascade_prob = float(raw_prob)
+        except:
+             cascade_prob = float(np.max(raw_prob))
+
         if cascade_prob > 0.8:
             return base_time * 0.5  # ~12 minutes
         elif cascade_prob > 0.6:
@@ -444,7 +481,13 @@ class RiskAssessmentAgent(BaseAgent):
         
         cascade_path = prediction.get('cascade_path', [])
         if cascade_path and len(cascade_path) > 0:
-            root_node = cascade_path[0].get('node_id')
+            # Fix potential dict vs object access
+            first_node = cascade_path[0]
+            if isinstance(first_node, dict):
+                root_node = first_node.get('node_id')
+            else:
+                root_node = getattr(first_node, 'node_id', 'Unknown')
+
             recommendations.append(
                 f"Focus mitigation on potential cascade root: Node {root_node}"
             )

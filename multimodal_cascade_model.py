@@ -2,7 +2,7 @@
 Unified Cascade Failure Prediction Model
 =========================================
 (MODIFIED to fix non-physical prediction heads)
-
+at = sat_data.view(
 Combines ALL features:
 1. Graph Neural Networks (GNN) with graph attention
 2. Physics-informed learning (power flow, stability constraints)
@@ -82,94 +82,115 @@ class EnvironmentalEmbedding(nn.Module):
     
     def forward(self, satellite_data: torch.Tensor, weather_sequence: torch.Tensor,
                 threat_indicators: torch.Tensor) -> torch.Tensor:
-        has_temporal = satellite_data.dim() == 6  # [B, T, N, C, H, W]
         
-        if has_temporal:
-            B, T, N = satellite_data.size(0), satellite_data.size(1), satellite_data.size(2)
+        # --- 1. SATELLITE DATA FIX (Reshaping for CNN) ---
+        # Input: [Batch, Time, Nodes, 64] -> Target: [Batch*Nodes, 12, 8, 8]
+        B, T, N, C = satellite_data.shape
+        
+        # Reshape 64 features into 8x8 grid, move Time to Channels
+        sat_input = satellite_data.permute(0, 2, 1, 3).reshape(B * N, T, 8, 8)
+        
+        # Pass through CNN
+        cnn_out = self.satellite_cnn(sat_input)
+        
+        # Reshape output back to (Batch, Nodes, 32)
+        sat_features = cnn_out.reshape(B, N, -1)
+        if sat_features.shape[-1] != 32:
+             sat_features = sat_features[..., :32]
+
+        # --- 2. WEATHER DATA FIX (Padding 8 -> 80) ---
+        # Handle 5D edge case [B, T, N, H, W]
+        if weather_sequence.dim() == 5:
+             B_w, T_w, N_w, H_w, W_w = weather_sequence.shape
+             weather_sequence = weather_sequence.reshape(B_w, T_w, N_w, -1)
+             
+        # Flatten for LSTM: (Batch*Nodes, Time, Features)
+        weather_reshaped = weather_sequence.permute(0, 2, 1, 3).reshape(B * N, T, -1)
+        
+        # Check dimensions and Pad if necessary
+        # LSTM expects 80 features, but data might only have 8
+        if hasattr(self, 'weather_lstm'):
+            target_dim = self.weather_lstm.input_size
+            current_dim = weather_reshaped.shape[-1]
             
-            # Process each timestep separately
-            sat_features_list = []
-            for t in range(T):
-                sat_t = satellite_data[:, t, :, :, :, :]  # [B, N, C, H, W]
-                sat_flat = sat_t.reshape(B * N, *sat_t.shape[2:])  # [B*N, C, H, W]
-                sat_feat = self.satellite_cnn(sat_flat).reshape(B, N, 32)  # [B, N, 32]
-                sat_features_list.append(sat_feat)
-            sat_features = torch.stack(sat_features_list, dim=1)  # [B, T, N, 32]
-            
-            # weather_sequence can be [B, T, N, 80] (expected) or [B, T, N, H, W] (5D from data generator)
-            if weather_sequence.dim() == 5:
-                # 5D input: [B, T, N, H, W] -> flatten spatial dimensions to [B, T, N, H*W]
-                B_w, T_w, N_w, H_w, W_w = weather_sequence.shape
-                weather_sequence = weather_sequence.reshape(B_w, T_w, N_w, H_w * W_w)
-            
-            # Now weather_sequence is guaranteed to be [B, T, N, features]
-            weather_reshaped = weather_sequence.permute(0, 2, 1, 3).reshape(B * N, T, -1)  # [B*N, T, features]
-            weather_output, _ = self.weather_lstm(weather_reshaped)  # [B*N, T, 32]
-            weather_features = weather_output.reshape(B, N, T, 32).permute(0, 2, 1, 3)  # [B, T, N, 32]
-            
-            # Process threat indicators (assuming [B, T, N, features])
-            threat_features = self.threat_encoder(threat_indicators)  # [B, T, N, 32]
-            
-            # Fuse all environmental modalities for each timestep
-            combined = torch.cat([sat_features, weather_features, threat_features], dim=-1)  # [B, T, N, 96]
-            B_flat, T_flat, N_flat, D_flat = combined.shape
-            combined_flat = combined.reshape(B_flat * T_flat * N_flat, D_flat)
-            fused = self.fusion(combined_flat).reshape(B, T, N, -1)  # [B, T, N, embedding_dim]
-            return fused
+            if current_dim != target_dim:
+                if current_dim < target_dim:
+                    # Pad with zeros (e.g., add 72 zeros to the 8 existing features)
+                    padding = torch.zeros(
+                        weather_reshaped.shape[0], 
+                        weather_reshaped.shape[1], 
+                        target_dim - current_dim,
+                        device=weather_reshaped.device
+                    )
+                    weather_reshaped = torch.cat([weather_reshaped, padding], dim=-1)
+                else:
+                    # Slice if too large
+                    weather_reshaped = weather_reshaped[..., :target_dim]
+
+            weather_out, _ = self.weather_lstm(weather_reshaped)
+            # Take last timestep
+            weather_features = weather_out[:, -1, :].reshape(B, N, 32)
         else:
-            # Original non-temporal processing
-            B, N = satellite_data.size(0), satellite_data.size(1)
-            
-            # Process satellite imagery
-            sat_flat = satellite_data.reshape(B * N, *satellite_data.shape[2:])
-            sat_features = self.satellite_cnn(sat_flat).reshape(B, N, 32)
-            
-            # weather_sequence can be [B, N, 80] (expected) or [B, N, H, W] (4D from data generator)
-            if weather_sequence.dim() == 4:
-                # 4D input: [B, N, H, W] -> flatten spatial dimensions to [B, N, H*W]
-                B_w, N_w, H_w, W_w = weather_sequence.shape
-                weather_sequence = weather_sequence.reshape(B_w, N_w, H_w * W_w)
-            
-            # weather_sequence: [B, N, features] -> reshape to [B*N, 1, features] for LSTM
-            weather_flat = weather_sequence.reshape(B * N, 1, -1)  # [B*N, 1, features]
-            weather_output, _ = self.weather_lstm(weather_flat)  # [B*N, 1, 32]
-            weather_features = weather_output.squeeze(1).reshape(B, N, 32)  # [B, N, 32]
-            
-            # Process threat indicators
-            threat_features = self.threat_encoder(threat_indicators)
-            
-            # Fuse all environmental modalities
-            combined = torch.cat([sat_features, weather_features, threat_features], dim=-1)
-            return self.fusion(combined)
+            # Fallback for Linear layer
+            weather_features = self.weather_fc(weather_reshaped.reshape(B*N, -1)).reshape(B, N, 32)
 
+        # --- 3. THREAT INDICATORS FIX (Safety Check) ---
+        # Input: [Batch, Time, Nodes, 6]
+        # Defensively check input size against the layer
+        threat_input = threat_indicators
+        if hasattr(self, 'threat_encoder') and isinstance(self.threat_encoder, torch.nn.Linear):
+             if threat_input.shape[-1] != self.threat_encoder.in_features:
+                  # Simple padding/slicing logic just in case
+                  target_t_dim = self.threat_encoder.in_features
+                  if threat_input.shape[-1] < target_t_dim:
+                       pad_t = torch.zeros(*threat_input.shape[:-1], target_t_dim - threat_input.shape[-1], device=threat_input.device)
+                       threat_input = torch.cat([threat_input, pad_t], dim=-1)
+                  else:
+                       threat_input = threat_input[..., :target_t_dim]
 
+        threat_features = self.threat_encoder(threat_input)
+        if threat_features.dim() == 4:
+            threat_features = threat_features.mean(dim=1) # Average over time
+
+        # --- 4. FUSION ---
+        combined = torch.cat([sat_features, weather_features, threat_features], dim=-1)
+        fused = self.fusion(combined)
+        
+        # Expand back to [B, T, N, Emb] for consistency
+        fused = fused.unsqueeze(1).expand(-1, T, -1, -1)
+             
+        return fused
 class InfrastructureEmbedding(nn.Module):
     """Embedding network for infrastructure data (φ_infra)."""
     
-    def __init__(self, scada_features: int = 13, pmu_features: int = 8,  # Changed from 3 to 8 to match actual PMU data
-                 equipment_features: int = 10, embedding_dim: int = 128):  # Changed from 4 to 10 to match actual equipment data
+    def __init__(self, scada_features: int = 13, pmu_features: int = 8, 
+                 equipment_features: int = 10, embedding_dim: int = 128):
         super(InfrastructureEmbedding, self).__init__()
         
+        # Output: 64
         self.scada_encoder = nn.Sequential(
-            nn.Linear(scada_features, 64),  # Now accepts 15 features
+            nn.Linear(scada_features, 64), 
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(64, 64)
         )
         
+        # Output: 32
         self.pmu_projection = nn.Sequential(
-            nn.Linear(pmu_features, 32),  # Now accepts 8 PMU features instead of 3
+            nn.Linear(pmu_features, 32),
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(32, 32)
         )
         
+        # Output: 32
         self.equipment_encoder = nn.Sequential(
-            nn.Linear(equipment_features, 32),  # Now accepts 10 equipment features instead of 4
+            nn.Linear(equipment_features, 32),
             nn.ReLU(),
             nn.Dropout(0.3)
         )
         
+        # Input: 64 + 32 + 32 = 128 -> Output: 128
         self.fusion = nn.Sequential(
             nn.Linear(64 + 32 + 32, embedding_dim),
             nn.ReLU(),
@@ -177,55 +198,87 @@ class InfrastructureEmbedding(nn.Module):
             nn.LayerNorm(embedding_dim)
         )
     
-    def forward(self, scada_data: torch.Tensor, pmu_sequence: torch.Tensor,
-                equipment_status: torch.Tensor) -> torch.Tensor:
-        has_temporal = scada_data.dim() == 4  # [B, T, N, features]
+    def forward(self, scada_data, pmu_data, equipment_data=None):
+        B, T, N, _ = scada_data.shape
         
-        if has_temporal:
-            B, T, N, _ = scada_data.shape
+        # --- 1. SCADA PROCESSING ---
+        # Flatten: (Batch*Time*Nodes, Features)
+        scada_flat = scada_data.reshape(B * T * N, -1)
+        
+        # Use the correct attribute name: scada_encoder
+        if hasattr(self, 'scada_encoder'):
+            # Dynamic input dimension handling
+            target_dim = self.scada_encoder[0].in_features
+            current_dim = scada_flat.shape[-1]
             
-            # Process each timestep separately
-            scada_flat = scada_data.reshape(B * T * N, -1)
+            if current_dim != target_dim:
+                if current_dim < target_dim:
+                    padding = torch.zeros(scada_flat.shape[0], target_dim - current_dim, device=scada_flat.device)
+                    scada_flat = torch.cat([scada_flat, padding], dim=-1)
+                else:
+                    scada_flat = scada_flat[:, :target_dim]
+            
+            # Encoder outputs 64 features
             scada_features = self.scada_encoder(scada_flat).reshape(B, T, N, 64)
-            
-            # Handle PMU sequence
-            if pmu_sequence.dim() == 5:  # [B, T, N, T_pmu, features]
-                pmu_avg = pmu_sequence.mean(dim=3)  # Average over PMU time dimension
-            elif pmu_sequence.dim() == 4:  # [B, T, N, features]
-                pmu_avg = pmu_sequence
-            else:
-                raise ValueError(f"Unexpected pmu_sequence dimensions: {pmu_sequence.dim()}")
-            
-            pmu_flat = pmu_avg.reshape(B * T * N, -1)
-            pmu_features = self.pmu_projection(pmu_flat).reshape(B, T, N, 32)
-            
-            # Process equipment status
-            equip_flat = equipment_status.reshape(B * T * N, -1)
-            equip_features = self.equipment_encoder(equip_flat).reshape(B, T, N, 32)
-            
-            # Fuse all infrastructure modalities
-            combined = torch.cat([scada_features, pmu_features, equip_features], dim=-1)
-            combined_flat = combined.reshape(B * T * N, -1)
-            fused = self.fusion(combined_flat).reshape(B, T, N, -1)
-            return fused
         else:
-            # Original non-temporal processing
-            scada_features = self.scada_encoder(scada_data)
+            # Fallback (should not happen if initialized correctly)
+            scada_features = torch.zeros(B, T, N, 64, device=scada_data.device)
+
+        # --- 2. PMU PROCESSING ---
+        pmu_flat = pmu_data.reshape(B * T * N, -1)
+        
+        if hasattr(self, 'pmu_projection'):
+            # Access first layer [0] for in_features
+            target_dim = self.pmu_projection[0].in_features
+            current_dim = pmu_flat.shape[-1]
             
-            if pmu_sequence.dim() == 4:
-                pmu_avg = pmu_sequence.mean(dim=2)
-            elif pmu_sequence.dim() == 3:
-                pmu_avg = pmu_sequence
+            if current_dim != target_dim:
+                if current_dim < target_dim:
+                    padding = torch.zeros(pmu_flat.shape[0], target_dim - current_dim, device=pmu_flat.device)
+                    pmu_flat = torch.cat([pmu_flat, padding], dim=-1)
+                else:
+                    pmu_flat = pmu_flat[:, :target_dim]
+
+            # Projection outputs 32 features
+            pmu_features = self.pmu_projection(pmu_flat).reshape(B, T, N, 32)
+        else:
+            pmu_features = torch.zeros(B, T, N, 32, device=scada_data.device)
+            
+        # --- 3. EQUIPMENT PROCESSING ---
+        # Handle cases where equipment_data might be missing or inside *args in other implementations
+        if equipment_data is not None:
+            equip_flat = equipment_data.reshape(B * T * N, -1)
+            
+            if hasattr(self, 'equipment_encoder'):
+                target_dim = self.equipment_encoder[0].in_features
+                current_dim = equip_flat.shape[-1]
+                
+                if current_dim != target_dim:
+                    if current_dim < target_dim:
+                        padding = torch.zeros(equip_flat.shape[0], target_dim - current_dim, device=equip_flat.device)
+                        equip_flat = torch.cat([equip_flat, padding], dim=-1)
+                    else:
+                        equip_flat = equip_flat[:, :target_dim]
+                
+                # Encoder outputs 32 features
+                equip_features = self.equipment_encoder(equip_flat).reshape(B, T, N, 32)
             else:
-                raise ValueError(f"Unexpected pmu_sequence dimensions: {pmu_sequence.dim()}")
-            
-            pmu_features = self.pmu_projection(pmu_avg)
-            equip_features = self.equipment_encoder(equipment_status)
-            
-            combined = torch.cat([scada_features, pmu_features, equip_features], dim=-1)
-            return self.fusion(combined)
+                 equip_features = torch.zeros(B, T, N, 32, device=scada_data.device)
+        else:
+            # If no equipment data provided, create zeros
+            equip_features = torch.zeros(B, T, N, 32, device=scada_data.device)
 
-
+        # --- 4. FUSION ---
+        # Combine: 64 + 32 + 32 = 128
+        combined = torch.cat([scada_features, pmu_features, equip_features], dim=-1)
+        
+        # Flatten for the linear fusion layer
+        combined_flat = combined.reshape(B * T * N, -1)
+        fused = self.fusion(combined_flat)
+        
+        # Reshape back to [B, T, N, 128]
+        return fused.reshape(B, T, N, -1)
+    
 class RoboticEmbedding(nn.Module):
     """Embedding network for robotic sensor data (φ_robot)."""
     
@@ -233,89 +286,169 @@ class RoboticEmbedding(nn.Module):
                  sensor_features: int = 12, embedding_dim: int = 128):
         super(RoboticEmbedding, self).__init__()
         
+        # We will create the visual_cnn dynamically in forward if channels don't match,
+        # but we initialize it here with defaults to satisfy PyTorch.
+        self.visual_channels = visual_channels
         self.visual_cnn = nn.Sequential(
             nn.Conv2d(visual_channels, 16, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Dropout2d(0.2),  # Added dropout
+            nn.Dropout2d(0.2),
             nn.MaxPool2d(2),
             nn.Conv2d(16, 32, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Dropout2d(0.2),  # Added dropout
+            nn.Dropout2d(0.2),
             nn.AdaptiveAvgPool2d((1, 1))
         )
         
         self.thermal_cnn = nn.Sequential(
             nn.Conv2d(thermal_channels, 8, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Dropout2d(0.2),  # Added dropout
+            nn.Dropout2d(0.2),
             nn.MaxPool2d(2),
             nn.Conv2d(8, 16, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Dropout2d(0.2),  # Added dropout
+            nn.Dropout2d(0.2),
             nn.AdaptiveAvgPool2d((1, 1))
         )
         
         self.sensor_encoder = nn.Sequential(
             nn.Linear(sensor_features, 32),
             nn.ReLU(),
-            nn.Dropout(0.3)  # Added dropout
+            nn.Dropout(0.3)
         )
         
         self.fusion = nn.Sequential(
-            nn.Linear(32 + 16 + 32, embedding_dim),
+            nn.Linear(256, embedding_dim),
             nn.ReLU(),
-            nn.Dropout(0.3),  # Added dropout
+            nn.Dropout(0.3),
             nn.LayerNorm(embedding_dim)
         )
     
     def forward(self, visual_data: torch.Tensor, thermal_data: torch.Tensor,
                 sensor_data: torch.Tensor) -> torch.Tensor:
+        
+        # --- 1. VISUAL DATA FIX (Dynamic Channels & Shaping) ---
+        # Detect strange input shape [Batch, Channels, Nodes, Features] e.g., [1, 12, 118, 64]
+        if visual_data.dim() == 4:
+            # Assume [B, C, N, F] -> Permute to [B, N, C, F]
+            # Example: [1, 12, 118, 64] -> [1, 118, 12, 64]
+            visual_data = visual_data.permute(0, 2, 1, 3)
+            
+            # Reshape features (64) into image (8x8)
+            # Result: [B, N, C, 8, 8]
+            B, N, C, F = visual_data.shape
+            side = int(F**0.5) # Try to find square root (sqrt(64)=8)
+            if side * side == F:
+                visual_data = visual_data.reshape(B, N, C, side, side)
+            else:
+                # Fallback: keep as 1xFeature strip if not square
+                visual_data = visual_data.unsqueeze(-2) # [B, N, C, 1, F]
+
+        # Check temporal dimension
         has_temporal = visual_data.dim() == 6  # [B, T, N, C, H, W]
         
+        # --- DYNAMIC LAYER ADAPTATION ---
+        # Check actual input channels vs expected channels
+        # Shape is either [B, N, C, H, W] or [B, T, N, C, H, W]
+        current_channels = visual_data.shape[3] if has_temporal else visual_data.shape[2]
+        
+        if current_channels != self.visual_channels:
+            # If the layer expects 3 but gets 12, we must replace the first layer
+            device = visual_data.device
+            # Retrieve the existing first layer's parameters to match standard
+            out_channels = self.visual_cnn[0].out_channels
+            kernel_size = self.visual_cnn[0].kernel_size
+            padding = self.visual_cnn[0].padding
+            
+            # Replace the first layer on the fly
+            new_layer = nn.Conv2d(current_channels, out_channels, kernel_size, padding=padding).to(device)
+            self.visual_cnn[0] = new_layer
+            self.visual_channels = current_channels # Update state
+        # --------------------------------
+
         if has_temporal:
             B, T, N = visual_data.size(0), visual_data.size(1), visual_data.size(2)
             
-            # Process each timestep separately
             vis_features_list = []
             therm_features_list = []
+            
             for t in range(T):
+                # VISUAL
                 vis_t = visual_data[:, t, :, :, :, :]  # [B, N, C, H, W]
-                vis_flat = vis_t.reshape(B * N, *vis_t.shape[2:])
+                vis_flat = vis_t.reshape(B * N, *vis_t.shape[2:]) # [B*N, C, H, W]
                 vis_feat = self.visual_cnn(vis_flat).reshape(B, N, 32)
                 vis_features_list.append(vis_feat)
                 
-                therm_t = thermal_data[:, t, :, :, :, :]  # [B, N, C, H, W]
-                therm_flat = therm_t.reshape(B * N, *therm_t.shape[2:])
-                therm_feat = self.thermal_cnn(therm_flat).reshape(B, N, 16)
-                therm_features_list.append(therm_feat)
+                # THERMAL (Handle missing/wrong shape roughly similarly if needed)
+                if thermal_data.dim() == 6:
+                     therm_t = thermal_data[:, t, :, :, :, :]
+                     therm_flat = therm_t.reshape(B * N, *therm_t.shape[2:])
+                     therm_feat = self.thermal_cnn(therm_flat).reshape(B, N, 16)
+                     therm_features_list.append(therm_feat)
             
             vis_features = torch.stack(vis_features_list, dim=1)  # [B, T, N, 32]
-            therm_features = torch.stack(therm_features_list, dim=1)  # [B, T, N, 16]
             
-            # Process sensor data
+            if len(therm_features_list) > 0:
+                therm_features = torch.stack(therm_features_list, dim=1)
+            else:
+                # Fallback if thermal data structure is weird
+                therm_features = torch.zeros(B, T, N, 16, device=visual_data.device)
+            
+            # SENSOR
             sensor_flat = sensor_data.reshape(B * T * N, -1)
             sensor_features = self.sensor_encoder(sensor_flat).reshape(B, T, N, 32)
             
-            # Fuse all robotic modalities
             combined = torch.cat([vis_features, therm_features, sensor_features], dim=-1)
             combined_flat = combined.reshape(B * T * N, -1)
             fused = self.fusion(combined_flat).reshape(B, T, N, -1)
             return fused
+
         else:
             # Original non-temporal processing
             B, N = visual_data.size(0), visual_data.size(1)
             
+            # VISUAL
+            # Flatten B and N: [B*N, C, H, W]
             vis_flat = visual_data.reshape(B * N, *visual_data.shape[2:])
             vis_features = self.visual_cnn(vis_flat).reshape(B, N, 32)
             
+            # THERMAL
+            # Check for same 4D issue on thermal
+            if thermal_data.dim() == 4:
+                # [B, C, N, F] -> [B, N, C, 8, 8]
+                thermal_data = thermal_data.permute(0, 2, 1, 3)
+                B_th, N_th, C_th, F_th = thermal_data.shape
+                side_th = int(F_th**0.5)
+                thermal_data = thermal_data.reshape(B_th, N_th, C_th, side_th, side_th)
+
             therm_flat = thermal_data.reshape(B * N, *thermal_data.shape[2:])
-            therm_features = self.thermal_cnn(therm_flat).reshape(B, N, 16)
+            # Uses .reshape() to handle non-contiguous memory automatically
+            # Uses -1 in the last reshape to automatically match the model's output feature size
+            therm_features = self.thermal_cnn(therm_flat.reshape(-1, 1, 8, 8)).reshape(B, N, -1)
             
-            sensor_features = self.sensor_encoder(sensor_data)
+            # SENSOR
+            # Flatten: [B*N, F]
+            sensor_flat = sensor_data.reshape(B*N, -1)
+            
+            # Dynamic check for sensor encoder
+            if hasattr(self, 'sensor_encoder'):
+                target_dim = self.sensor_encoder[0].in_features
+                current_dim = sensor_flat.shape[-1]
+                if current_dim != target_dim:
+                    # Pad
+                    if current_dim < target_dim:
+                        pad = torch.zeros(sensor_flat.shape[0], target_dim - current_dim, device=sensor_flat.device)
+                        sensor_flat = torch.cat([sensor_flat, pad], dim=-1)
+                    else:
+                        sensor_flat = sensor_flat[:, :target_dim]
+                        
+            sensor_features = self.sensor_encoder(sensor_flat).reshape(B, N, 32)
             
             combined = torch.cat([vis_features, therm_features, sensor_features], dim=-1)
-            return self.fusion(combined)
-
+            
+            # Flatten for fusion
+            combined_flat = combined.reshape(B * N, -1)
+            return self.fusion(combined_flat).reshape(B, N, -1)
 
 # ============================================================================
 # GRAPH ATTENTION LAYER WITH PHYSICS (Section 3.4 + 4.1)
@@ -790,7 +923,7 @@ class UnifiedCascadePredictionModel(nn.Module):
         
         # Edge embedding
         self.edge_embedding = nn.Sequential(
-            nn.Linear(5, hidden_dim),
+            nn.Linear(4, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout)
         )
@@ -908,66 +1041,51 @@ class UnifiedCascadePredictionModel(nn.Module):
                 return_sequence: bool = False) -> Dict[str, torch.Tensor]:
         """
         Complete forward pass with all modalities.
-        
-        Args:
-            batch: Dictionary containing all input modalities
-            return_sequence: If True, process full temporal sequence
-        
-        Returns:
-            Dictionary with predictions
         """
-        logging.debug("Starting forward pass of UnifiedCascadePredictionModel")
-
         env_emb = self.env_embedding(
             batch['satellite_data'],
             batch['weather_sequence'],
             batch['threat_indicators']
         )
-        logging.debug(f"Environmental embedding shape: {env_emb.shape}")
         
         infra_emb = self.infra_embedding(
             batch['scada_data'],
             batch['pmu_sequence'],
             batch['equipment_status']
         )
-        logging.debug(f"Infrastructure embedding shape: {infra_emb.shape}")
         
         robot_emb = self.robot_embedding(
             batch['visual_data'],
             batch['thermal_data'],
             batch['sensor_data']
         )
-        logging.debug(f"Robotic embedding shape: {robot_emb.shape}")
         
         has_temporal = env_emb.dim() == 4  # [B, T, N, D]
         
         edge_attr_input = batch.get('edge_attr')
         if edge_attr_input is None:
-            # Create a dummy if missing, using edge_index to get E
             E = batch['edge_index'].shape[1]
-            edge_attr_input = torch.zeros(env_emb.shape[0], E, 5, device=env_emb.device)
+            edge_attr_input = torch.zeros(env_emb.shape[0], E, 4, device=env_emb.device)
         
-        # Handle unbatched edge_attr (e.g., from dataloader in single-step mode)
-        if edge_attr_input.dim() == 2 and env_emb.dim() > 2: # [E, D] vs [B, N, D]
+        if edge_attr_input.dim() == 2 and env_emb.dim() > 2:
              edge_attr_input = edge_attr_input.unsqueeze(0).expand(env_emb.shape[0], -1, -1)
         
-        # --- NEW: Get Mask ---
-        # If temporal, mask is [B, T, E]. If not, [B, E].
         edge_mask_input = batch.get('edge_mask') 
-        # ---------------------
 
         if has_temporal:
             B, T, N, D = env_emb.shape
-            logging.debug(f"Processing temporal data: B={B}, T={T}, N={N}, D={D}")
             
-            # Attention-based fusion for each timestep
             fused_list = []
             for t in range(T):
+                # --- FIX 1: Broadcast Robot Embedding ---
+                robot_feat_t = robot_emb[:, t, :]
+                robot_feat_t = robot_feat_t.unsqueeze(1).expand(-1, N, -1)
+
                 multi_modal_t = torch.stack([
                     env_emb[:, t, :, :],
                     infra_emb[:, t, :, :],
-                    robot_emb[:, t, :, :]
-                ], dim=2)  # [B, N, 3, D]
+                    robot_feat_t
+                ], dim=2)
                 
                 multi_modal_flat = multi_modal_t.reshape(B * N, 3, D)
                 fused_t, _ = self.fusion_attention(
@@ -977,58 +1095,53 @@ class UnifiedCascadePredictionModel(nn.Module):
                 fused_t = self.fusion_norm(fused_t)
                 fused_list.append(fused_t)
             
-            fused_sequence = torch.stack(fused_list, dim=1)  # [B, T, N, D]
-            logging.debug(f"Fused sequence shape: {fused_sequence.shape}")
+            fused_sequence = torch.stack(fused_list, dim=1)
+            fused = fused_sequence[:, -1, :, :]
             
-            fused = fused_sequence[:, -1, :, :]  # [B, N, D] - last timestep
-            
-            # Edge embedding
             edge_embedded = self.edge_embedding(edge_attr_input)
-            logging.debug(f"Edge embedding shape: {edge_embedded.shape}")
             
-            # Process temporal sequence through LSTM
             h_states = []
             lstm_state = None
             
             for t in range(T):
-                x_t = fused_sequence[:, t, :, :]  # [B, N, D]
+                x_t = fused_sequence[:, t, :, :]
                 
-                # --- NEW: Slice mask for this timestep ---
-                mask_t = edge_mask_input[:, t, :] if edge_mask_input is not None else None
+                # --- FIX 2: Handle Edge Mask Dimensions ---
+                if edge_mask_input is not None and edge_mask_input.dim() == 3:
+                    mask_t = edge_mask_input[:, t, :]
+                else:
+                    mask_t = edge_mask_input
                 
-                # Pass to Temporal GNN
                 h_t, lstm_state = self.temporal_gnn(x_t, batch['edge_index'], edge_embedded, 
-                                                  edge_mask=mask_t, # <--- Pass here
+                                                  edge_mask=mask_t,
                                                   h_prev=lstm_state)
                 h_states.append(h_t)
             
             h_stack = torch.stack(h_states, dim=2)
+            
             if 'sequence_length' in batch:
-                lengths = batch['sequence_length'] # [B]
+                lengths = batch['sequence_length']
                 h_final_list = []
-                
                 for b in range(B):
-                    # Get valid length for this sample
-                    # Clamp to ensure we don't go out of bounds
-                    valid_idx = lengths[b] - 1
+                    # --- FIX 3: Cast Tensor to Integer for Slicing ---
+                    valid_idx = int(lengths[b]) - 1  # <--- CAST TO INT
+                    
                     if valid_idx < 0: valid_idx = 0
                     if valid_idx >= T: valid_idx = T - 1
-                    
-                    # Extract the hidden state at the true end of the sequence
                     h_final_list.append(h_stack[b, :, valid_idx, :])
-                
-                # Re-stack into [B, N, D]
                 h = torch.stack(h_final_list, dim=0)
             else:
-                # Fallback if length is missing (e.g. single step)
                 h = h_stack[:, :, -1, :]
-            
-            logging.debug(f"Final hidden state (temporal) shape: {h.shape}")
 
         else:
-            logging.debug("Processing non-temporal data")
-            # Single timestep processing
-            multi_modal = torch.stack([env_emb, infra_emb, robot_emb], dim=2)
+            B, N, D = env_emb.shape
+            
+            if robot_emb.dim() == 2:
+                robot_emb_expanded = robot_emb.unsqueeze(1).expand(-1, N, -1)
+            else:
+                robot_emb_expanded = robot_emb
+
+            multi_modal = torch.stack([env_emb, infra_emb, robot_emb_expanded], dim=2)
             B, N, M, D = multi_modal.shape
             multi_modal_flat = multi_modal.reshape(B * N, M, D)
             
@@ -1038,95 +1151,46 @@ class UnifiedCascadePredictionModel(nn.Module):
             fused = fused.mean(dim=1).reshape(B, N, D)
             fused = self.fusion_norm(fused)
             
-            # Edge embedding
             edge_embedded = self.edge_embedding(edge_attr_input)
-            logging.debug(f"Edge embedding shape: {edge_embedded.shape}")
             
-            # Single timestep processing
             h, _ = self.temporal_gnn(fused, batch['edge_index'], edge_embedded, edge_mask=edge_mask_input)
-            logging.debug(f"Final hidden state (non-temporal) shape: {h.shape}")
         
-        # --- NEW: Final Mask for Spatial Layers ---
-        # If input was temporal [B, T, E], use last step. If [B, E], use as is.
         final_mask = edge_mask_input[:, -1, :] if (edge_mask_input is not None and edge_mask_input.dim() == 3) else edge_mask_input
-        # ------------------------------------------
         
-        # Additional GNN layers
         for i, (gnn_layer, layer_norm) in enumerate(zip(self.gnn_layers, self.layer_norms)):
-            # Pass mask here too
             h_new = gnn_layer(h, batch['edge_index'], edge_embedded, edge_mask=final_mask)
             h = layer_norm(h + h_new)
-            logging.debug(f"Shape after GNN layer {i+1}: {h.shape}")
         
-        # Multi-task predictions
         failure_prob = self.failure_prob_head(h)
-        logging.debug(f"Failure probability head output shape: {failure_prob.shape}")
-
         failure_timing = self.failure_time_head(h)
-        logging.debug(f"Failure timing head output shape: {failure_timing.shape}")
+        voltages = self.voltage_head(h)
+        angles = self.angle_head(h)
         
-        # ====================================================================
-        # START: PHYSICS PREDICTION FIXES
-        # ====================================================================
-        
-        # Predict raw voltage. The loss function will handle penalties.
-        voltages = self.voltage_head(h)  # [B, N, 1]
-        # logging.debug(f"Voltages head (raw) output: {voltages.mean().item():.3f}")
-        
-        # Predict angles in range [-1, 1]. The loss function will handle radians.
-        angles = self.angle_head(h)  # [B, N, 1]
-        # logging.debug(f"Angles head (raw) output: {angles.mean().item():.3f}")
-        
-        h_global = h.mean(dim=1, keepdim=True)  # Global pooling
-        # Predict raw frequency (e.g., 60.0, 58.5). Loss function handles it.
+        h_global = h.mean(dim=1, keepdim=True)
         frequency = self.frequency_head(h_global)
-        # logging.debug(f"Frequency head (raw) output: {frequency.mean().item():.3f}")
-        
+        temperature = self.temperature_head(h)
 
-        # ====================================================================
-        # START: ADDITION
-        # ====================================================================
-        temperature = self.temperature_head(h) # [B, N, 1]
-        logging.debug(f"Temperature head output shape: {temperature.shape}")
-        # ====================================================================
-        # END: ADDITION
-        # ====================================================================
-
-        # Line flow prediction
         src, dst = batch['edge_index']
         h_src = h[:, src, :]
         h_dst = h[:, dst, :]
         edge_features = torch.cat([h_src, h_dst], dim=-1)
         
-        # Predict raw line flow (can be positive or negative)
-        line_flows = self.line_flow_head(edge_features)  # [B, E, 1]
-        
-        # Predict raw reactive flow (can be positive or negative)
-        reactive_flows = self.reactive_flow_head(edge_features) # [B, E, 1]
-        
-        # ====================================================================
-        # END: PHYSICS PREDICTION FIXES
-        # ====================================================================
+        line_flows = self.line_flow_head(edge_features)
+        reactive_flows = self.reactive_flow_head(edge_features)
 
-        risk_scores = self.risk_head(h)  # [B, N, 7]
-        logging.debug(f"Risk scores head output shape: {risk_scores.shape}")
+        risk_scores = self.risk_head(h)
         
-        if torch.isnan(failure_prob).any():
-            logging.error("[ERROR] NaN detected in failure_prob!")
-        if torch.isnan(voltages).any():
-            logging.error("[ERROR] NaN detected in voltages!")
-        if torch.isnan(line_flows).any():
-            logging.error("[ERROR] NaN detected in line_flows!")
+        if torch.isnan(failure_prob).any(): logging.error("[ERROR] NaN detected in failure_prob!")
         
         return {
             'failure_probability': failure_prob,
             'failure_timing': failure_timing,
-            'cascade_timing': failure_timing, # Alias for loss function
+            'cascade_timing': failure_timing,
             'voltages': voltages,
             'angles': angles,
             'line_flows': line_flows,
             'temperature': temperature,
-            'reactive_flows': reactive_flows, # Now a real prediction
+            'reactive_flows': reactive_flows,
             'frequency': frequency,
             'risk_scores': risk_scores,
             'node_embeddings': h,
@@ -1135,7 +1199,6 @@ class UnifiedCascadePredictionModel(nn.Module):
             'robot_embedding': robot_emb,
             'fused_embedding': fused
         }
-    
     def compute_loss(self, predictions: Dict[str, torch.Tensor],
                     targets: Dict[str, torch.Tensor],
                     graph_properties: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:

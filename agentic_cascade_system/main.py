@@ -36,15 +36,51 @@ from agents.coordination_agent import CoordinationAgent
 
 def setup_logging(log_level: str = "INFO"):
     """Configure logging for the multi-agent system"""
-    logging.basicConfig(
-        level=getattr(logging, log_level.upper()),
-        format='%(asctime)s | %(name)-25s | %(levelname)-8s | %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler(f'agentic_system_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
-        ]
+    # 1. Define the filename
+    log_filename = f'agentic_system_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
+    
+    # 2. Get the Root Logger and set it to DEBUG (capture everything)
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    
+    # 3. Create Formatters
+    # Detailed format for file (includes agent name and time)
+    file_formatter = logging.Formatter(
+        '%(asctime)s | %(name)-25s | %(levelname)-8s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
     )
+    # Simple format for console
+    console_formatter = logging.Formatter(
+        '%(asctime)s | %(levelname)-8s | %(message)s',
+        datefmt='%H:%M:%S'
+    )
+
+    # 4. Clear existing handlers (prevents duplicate logs on restart)
+    if root_logger.handlers:
+        root_logger.handlers = []
+
+    # 5. Handler 1: CONSOLE (Standard output)
+    # Uses the level passed in args (default: INFO) so the screen isn't flooded
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(getattr(logging, log_level.upper()))
+    console_handler.setFormatter(console_formatter)
+    root_logger.addHandler(console_handler)
+
+    # 6. Handler 2: FILE (Detailed Log)
+    # Forces DEBUG level so ALL transactions and data details are saved to disk
+    file_handler = logging.FileHandler(log_filename, mode='w', encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG) 
+    file_handler.setFormatter(file_formatter)
+    root_logger.addHandler(file_handler)
+    
+    # 7. Silence noisy 3rd party libraries
+    logging.getLogger("matplotlib").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+    print(f"[-] Logging initialized.")
+    print(f"[-] Console Level: {log_level}")
+    print(f"[-] File Level:    DEBUG (Full Transaction History)")
+    print(f"[-] Log File:      {log_filename}")
 
 
 class AgenticCascadeSystem:
@@ -59,13 +95,15 @@ class AgenticCascadeSystem:
         data_dir: str,
         topology_path: str = None,
         device: str = None,
-        prediction_interval: float = 1.0
+        prediction_interval: float = 1.0,
+        verbose: bool = False
     ):
         self.model_path = model_path
         self.data_dir = data_dir
         self.topology_path = topology_path or f"{data_dir}/grid_topology.pkl"
         self.device = device
         self.prediction_interval = prediction_interval
+        self.verbose = verbose
         
         self.logger = logging.getLogger("AgenticSystem")
         
@@ -77,7 +115,15 @@ class AgenticCascadeSystem:
         
         # Running state
         self._running = False
-    
+        
+        self._stats = {
+            'data_collections': 0,
+            'predictions_made': 0,
+            'alerts_generated': 0,
+            'last_prediction': None,
+            'last_alert_level': 'NONE'
+        }
+
     def _create_agents(self):
         """Create all system agents"""
         self.logger.info("Creating agents...")
@@ -138,9 +184,52 @@ class AgenticCascadeSystem:
             self.logger.info("Starting multi-agent system...")
             await self.coordinator.start()
             
+            if self.verbose:
+                asyncio.create_task(self._monitor_loop())
+            
         except Exception as e:
             self.logger.error(f"System startup failed: {e}")
             raise
+
+    async def _monitor_loop(self):
+        """Periodically print system status when verbose mode is enabled"""
+        monitor_interval = 5.0  # Print status every 5 seconds
+        
+        while self._running:
+            await asyncio.sleep(monitor_interval)
+            
+            if not self._running:
+                break
+                
+            # Get current status
+            status = self.get_status()
+            
+            # Print formatted status
+            print("\n" + "-" * 60)
+            print(f"  SYSTEM STATUS ({datetime.now().strftime('%H:%M:%S')})")
+            print("-" * 60)
+            
+            # Agent states
+            print("  AGENTS:")
+            for agent_id, agent_status in status.get('agents', {}).items():
+                state = agent_status.get('state', 'unknown')
+                msgs = agent_status.get('messages_processed', 0)
+                state_icon = "[OK]" if state == 'running' else "[--]"
+                print(f"    {state_icon} {agent_id}: {state} (msgs: {msgs})")
+            
+            # System stats
+            sys_state = status.get('system_state', {})
+            print(f"\n  STATISTICS:")
+            print(f"    Predictions Made: {sys_state.get('total_predictions', 0)}")
+            print(f"    Active Alerts: {sys_state.get('active_alerts', 0)}")
+            print(f"    Uptime: {sys_state.get('uptime_seconds', 0):.1f}s")
+            
+            # Message bus stats
+            msg_stats = status.get('message_bus', {})
+            print(f"\n  MESSAGE BUS:")
+            print(f"    Total Messages: {msg_stats.get('total_messages', 0)}")
+            
+            print("-" * 60)
     
     async def stop(self):
         """Stop the multi-agent system"""
@@ -171,9 +260,10 @@ async def run_demo(args):
         data_dir=args.data_dir,
         topology_path=args.topology_path,
         device=args.device,
-        prediction_interval=args.prediction_interval
+        prediction_interval=args.prediction_interval,
+        verbose=args.verbose
     )
-    
+
     # Handle shutdown signals
     loop = asyncio.get_event_loop()
     
@@ -269,6 +359,12 @@ def main():
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging level"
+    )
+    
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Enable verbose output with periodic status updates"
     )
     
     args = parser.parse_args()
