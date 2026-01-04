@@ -9,6 +9,8 @@ in the research paper, coordinating:
 - Prediction Agent  
 - Risk Assessment Agent
 - Coordination Agent (Orchestrator)
+- Threat Response Agent (New)
+- Grid Stabilization Agent (New)
 
 Author: Kraftgene AI Inc.
 
@@ -27,55 +29,61 @@ from datetime import datetime
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from agents.base_agent import MessageBus
+# Removed unused MessageBus import
 from agents.data_acquisition_agent import DataAcquisitionAgent
 from agents.prediction_agent import PredictionAgent
 from agents.risk_assessment_agent import RiskAssessmentAgent
 from agents.coordination_agent import CoordinationAgent
+# NEW: Import the response agents
+from agents.response_agents import ThreatResponseAgent, GridStabilizationAgent
 
 
 def setup_logging(log_level: str = "INFO"):
-    """Configure logging for the multi-agent system"""
-    # 1. Define the filename
-    log_filename = f'agentic_system_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
+    """
+    Configure logging for the multi-agent system.
     
-    # 2. Get the Root Logger and set it to DEBUG (capture everything)
+    Strategy:
+    - CONSOLE: Shows high-level INFO/WARNINGs (Clean output)
+    - FILE:    Records detailed DEBUG logs (Full transaction history)
+    """
+    # 1. Define the filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_filename = f'agentic_system_{timestamp}.log'
+    
+    # 2. Get the Root Logger and set it to DEBUG (capture everything globally)
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
     
     # 3. Create Formatters
-    # Detailed format for file (includes agent name and time)
     file_formatter = logging.Formatter(
         '%(asctime)s | %(name)-25s | %(levelname)-8s | %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
-    # Simple format for console
     console_formatter = logging.Formatter(
         '%(asctime)s | %(levelname)-8s | %(message)s',
         datefmt='%H:%M:%S'
     )
 
-    # 4. Clear existing handlers (prevents duplicate logs on restart)
+    # 4. Clear existing handlers
     if root_logger.handlers:
         root_logger.handlers = []
 
-    # 5. Handler 1: CONSOLE (Standard output)
-    # Uses the level passed in args (default: INFO) so the screen isn't flooded
+    # 5. Handler 1: CONSOLE
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(getattr(logging, log_level.upper()))
     console_handler.setFormatter(console_formatter)
     root_logger.addHandler(console_handler)
 
-    # 6. Handler 2: FILE (Detailed Log)
-    # Forces DEBUG level so ALL transactions and data details are saved to disk
+    # 6. Handler 2: FILE
     file_handler = logging.FileHandler(log_filename, mode='w', encoding='utf-8')
     file_handler.setLevel(logging.DEBUG) 
     file_handler.setFormatter(file_formatter)
     root_logger.addHandler(file_handler)
     
-    # 7. Silence noisy 3rd party libraries
+    # 7. Silence noisy libraries
     logging.getLogger("matplotlib").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("asyncio").setLevel(logging.WARNING)
 
     print(f"[-] Logging initialized.")
     print(f"[-] Console Level: {log_level}")
@@ -112,6 +120,8 @@ class AgenticCascadeSystem:
         self.data_agent: DataAcquisitionAgent = None
         self.prediction_agent: PredictionAgent = None
         self.risk_agent: RiskAssessmentAgent = None
+        self.threat_agent: ThreatResponseAgent = None
+        self.stabilization_agent: GridStabilizationAgent = None
         
         # Running state
         self._running = False
@@ -128,26 +138,36 @@ class AgenticCascadeSystem:
         """Create all system agents"""
         self.logger.info("Creating agents...")
         
-        # Create Coordination Agent (Orchestrator)
+        # 1. Coordination Agent (Orchestrator)
         self.coordinator = CoordinationAgent(agent_id="coordinator")
         
-        # Create Data Acquisition Agent
+        # 2. Data Acquisition Agent
         self.data_agent = DataAcquisitionAgent(
             agent_id="data_acquisition",
             data_dir=self.data_dir,
             topology_path=self.topology_path
         )
         
-        # Create Prediction Agent
+        # 3. Prediction Agent
         self.prediction_agent = PredictionAgent(
             agent_id="prediction",
             model_path=self.model_path,
             device=self.device
         )
         
-        # Create Risk Assessment Agent
+        # 4. Risk Assessment Agent
         self.risk_agent = RiskAssessmentAgent(
             agent_id="risk_assessment"
+        )
+
+        # 5. Threat Response Agent (NEW)
+        self.threat_agent = ThreatResponseAgent(
+            agent_id="threat_response"
+        )
+
+        # 6. Grid Stabilization Agent (NEW)
+        self.stabilization_agent = GridStabilizationAgent(
+            agent_id="grid_stabilization"
         )
         
         self.logger.info("All agents created")
@@ -159,6 +179,9 @@ class AgenticCascadeSystem:
         self.coordinator.register_agent(self.data_agent)
         self.coordinator.register_agent(self.prediction_agent)
         self.coordinator.register_agent(self.risk_agent)
+        # NEW: Register the actuation agents
+        self.coordinator.register_agent(self.threat_agent)
+        self.coordinator.register_agent(self.stabilization_agent)
         
         self.logger.info("All agents registered")
     
