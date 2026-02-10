@@ -1,16 +1,63 @@
 """
-Rule-Based Multi-Modal Data Generator for Cascade Failure Detection
-====================================================================
-Generates data based on CONSISTENT RULES that the model can learn:
-- Node properties (loading, voltage, temperature, frequency)
-- Failure thresholds (when does a node fail?)
-- Cascade propagation (which nodes fail when another fails?)
-- Temporal patterns (gradual degradation before failure)
+Multi-Modal Cascade Failure Data Generator
+===========================================
 
-The model learns to recognize:
-1. When node properties violate thresholds → node fails
-2. When node A fails → connected nodes B, C, D fail (based on edges)
-3. Temporal patterns before failure (loading increases, voltage drops, etc.)
+PURPOSE:
+--------
+Generates realistic power grid cascade failure scenarios with multi-modal data for
+training the AI cascade prediction model. Since real cascade failures are rare and
+catastrophic, we use physics-based simulation to create synthetic training data.
+
+WHAT IT GENERATES:
+------------------
+Three types of correlated data that tell the same story from different perspectives:
+
+1. INFRASTRUCTURE DATA (SCADA/PMU sensors):
+   - Voltage, frequency, power flow measurements
+   - Based on real AC power flow physics
+   - 13 features per node per timestep
+
+2. ENVIRONMENTAL DATA (Satellite + Weather):
+   - Satellite imagery (12 channels, 16x16 pixels per node)
+   - Weather sequences (temperature, humidity, wind, precipitation)
+   - Threat indicators (fire, storm, geohazard, flood, ice, equipment damage)
+   - Correlated with grid stress and failures
+
+3. ROBOTIC DATA (Drone sensors):
+   - Visual feeds (RGB images, 32x32 pixels)
+   - Thermal camera (temperature maps, 32x32 pixels)
+   - Sensor array (vibration, acoustic, magnetic, oil quality, partial discharge)
+   - Shows equipment condition and precursor signals
+
+SCENARIO TYPES:
+---------------
+- NORMAL (stress 0.3-0.7): Grid operates safely, no failures
+- STRESSED (stress 0.8-0.9): High load but no failures (near-miss scenarios)
+- CASCADE (stress > 0.9): Failures propagate through grid (A→B→C chain reaction)
+
+HOW IT WORKS:
+-------------
+1. Create grid topology (118-node IEEE test system)
+2. For each scenario:
+   a. Set stress level (determines load/generation balance)
+   b. Run physics simulation (power flow, thermal, frequency dynamics)
+   c. Check if any node exceeds failure thresholds
+   d. If failure occurs, propagate cascade through network
+   e. Generate correlated environmental and robotic data
+   f. Record ground truth labels (which nodes failed, when, why)
+3. Save scenarios to train/val/test splits
+
+OUTPUT:
+-------
+Pickle files containing batches of scenarios, each with:
+- Multi-modal input data (infrastructure, environmental, robotic)
+- Ground truth labels (failure labels, timing, risk vectors, causal paths)
+- Graph structure (topology, edge features)
+
+USAGE:
+------
+python multimodal_data_generator.py --normal 1000 --cascade 800 --stressed 200 \\
+    --output-dir data --topology-file data/grid_topology.pkl
 
 Author: Kraftgene AI Inc. (R&D)
 Date: October 2025
@@ -30,7 +77,21 @@ import argparse
 
 
 class MemoryMonitor:
-    """Monitor memory usage."""
+    """
+    Monitor memory usage to prevent Out-Of-Memory (OOM) errors.
+    
+    The data generator creates large arrays (satellite images, thermal maps, etc.)
+    that can consume significant memory. This class helps track usage and warn
+    before running out of memory.
+    
+    Methods:
+    --------
+    get_memory_usage() : float
+        Returns current memory usage in MB
+        
+    check_threshold(threshold_mb) : bool
+        Returns True if memory usage exceeds threshold, issues warning
+    """
     
     @staticmethod
     def get_memory_usage():
@@ -48,14 +109,64 @@ class MemoryMonitor:
 
 class PhysicsBasedGridSimulator:
     """
-    Rule-based power grid simulator with CONSISTENT PATTERNS.
+    Physics-Based Power Grid Simulator for Cascade Failure Generation
+    ==================================================================
     
-    --- ADVANCED FEATURES ---
-    1.  Partial Failure: Nodes can enter a "Damaged" state (partial failure)
-        which does not propagate a cascade, simulating a cascade "fizzling out".
-        The final "node_label" for the model remains 0 for this state.
-    2.  Directed Propagation: Cascade propagation is directed (e.g., A -> B,
-        but not B -> A), respecting the grid hierarchy (Gen -> Sub -> Load).
+    This class simulates a power grid with realistic physics to generate training
+    data for cascade failure prediction. It models:
+    
+    GRID COMPONENTS:
+    ----------------
+    - Nodes: Generators, loads, and transmission substations (default: 118 nodes)
+    - Edges: Transmission lines connecting nodes (default: ~186 lines)
+    - Topology: Based on IEEE 118-bus test system
+    
+    PHYSICS MODELS:
+    ---------------
+    1. Power Flow: Simplified AC power flow (voltage, angle, line flows)
+       - Voltages drop under heavy load (quadratic model)
+       - Angles respond to power injection (cubic model)
+       - Line flows follow sin(angle_difference) relationship
+    
+    2. Frequency Dynamics: System frequency responds to generation/load imbalance
+       - Drops when load > generation
+       - Rises when generation > load
+       - Includes inertia and damping effects
+    
+    3. Thermal Dynamics: Equipment heats up under load
+       - Heat gain proportional to loading²
+       - Heat loss proportional to temperature difference
+       - Overheating triggers failures
+    
+    4. Cascade Propagation: Failures spread through network
+       - Failed node → power reroutes → neighbors overload → neighbors fail
+       - Realistic timing (0.1-0.5 minutes between failures)
+       - Stops when stress dissipates or 60% of grid fails
+    
+    FAILURE MODES:
+    --------------
+    - Overloading: Line flow > thermal capacity
+    - Voltage collapse: Voltage < 0.85 p.u.
+    - Overheating: Equipment temperature > 120°C
+    - Frequency deviation: Frequency < 58 Hz or > 62 Hz
+    
+    MULTI-MODAL DATA:
+    -----------------
+    Generates three correlated data streams:
+    1. Infrastructure (SCADA/PMU): Real physics measurements
+    2. Environmental (Satellite/Weather): Synthetic but correlated with grid state
+    3. Robotic (Drone sensors): Synthetic equipment condition indicators
+    
+    ADVANCED FEATURES:
+    ------------------
+    - Partial Failure: Nodes can enter "Damaged" state (cascade fizzles out)
+    - Directed Propagation: Cascade follows grid hierarchy (Gen → Sub → Load)
+    - Precursor Signals: Warning signs appear 10-15 timesteps before failures
+    
+    USAGE:
+    ------
+    simulator = PhysicsBasedGridSimulator(num_nodes=118, seed=42)
+    scenario = simulator._generate_scenario_data(stress_level=0.95, sequence_length=30)
     """
     
     def __init__(self, num_nodes: int = 118, seed: int = 42, topology_file: str = None):
@@ -555,10 +666,71 @@ class PhysicsBasedGridSimulator:
         failed_nodes: Optional[List[int]] = None
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, bool]:
         """
-        Compute an ultra-simple, stable, NON-LINEAR power flow.
-        This provides more complex patterns for the model to learn.
+        Compute simplified non-linear power flow for the grid.
         
-        Returns: voltages, angles, line_flows, is_stable (always True)
+        This is a SIMPLIFIED version of AC power flow that's fast and stable,
+        but still captures the essential non-linear behavior that makes cascade
+        prediction challenging.
+        
+        WHY SIMPLIFIED?
+        ---------------
+        Real AC power flow requires solving non-linear equations iteratively
+        (Newton-Raphson method), which is slow and can fail to converge. For
+        generating thousands of training scenarios, we need something faster
+        and more stable.
+        
+        PHYSICS MODELS:
+        ---------------
+        1. VOLTAGE (Quadratic drop under load):
+           V = 1.05 - 0.01×load - 0.04×load²
+           - Light load (0.5): V ≈ 1.04 p.u. (normal)
+           - Heavy load (1.0): V ≈ 1.00 p.u. (stressed)
+           - Overload (1.2): V ≈ 0.94 p.u. (critical)
+           Models accelerating voltage collapse under stress
+        
+        2. ANGLE (Cubic response to power):
+           θ = 0.05×P + 0.01×P³
+           - Generators (P > 0): Positive angle (leading)
+           - Loads (P < 0): Negative angle (lagging)
+           - Non-linear response captures instability
+        
+        3. LINE FLOW (Sine-based, like real AC):
+           Flow = Susceptance × sin(θ_source - θ_dest) × 100
+           - Approximates real AC power flow equation
+           - Flow proportional to angle difference
+           - Susceptance is line property (higher = more flow capacity)
+        
+        Parameters:
+        -----------
+        generation : np.ndarray, shape (num_nodes,)
+            Power generation at each node in MW
+            
+        load : np.ndarray, shape (num_nodes,)
+            Power consumption at each node in MW
+            
+        failed_lines : List[int], optional
+            Indices of transmission lines that have failed (flow = 0)
+            
+        failed_nodes : List[int], optional
+            Indices of nodes that have failed (generation = 0, load = 0)
+        
+        Returns:
+        --------
+        voltages : np.ndarray, shape (num_nodes,)
+            Voltage magnitude at each node in per-unit (p.u.)
+            Normal range: 0.95-1.05, Critical: <0.90
+            
+        angles : np.ndarray, shape (num_nodes,)
+            Voltage angle at each node in radians
+            Reference: Node 0 (slack bus) = 0.0
+            
+        line_flows : np.ndarray, shape (num_edges,)
+            Active power flow on each line in MW
+            Positive = source→destination, Negative = destination→source
+            
+        is_stable : bool
+            Always True (this simplified model doesn't check stability)
+            Real power flow can fail to converge (unstable system)
         """
         
         gen = generation.copy()
@@ -820,7 +992,95 @@ class PhysicsBasedGridSimulator:
         stress_level: float
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Generate environmental data CORRELATED with infrastructure failures.
+        Generate synthetic environmental data correlated with grid failures.
+        
+        PURPOSE:
+        --------
+        Creates realistic-looking satellite imagery, weather data, and threat
+        indicators that are CORRELATED with the grid's physical state. This
+        teaches the model to fuse multi-modal data.
+        
+        WHY SYNTHETIC?
+        --------------
+        Real satellite/weather data for power grids is:
+        - Expensive to obtain
+        - Rarely available during actual cascades
+        - Hard to label (which weather caused which failure?)
+        
+        Synthetic data lets us create perfect correlations for training.
+        
+        CORRELATION STRATEGY:
+        ---------------------
+        1. Base patterns: Realistic but random (weather cycles, terrain)
+        2. Stress indicators: Increase with grid stress level
+        3. Precursor signals: Appear 10-15 timesteps before failures
+        4. Failure signatures: Heat/smoke appear when equipment fails
+        5. Spatial propagation: Threats spread to nearby nodes
+        
+        GENERATED DATA:
+        ---------------
+        1. SATELLITE IMAGERY (12 channels × 16×16 pixels per node):
+           - Channels 0-3: Visible spectrum (RGB + Near-Infrared)
+           - Channels 4-7: Vegetation indices (NDVI, etc.)
+           - Channels 8-9: Water/moisture content
+           - Channels 10-11: Thermal infrared (heat signatures)
+           
+           Correlation examples:
+           - Failed nodes show heat signatures in thermal bands
+           - Smoke reduces visibility in RGB bands
+           - Storm patterns correlate with high stress
+        
+        2. WEATHER SEQUENCE (10 timesteps × 8 features per node):
+           - Temperature (°C): Diurnal cycle + stress correlation
+           - Humidity (%): Inverse correlation with temperature
+           - Wind speed (m/s): Higher during stressed scenarios
+           - Precipitation (mm/h): Exponential distribution
+           - Pressure (hPa): Random walk around 1000 hPa
+           - Solar radiation (W/m²): Follows sun angle
+           - Cloud cover (%): Inverse of solar radiation
+           - Visibility (km): Reduced by precipitation
+        
+        3. THREAT INDICATORS (6 types per node):
+           - [0] Fire/heat threat: High near failed nodes
+           - [1] Storm severity: Correlated with stress level
+           - [2] Geohazard (landslide/earthquake): Random baseline
+           - [3] Flood risk: Correlated with precipitation
+           - [4] Ice/snow loading: Seasonal (not implemented)
+           - [5] Equipment damage: High on failed lines
+        
+        Parameters:
+        -----------
+        failed_nodes : List[int]
+            Nodes that have failed (used to add heat signatures)
+            
+        failed_lines : List[int]
+            Lines that have failed (used to add damage indicators)
+            
+        timestep : int
+            Current timestep (0 to sequence_length-1)
+            Used for time-of-day effects (temperature, solar radiation)
+            
+        cascade_start : int
+            Timestep when cascade begins (-1 if no cascade)
+            Used to add precursor signals before failures
+            
+        stress_level : float
+            Overall grid stress (0.0 to 1.0)
+            Higher stress → more threatening weather
+        
+        Returns:
+        --------
+        satellite_data : np.ndarray, shape (num_nodes, 12, 16, 16)
+            Synthetic satellite imagery for each node
+            dtype=float16 to save memory
+            
+        weather_sequence : np.ndarray, shape (num_nodes, 10, 8)
+            Weather time series (last 10 timesteps, 8 features)
+            dtype=float16 to save memory
+            
+        threat_indicators : np.ndarray, shape (num_nodes, 6)
+            Threat levels for 6 hazard types (0.0 to 1.0)
+            dtype=float16 to save memory
         """
         
         satellite_data = np.zeros((self.num_nodes, 12, 16, 16), dtype=np.float16)
@@ -930,7 +1190,114 @@ class PhysicsBasedGridSimulator:
         equipment_temps: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Generate robotic sensor data CORRELATED with equipment condition.
+        Generate synthetic robotic sensor data correlated with equipment condition.
+        
+        PURPOSE:
+        --------
+        Simulates what drones and robotic sensors would observe when inspecting
+        power grid equipment. This data is correlated with equipment age, condition,
+        temperature, and impending failures.
+        
+        WHY ROBOTIC DATA?
+        -----------------
+        In real grids, utilities are deploying:
+        - Drones with visual/thermal cameras for line inspection
+        - Acoustic sensors to detect corona discharge
+        - Vibration sensors to detect mechanical stress
+        - Oil quality sensors in transformers
+        
+        This data provides early warning signs that SCADA sensors miss.
+        
+        CORRELATION STRATEGY:
+        ---------------------
+        1. Equipment age/condition affects visual appearance (rust, corrosion)
+        2. Temperature affects thermal camera readings
+        3. Precursor signals (vibration, acoustic) appear before failures
+        4. Partial discharge increases as equipment degrades
+        
+        GENERATED DATA:
+        ---------------
+        1. VISUAL FEED (3 channels RGB × 32×32 pixels per node):
+           - Base: Gray image (0.5 ± 0.1) representing equipment
+           - Degradation: Reddish tint (rust), dark spots (corrosion)
+           - Correlation: Worse condition → more visual defects
+           
+           Example:
+           - New equipment (condition=1.0): Clean gray
+           - Aged equipment (condition=0.6): Rust spots, discoloration
+           - Failing equipment: Visible damage, smoke
+        
+        2. THERMAL CAMERA (1 channel × 32×32 pixels per node):
+           - Base: Equipment temperature (from thermal dynamics)
+           - Hotspots: Random locations with +5 to +15°C
+           - Precursor: Temperature rises 10 timesteps before failure
+           
+           Example:
+           - Normal: 60-80°C, uniform
+           - Stressed: 90-100°C, some hotspots
+           - Failing: 110-120°C, multiple hotspots
+        
+        3. SENSOR ARRAY (12 features per node):
+           [0-2] Vibration (3-axis accelerometer, m/s²):
+                 - Base: 0.5 + equipment_age × 0.02
+                 - Increases before failure (mechanical stress)
+           
+           [3-4] Acoustic (2 microphones, dB):
+                 - Base: 0.3 (ambient noise)
+                 - Spikes before failure (corona discharge, arcing)
+           
+           [5-7] Magnetic field (3-axis magnetometer, Tesla):
+                 - Base: 1.0 (normal field)
+                 - Random noise (not strongly correlated)
+           
+           [8] Oil quality (transformers only, 0-1):
+               - Decreases with equipment condition
+               - 0.95 = new oil, 0.70 = degraded oil
+           
+           [9] Oil moisture content (ppm):
+               - Increases with equipment condition
+               - High moisture = insulation breakdown risk
+           
+           [10] Oil acidity (mg KOH/g):
+                - Increases with equipment condition
+                - High acidity = oil degradation
+           
+           [11] Partial discharge (pC):
+                - Increases with equipment condition
+                - Spikes before failure (insulation breakdown)
+        
+        Parameters:
+        -----------
+        failed_nodes : List[int]
+            Nodes that have failed (used to add failure signatures)
+            
+        failed_lines : List[int]
+            Lines that have failed (not used currently)
+            
+        timestep : int
+            Current timestep (0 to sequence_length-1)
+            
+        cascade_start : int
+            Timestep when cascade begins (-1 if no cascade)
+            Used to add precursor signals 10 timesteps before
+            
+        equipment_temps : np.ndarray, shape (num_nodes,)
+            Current equipment temperature at each node (°C)
+            From thermal dynamics simulation
+        
+        Returns:
+        --------
+        visual_data : np.ndarray, shape (num_nodes, 3, 32, 32)
+            RGB visual feed from drone cameras
+            dtype=float16 to save memory
+            
+        thermal_data : np.ndarray, shape (num_nodes, 1, 32, 32)
+            Thermal camera feed (temperature in °C)
+            dtype=float16 to save memory
+            
+        sensor_data : np.ndarray, shape (num_nodes, 12)
+            Multi-sensor array readings
+            dtype=float16 to save memory
         """
         
         visual_data = np.zeros((self.num_nodes, 3, 32, 32), dtype=np.float16)
@@ -1224,11 +1591,106 @@ class PhysicsBasedGridSimulator:
         sequence_length: int = 30
     ) -> Optional[Dict]:
         """
-        Generate a single scenario (normal, stressed, or cascade) based
-        *deterministically* on the input stress_level.
+        Generate a complete power grid scenario with multi-modal data.
+        
+        This is the MAIN FUNCTION that orchestrates the entire simulation process.
+        It generates one scenario (30 timesteps) with all three data modalities.
+        
+        PROCESS OVERVIEW:
+        -----------------
+        1. DETERMINE SCENARIO TYPE (based on stress_level):
+           - stress 0.3-0.7: NORMAL (no failures)
+           - stress 0.8-0.9: STRESSED (high load, no failures)
+           - stress > 0.9: CASCADE (failures propagate)
+        
+        2. CHECK FOR INITIAL FAILURE:
+           - Set load/generation based on stress level
+           - Run power flow simulation
+           - Check if any node exceeds failure thresholds
+           - If yes → cascade scenario
+           - If no → normal/stressed scenario
+        
+        3. PROPAGATE CASCADE (if failure detected):
+           - Start from failed node (trigger)
+           - Power reroutes to neighbors
+           - Neighbors overload and fail
+           - Repeat until cascade stops or 60% of grid fails
+           - Record failure sequence and timing
+        
+        4. GENERATE TIME SERIES (30 timesteps):
+           For each timestep:
+           - Update load/generation (ramp up to stress level)
+           - Run power flow (voltages, angles, line flows)
+           - Update frequency dynamics (responds to imbalance)
+           - Update thermal dynamics (equipment heats up)
+           - Apply failures at correct timesteps
+           - Generate correlated environmental data
+           - Generate correlated robotic data
+           - Record all measurements
+        
+        5. COMPUTE GROUND TRUTH LABELS:
+           - Node failure labels (binary: 0=safe, 1=failed)
+           - Cascade timing (minutes until failure, -1=never)
+           - Risk vectors (7-dimensional assessment)
+           - Causal path (sequence of failures)
+        
+        DETERMINISTIC BEHAVIOR:
+        -----------------------
+        Given the same stress_level and random seed, this function will
+        generate the EXACT same scenario. This is crucial for:
+        - Reproducibility (debugging, paper results)
+        - Parallel generation (multiple machines, same topology)
+        - Consistent train/val/test splits
+        
+        FAILURE THRESHOLDS:
+        -------------------
+        A node fails if ANY of these conditions are met:
+        - Loading > 100% (overload)
+        - Voltage < 0.85 p.u. (voltage collapse)
+        - Temperature > 120°C (thermal failure)
+        - Frequency < 58 Hz or > 62 Hz (frequency instability)
+        
+        Parameters:
+        -----------
+        stress_level : float, range [0.0, 1.0]
+            Overall grid stress level that determines scenario type:
+            - 0.3-0.7: Normal operation (no failures expected)
+            - 0.8-0.9: Stressed operation (near limits, no failures)
+            - 0.9-1.0: Critical stress (failures likely, cascade expected)
+            
+            Higher stress → higher load, lower generation margin
+            
+        sequence_length : int, default=30
+            Number of timesteps to simulate (default: 30 minutes)
+            Each timestep represents 1 minute of real time
         
         Returns:
-            Scenario data dict or None if generation failed
+        --------
+        scenario : Dict or None
+            Complete scenario data if successful, None if generation failed.
+            
+            Dictionary contains:
+            - 'temporal_sequence': Infrastructure data [T, N, 13]
+            - 'satellite_data': Environmental imagery [T, N, 12, 16, 16]
+            - 'weather_sequence': Weather time series [T, N, 10, 8]
+            - 'threat_indicators': Threat levels [T, N, 6]
+            - 'visual_data': Drone visual feed [T, N, 3, 32, 32]
+            - 'thermal_data': Drone thermal feed [T, N, 1, 32, 32]
+            - 'sensor_data': Drone sensors [T, N, 12]
+            - 'node_failure_labels': Binary labels [N]
+            - 'cascade_timing': Time to failure [N]
+            - 'ground_truth_risk': Risk vectors [N, 7]
+            - 'is_cascade': Boolean (True if cascade occurred)
+            - 'failed_nodes': List of failed node IDs
+            - 'failure_times': List of failure times (minutes)
+            - 'failure_reasons': List of failure causes
+            - 'stress_level': Input stress level
+            
+        Notes:
+        ------
+        - Generation can fail if physics simulation becomes unstable
+        - Failed generations return None and are retried
+        - Typical success rate: >95% for stress < 0.95
         """
         
         print(f"  [INPUT] Generating scenario with stress_level: {stress_level:.3f}")
@@ -1573,8 +2035,81 @@ class PhysicsBasedGridSimulator:
 
 
 def main():
-    """Main function to generate dataset."""
-    parser = argparse.ArgumentParser(description='Generate multi-modal cascade failure dataset')
+    """
+    Main entry point for dataset generation.
+    
+    WORKFLOW:
+    ---------
+    1. Parse command-line arguments
+    2. Create output directories (train/val/test)
+    3. Load or create grid topology
+    4. Generate scenarios in batches:
+       - Normal scenarios (low stress, no failures)
+       - Stressed scenarios (high stress, no failures)
+       - Cascade scenarios (critical stress, failures)
+    5. Split scenarios into train/val/test sets
+    6. Save batches as pickle files
+    
+    EXAMPLE USAGE:
+    --------------
+    # Generate 200 scenarios (100 normal, 80 cascade, 20 stressed)
+    python multimodal_data_generator.py \\
+        --normal 100 \\
+        --cascade 80 \\
+        --stressed 20 \\
+        --output-dir data \\
+        --topology-file data/grid_topology.pkl
+    
+    # For production training (10,000 scenarios)
+    python multimodal_data_generator.py \\
+        --normal 5000 \\
+        --cascade 4000 \\
+        --stressed 1000 \\
+        --output-dir data \\
+        --topology-file data/grid_topology.pkl
+    
+    # Parallel generation on multiple machines
+    # Machine 1:
+    python multimodal_data_generator.py --normal 2500 --cascade 2000 \\
+        --output-dir data_p1 --start_batch 0 --topology-file shared/grid_topology.pkl
+    
+    # Machine 2:
+    python multimodal_data_generator.py --normal 2500 --cascade 2000 \\
+        --output-dir data_p2 --start_batch 4500 --topology-file shared/grid_topology.pkl
+    
+    # Then merge data_p1 and data_p2 folders
+    
+    OUTPUT STRUCTURE:
+    -----------------
+    data/
+    ├── grid_topology.pkl          # Grid structure (shared by all scenarios)
+    ├── train/
+    │   ├── batch_0000.pkl        # Scenarios 0-9 (if batch_size=10)
+    │   ├── batch_0001.pkl        # Scenarios 10-19
+    │   └── ...
+    ├── val/
+    │   ├── batch_0000.pkl
+    │   └── ...
+    └── test/
+        ├── batch_0000.pkl
+        └── ...
+    """
+    parser = argparse.ArgumentParser(
+        description='Generate multi-modal cascade failure dataset for training',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Quick test (200 scenarios)
+  python multimodal_data_generator.py --normal 100 --cascade 80 --stressed 20
+  
+  # Production dataset (10,000 scenarios)
+  python multimodal_data_generator.py --normal 5000 --cascade 4000 --stressed 1000
+  
+  # Use existing topology
+  python multimodal_data_generator.py --normal 100 --cascade 80 \\
+      --topology-file data/grid_topology.pkl
+        """
+    )
     
     # ====================================================================
     # START: MODIFICATION (Add --stressed)
