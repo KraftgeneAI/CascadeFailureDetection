@@ -1509,10 +1509,54 @@ class PhysicsBasedGridSimulator:
         target_num_failures: int
     ) -> List[Tuple[int, float, str]]:
         """
-        Propagate cascade through the graph with CONTROLLED severity and
-        realistic CHAIN propagation (A->B, B->C, ...).
+        Propagate cascade failures through the power grid with controlled severity and realistic chain propagation.
         
-        Returns: list of (node_id, failure_time, reason)
+        This method simulates how failures propagate through the grid topology using a breadth-first
+        traversal approach. Starting from initial failed nodes, it evaluates neighboring nodes for
+        potential failures based on accumulated stress, loading conditions, voltage levels, temperature,
+        and frequency. The propagation follows a realistic chain pattern (A→B, B→C, ...) where each
+        failed node can trigger failures in its neighbors.
+        
+        The method implements a three-state failure model:
+        - State 0 (OK): Node remains operational, no propagation
+        - State 1 (Damaged/Partial): Node is degraded but cascade stops here
+        - State 2 (Failed): Node fails completely and can propagate to neighbors
+        
+        Args:
+            initial_failed_nodes (List[int]): List of node IDs that have already failed and serve
+                as the starting points for cascade propagation.
+            current_loading (np.ndarray): Array of current loading values for all nodes in the grid.
+                Used to calculate stress-induced loading increases on neighboring nodes.
+            current_voltage (np.ndarray): Array of current voltage values for all nodes. Used to
+                calculate voltage drops due to stress propagation.
+            current_temperature (np.ndarray): Array of current temperature values for all nodes.
+                Used to calculate temperature increases from stress accumulation.
+            current_frequency (float): Current grid frequency in Hz. Used in node state evaluation
+                to determine if frequency deviations contribute to failures.
+            target_num_failures (int): Maximum number of node failures to simulate. The propagation
+                stops once this target is reached to control cascade severity.
+        
+        Returns:
+            List[Tuple[int, float, str]]: A chronologically ordered list of failure events, where
+                each tuple contains:
+                - node_id (int): The ID of the failed node
+                - failure_time (float): Time of failure in minutes from cascade start
+                - reason (str): Description of the failure cause (e.g., "overload", "undervoltage")
+        
+        Implementation Details:
+            - Uses directed adjacency list for realistic power flow propagation
+            - Applies stress multipliers based on propagation weights between nodes
+            - Calculates physical relay-like delays (0.1-0.5 minutes) for realistic timing
+            - Tracks visited nodes to prevent duplicate processing
+            - Implements stress decay (0.8 multiplier) as cascade propagates
+            - Stops propagation at damaged nodes to prevent unrealistic cascade spread
+            
+        Example:
+            >>> initial_failures = [5, 12]
+            >>> failures = simulator._propagate_cascade_controlled(
+            ...     initial_failures, loading, voltage, temp, 60.0, target_num_failures=10
+            ... )
+            >>> # Returns: [(5, 0.0, 'initial'), (12, 0.0, 'initial'), (8, 0.3, 'overload'), ...]
         """
         failed_nodes = set(initial_failed_nodes)
         failure_sequence = []
