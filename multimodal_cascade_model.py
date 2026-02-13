@@ -83,80 +83,116 @@ class EnvironmentalEmbedding(nn.Module):
     def forward(self, satellite_data: torch.Tensor, weather_sequence: torch.Tensor,
                 threat_indicators: torch.Tensor) -> torch.Tensor:
         
-        # --- 1. SATELLITE DATA FIX (Reshaping for CNN) ---
-        # Input: [Batch, Time, Nodes, 64] -> Target: [Batch*Nodes, 12, 8, 8]
-        B, T, N, C = satellite_data.shape
+        # --- 1. SATELLITE DATA PROCESSING ---
+        # Expected input: [B, T, N, C, H, W] where C=12, H=16, W=16
+        # Goal: Process each node's satellite image through CNN, aggregate over time
         
-        # Reshape 64 features into 8x8 grid, move Time to Channels
-        sat_input = satellite_data.permute(0, 2, 1, 3).reshape(B * N, T, 8, 8)
+        if satellite_data.dim() != 6:
+            raise ValueError(f"Expected satellite_data to have 6 dimensions [B, T, N, C, H, W], "
+                           f"but got shape {satellite_data.shape}")
         
-        # Pass through CNN
+        B, T, N, C, H, W = satellite_data.shape
+        
+        # Reshape to [B*T*N, C, H, W] for CNN processing
+        # This processes all images (across batch, time, and nodes) in parallel
+        sat_input = satellite_data.reshape(B * T * N, C, H, W)
+        
+        # Pass through CNN: [B*T*N, C, H, W] -> [B*T*N, 32, 1, 1]
         cnn_out = self.satellite_cnn(sat_input)
         
-        # Reshape output back to (Batch, Nodes, 32)
-        sat_features = cnn_out.reshape(B, N, -1)
-        if sat_features.shape[-1] != 32:
-             sat_features = sat_features[..., :32]
+        # Flatten spatial dimensions: [B*T*N, 32, 1, 1] -> [B*T*N, 32]
+        cnn_out = cnn_out.squeeze(-1).squeeze(-1)
+        
+        # Reshape back to [B, T, N, 32]
+        sat_features_temporal = cnn_out.reshape(B, T, N, 32)
+        
+        # Aggregate over time (mean pooling): [B, T, N, 32] -> [B, N, 32]
+        sat_features = sat_features_temporal.mean(dim=1)
 
-        # --- 2. WEATHER DATA FIX (Padding 8 -> 80) ---
-        # Handle 5D edge case [B, T, N, H, W]
+        # --- 2. WEATHER DATA PROCESSING ---
+        # Expected input: [B, T, N, weather_features]
+        # Goal: Process temporal weather sequences through LSTM
+        
+        # Handle 5D edge case [B, T, N, H, W] - flatten spatial dimensions
         if weather_sequence.dim() == 5:
-             B_w, T_w, N_w, H_w, W_w = weather_sequence.shape
-             weather_sequence = weather_sequence.reshape(B_w, T_w, N_w, -1)
-             
-        # Flatten for LSTM: (Batch*Nodes, Time, Features)
+            B_w, T_w, N_w, H_w, W_w = weather_sequence.shape
+            weather_sequence = weather_sequence.reshape(B_w, T_w, N_w, H_w * W_w)
+        
+        # Reshape for LSTM: [B, T, N, F] -> [B*N, T, F]
         weather_reshaped = weather_sequence.permute(0, 2, 1, 3).reshape(B * N, T, -1)
         
-        # Check dimensions and Pad if necessary
-        # LSTM expects 80 features, but data might only have 8
+        # Pad or slice to match LSTM input size
         if hasattr(self, 'weather_lstm'):
             target_dim = self.weather_lstm.input_size
             current_dim = weather_reshaped.shape[-1]
             
             if current_dim != target_dim:
                 if current_dim < target_dim:
-                    # Pad with zeros (e.g., add 72 zeros to the 8 existing features)
+                    # Pad with zeros
                     padding = torch.zeros(
                         weather_reshaped.shape[0], 
                         weather_reshaped.shape[1], 
                         target_dim - current_dim,
-                        device=weather_reshaped.device
+                        device=weather_reshaped.device,
+                        dtype=weather_reshaped.dtype
                     )
                     weather_reshaped = torch.cat([weather_reshaped, padding], dim=-1)
                 else:
                     # Slice if too large
                     weather_reshaped = weather_reshaped[..., :target_dim]
 
+            # Process through LSTM: [B*N, T, F] -> [B*N, T, 32]
             weather_out, _ = self.weather_lstm(weather_reshaped)
-            # Take last timestep
+            # Take last timestep: [B*N, T, 32] -> [B*N, 32]
             weather_features = weather_out[:, -1, :].reshape(B, N, 32)
         else:
             # Fallback for Linear layer
             weather_features = self.weather_fc(weather_reshaped.reshape(B*N, -1)).reshape(B, N, 32)
 
-        # --- 3. THREAT INDICATORS FIX (Safety Check) ---
-        # Input: [Batch, Time, Nodes, 6]
-        # Defensively check input size against the layer
+        # --- 3. THREAT INDICATORS PROCESSING ---
+        # Expected input: [B, T, N, 6]
+        # Goal: Encode threat indicators and aggregate over time
+        
         threat_input = threat_indicators
-        if hasattr(self, 'threat_encoder') and isinstance(self.threat_encoder, torch.nn.Linear):
-             if threat_input.shape[-1] != self.threat_encoder.in_features:
-                  # Simple padding/slicing logic just in case
-                  target_t_dim = self.threat_encoder.in_features
-                  if threat_input.shape[-1] < target_t_dim:
-                       pad_t = torch.zeros(*threat_input.shape[:-1], target_t_dim - threat_input.shape[-1], device=threat_input.device)
-                       threat_input = torch.cat([threat_input, pad_t], dim=-1)
-                  else:
-                       threat_input = threat_input[..., :target_t_dim]
-
+        
+        # Check if we need to adjust dimensions for the encoder
+        if hasattr(self, 'threat_encoder'):
+            # Get the expected input dimension from the first layer
+            if isinstance(self.threat_encoder, nn.Sequential):
+                first_layer = self.threat_encoder[0]
+                if isinstance(first_layer, nn.Linear):
+                    target_t_dim = first_layer.in_features
+                    
+                    if threat_input.shape[-1] != target_t_dim:
+                        if threat_input.shape[-1] < target_t_dim:
+                            # Pad with zeros
+                            pad_t = torch.zeros(
+                                *threat_input.shape[:-1], 
+                                target_t_dim - threat_input.shape[-1], 
+                                device=threat_input.device,
+                                dtype=threat_input.dtype
+                            )
+                            threat_input = torch.cat([threat_input, pad_t], dim=-1)
+                        else:
+                            # Slice if too large
+                            threat_input = threat_input[..., :target_t_dim]
+        
+        # Process through encoder: [B, T, N, 6] -> [B, T, N, 32]
         threat_features = self.threat_encoder(threat_input)
+        
+        # Aggregate over time: [B, T, N, 32] -> [B, N, 32]
         if threat_features.dim() == 4:
-            threat_features = threat_features.mean(dim=1) # Average over time
+            threat_features = threat_features.mean(dim=1)
 
         # --- 4. FUSION ---
+        # Concatenate all features: [B, N, 32] + [B, N, 32] + [B, N, 32] -> [B, N, 96]
         combined = torch.cat([sat_features, weather_features, threat_features], dim=-1)
+        
+        # Fuse into final embedding: [B, N, 96] -> [B, N, embedding_dim]
         fused = self.fusion(combined)
         
-        # Expand back to [B, T, N, Emb] for consistency
+        # Expand back to [B, T, N, embedding_dim] for temporal consistency
+        # This allows the model to process temporal sequences downstream
         fused = fused.unsqueeze(1).expand(-1, T, -1, -1)
              
         return fused
@@ -317,8 +353,10 @@ class RoboticEmbedding(nn.Module):
             nn.Dropout(0.3)
         )
         
+        # FIX: Fusion layer should expect 32 + 16 + 32 = 80 input features
+        # visual_cnn outputs 32, thermal_cnn outputs 16, sensor_encoder outputs 32
         self.fusion = nn.Sequential(
-            nn.Linear(256, embedding_dim),
+            nn.Linear(80, embedding_dim),  # Changed from 256 to 80
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.LayerNorm(embedding_dim)
@@ -921,9 +959,10 @@ class UnifiedCascadePredictionModel(nn.Module):
             nn.LayerNorm(hidden_dim) for _ in range(num_gnn_layers)
         ])
         
-        # Edge embedding
+        # Edge embedding - Updated to accept 5 features:
+        # [reactance, thermal_limits, resistance, susceptance, conductance]
         self.edge_embedding = nn.Sequential(
-            nn.Linear(4, hidden_dim),
+            nn.Linear(5, hidden_dim),  # Changed from 4 to 5
             nn.ReLU(),
             nn.Dropout(dropout)
         )
@@ -1065,7 +1104,7 @@ class UnifiedCascadePredictionModel(nn.Module):
         edge_attr_input = batch.get('edge_attr')
         if edge_attr_input is None:
             E = batch['edge_index'].shape[1]
-            edge_attr_input = torch.zeros(env_emb.shape[0], E, 4, device=env_emb.device)
+            edge_attr_input = torch.zeros(env_emb.shape[0], E, 5, device=env_emb.device)  # Changed from 4 to 5
         
         if edge_attr_input.dim() == 2 and env_emb.dim() > 2:
              edge_attr_input = edge_attr_input.unsqueeze(0).expand(env_emb.shape[0], -1, -1)
@@ -1078,8 +1117,12 @@ class UnifiedCascadePredictionModel(nn.Module):
             fused_list = []
             for t in range(T):
                 # --- FIX 1: Broadcast Robot Embedding ---
-                robot_feat_t = robot_emb[:, t, :]
-                robot_feat_t = robot_feat_t.unsqueeze(1).expand(-1, N, -1)
+                # robot_emb shape: [B, T, N, D]
+                # Select timestep t: [B, N, D]
+                robot_feat_t = robot_emb[:, t, :, :]  # Explicitly select all dimensions
+                
+                # robot_feat_t should now be [B, N, D], no need to unsqueeze/expand
+                # It already has the correct shape to stack with env and infra
 
                 multi_modal_t = torch.stack([
                     env_emb[:, t, :, :],
