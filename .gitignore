@@ -13,6 +13,7 @@
 !agentic_cascade_system/agents/
 !checkpoints/
 !images/
+!archive/
 
 # And exclude the .gitignore file itself
 !.gitignore
