@@ -2534,7 +2534,7 @@ Examples:
     # ====================================================================
     
     parser.add_argument('--grid-size', type=int, default=118, help='Number of nodes in grid')
-    parser.add_argument('--sequence-length', type=int, default=120, help='Sequence length (timesteps)')
+    parser.add_argument('--sequence-length', type=int, default=60, help='Sequence length (timesteps)')
     parser.add_argument('--batch-size', type=int, default=1, help='Number of scenarios to save in each .pkl file')
     parser.add_argument('--output-dir', type=str, default='data', help='Output directory')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')

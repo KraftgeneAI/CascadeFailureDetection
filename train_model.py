@@ -138,36 +138,59 @@ class PhysicsInformedLoss(nn.Module):
             if loss.numel()>0: losses.append(loss.mean())
         return torch.stack(losses).mean() if losses else torch.tensor(0.0, device=predicted.device)
 
+    def voltage_loss(self, predicted_v, target_v):
+        """Supervised Voltage Loss (p.u.)"""
+        return F.mse_loss(predicted_v, target_v)
+
+    def reactive_power_loss(self, predicted_q, voltages, edge_index, susceptance):
+        """Rule 2: Q_ij = B_ij * (V_i - V_j) - Consistency check"""
+        src, dst = edge_index
+        v_i, v_j = voltages[:, src, :], voltages[:, dst, :]
+        
+        # Simplified reactive flow heuristic from generator
+        target_q = susceptance.unsqueeze(-1) * (v_i - v_j) 
+        
+        # Compare prediction to the physics-derived target
+        return F.mse_loss(predicted_q, target_q.detach())
+
     def forward(self, predictions, targets, graph_properties, edge_mask=None):
         loss_dict = {}
+        total_loss = 0.0
         
-        # --- 0. PREDICTION (Focal) ---
+        # Helper to safely get graph properties
+        def get_prop(key): return graph_properties.get(key)
+
+        # --- 0. PREDICTION (Focal Loss) ---
         failure_prob = predictions['failure_probability'].squeeze(-1)
-        
-        # Avoid log(0)
         failure_prob_clamped = failure_prob.clamp(1e-7, 1 - 1e-7)
         logits = torch.log(failure_prob_clamped / (1 - failure_prob_clamped))
         
         L_pred = self.focal_loss(logits, targets['failure_label'])
         loss_dict['prediction'] = L_pred.item()
-        total_loss = L_pred
+        total_loss += L_pred
 
-        # Helper
-        def get_prop(key): return graph_properties.get(key)
+        # --- 1. VOLTAGE SUPERVISION ---
+        if 'voltages' in predictions and targets.get('voltages') is not None:
+            L_volt = self.voltage_loss(predictions['voltages'], targets['voltages'])
+            total_loss += self.lambdas.get('voltage', 1.0) * L_volt
+            loss_dict['voltage'] = L_volt.item() 
 
-        # --- 1. FLOW CONSISTENCY (Rule 1) ---
-        if 'line_flows' in predictions and 'angles' in predictions:
-            # FIX: Use 'susceptance' directly from graph_properties
+        # --- 2. REACTIVE POWER CONSISTENCY ---
+        if 'reactive_flows' in predictions and 'voltages' in predictions:
             susceptance = get_prop('susceptance')
-            
-            # Fallback if susceptance is missing (should not happen with CascadeDataset)
-            if susceptance is None:
-                # Try to extract from edge_attr if present
-                edge_attr = get_prop('edge_attr')
-                if edge_attr is not None:
-                     if edge_attr.dim() == 3: susceptance = edge_attr[:, :, 3]
-                     else: susceptance = edge_attr[:, 3]
+            if susceptance is not None:
+                L_react = self.reactive_power_loss(
+                    predictions['reactive_flows'],
+                    predictions['voltages'],
+                    graph_properties['edge_index'],
+                    susceptance
+                )
+                total_loss += self.lambdas.get('reactive', 1.0) * L_react
+                loss_dict['reactive'] = L_react.item() 
 
+        # --- 3. FLOW CONSISTENCY (Rule 1: Active Power) ---
+        if 'line_flows' in predictions and 'angles' in predictions:
+            susceptance = get_prop('susceptance')
             if susceptance is not None:
                 L_flow = self.flow_consistency_loss(
                     predictions['line_flows'],
@@ -176,34 +199,34 @@ class PhysicsInformedLoss(nn.Module):
                     susceptance,
                     edge_mask
                 )
-                total_loss += self.lambdas['flow_consistency'] * L_flow
+                total_loss += self.lambdas.get('flow_consistency', 0.05) * L_flow
                 loss_dict['powerflow'] = L_flow.item()
 
-        # --- 2. TEMPERATURE (Rule 5) ---
+        # --- 4. TEMPERATURE (Rule 5) ---
         if 'temperature' in predictions and get_prop('ground_truth_temperature') is not None:
             L_temp = self.temperature_loss(predictions['temperature'], get_prop('ground_truth_temperature'))
-            total_loss += 0.05 * L_temp # Fixed weight
+            total_loss += 0.05 * L_temp 
             loss_dict['temperature'] = L_temp.item()
 
-        # --- 3. FREQUENCY (Rule 4) ---
+        # --- 5. FREQUENCY (Rule 4) ---
         if 'frequency' in predictions and get_prop('power_injection') is not None:
             L_freq = self.frequency_loss(predictions['frequency'], get_prop('power_injection'))
-            total_loss += 0.05 * L_freq # Fixed weight
+            total_loss += 0.05 * L_freq
             loss_dict['frequency'] = L_freq.item()
 
-        # --- 4. RISK & TIMING ---
-        if 'risk_scores' in predictions and 'ground_truth_risk' in targets:
+        # --- 6. RISK & TIMING ---
+        if 'risk_scores' in predictions and targets.get('ground_truth_risk') is not None:
             L_risk = self.risk_loss(predictions['risk_scores'], targets['ground_truth_risk'])
-            total_loss += self.lambdas['risk'] * L_risk
+            total_loss += self.lambdas.get('risk', 0.1) * L_risk
             loss_dict['risk'] = L_risk.item()
             
-        if 'cascade_timing' in predictions and 'cascade_timing' in targets:
+        if 'cascade_timing' in predictions and targets.get('cascade_timing') is not None:
             L_time = self.timing_loss(predictions['cascade_timing'], targets['cascade_timing'])
-            total_loss += self.lambdas['timing'] * L_time
+            total_loss += self.lambdas.get('timing', 0.1) * L_time
             loss_dict['timing'] = L_time.item()
 
         return total_loss, loss_dict
-        
+
 # ============================================================================
 # TRAINER CLASS
 # ============================================================================
@@ -408,10 +431,12 @@ class Trainer:
                     graph_properties['edge_index'] = batch_device['edge_index']
                 
                 targets = {
-                    'failure_label': batch_device['node_failure_labels'],
-                    'ground_truth_risk': batch_device.get('ground_truth_risk'),
-                    'cascade_timing': batch_device.get('cascade_timing')
-                }
+                'failure_label': batch_device['node_failure_labels'],
+                'ground_truth_risk': batch_device.get('ground_truth_risk'),
+                'cascade_timing': batch_device.get('cascade_timing'),
+                # Extract Voltage (Feature 0) from the LAST timestep (-1) of the SCADA sequence
+                'voltages': batch_device['scada_data'][:, -1, :, 0:1] if 'scada_data' in batch_device else None
+            }
 
                 # === ADD THIS BLOCK ===
                 edge_mask = batch_device.get('edge_mask')
