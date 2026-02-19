@@ -124,18 +124,25 @@ class PhysicsInformedLoss(nn.Module):
         return F.mse_loss(torch.mean(predicted_risk, dim=1), target_risk)
 
     def timing_loss(self, predicted, target):
-        """Ranking Loss"""
         pred_s = predicted.squeeze(-1)
         losses = []
         for b in range(pred_s.shape[0]):
             t = target[b]
-            pos_idx = torch.where(t >= 0)[0]
+            pos_idx = torch.where(t > -1e5)[0]
             if len(pos_idx) < 2: continue
+            
+            # 1. Absolute Time Loss (Regression)
+            # Forces model to learn actual time-to-failure physics
+            regression_loss = F.smooth_l1_loss(pred_s[b][pos_idx], t[pos_idx])
+            
+            # 2. Sequence Order Loss (Ranking)
             pairs = torch.combinations(pos_idx, r=2)
             p_diff = pred_s[b][pairs[:,0]] - pred_s[b][pairs[:,1]]
             t_diff = t[pairs[:,0]] - t[pairs[:,1]]
-            loss = torch.relu(0.1 - p_diff * torch.sign(t_diff))
-            if loss.numel()>0: losses.append(loss.mean())
+            ranking_loss = torch.relu(0.1 - p_diff * torch.sign(t_diff)).mean()
+            
+            losses.append(regression_loss + ranking_loss)
+            
         return torch.stack(losses).mean() if losses else torch.tensor(0.0, device=predicted.device)
 
     def voltage_loss(self, predicted_v, target_v):

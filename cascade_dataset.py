@@ -377,7 +377,7 @@ class CascadeDataset(Dataset):
             # ====================================================================
             
         else:
-            correct_timing_tensor = to_tensor(np.full(timing_shape, -1.0, dtype=np.float32))
+            correct_timing_tensor = to_tensor(np.full(timing_shape, -1e6, dtype=np.float32))
         
         # ====================================================================
         # START: DATA AUGMENTATION (Input Noise)
