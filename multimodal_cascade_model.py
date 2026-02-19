@@ -722,13 +722,17 @@ class PhysicsInformedLoss(nn.Module):
     """Physics-informed loss function with power flow constraints."""
     
     def __init__(self, lambda_powerflow: float = 0.1, lambda_capacity: float = 0.05,
-                 lambda_stability: float = 0.05, lambda_frequency: float = 0.08):
+                 lambda_stability: float = 0.05, lambda_frequency: float = 0.08,
+                 lambda_reactive: float = 0.1, lambda_voltage: float = 1.0):
+        
         super(PhysicsInformedLoss, self).__init__()
         
         self.lambda_powerflow = lambda_powerflow
         self.lambda_capacity = lambda_capacity
         self.lambda_stability = lambda_stability
         self.lambda_frequency = lambda_frequency  # Added frequency loss weight
+        self.lambda_reactive = lambda_reactive  # New
+        self.lambda_voltage = lambda_voltage    # New
     
     def power_flow_loss(self, voltages: torch.Tensor, angles: torch.Tensor,
                        edge_index: torch.Tensor, conductance: torch.Tensor,
@@ -840,6 +844,33 @@ class PhysicsInformedLoss(nn.Module):
         # Loss: predicted frequency should match swing equation
         return F.mse_loss(frequency, expected_frequency)
     
+    def reactive_power_loss(self, voltages, angles, edge_index, conductance, susceptance, reactive_injection):
+        """
+        Q_calc = V_i * sum( V_j * (G_ij * sin(theta_ij) - B_ij * cos(theta_ij)) )
+        """
+        src, dst = edge_index
+        batch_size = voltages.shape[0]
+
+        # Ensure shapes [B, E, 1]
+        if conductance.dim() == 2: conductance = conductance.unsqueeze(-1)
+        if susceptance.dim() == 2: susceptance = susceptance.unsqueeze(-1)
+
+        V_i = voltages[:, src, :]
+        V_j = voltages[:, dst, :]
+        theta_ij = angles[:, src, :] - angles[:, dst, :]
+
+        # Reactive Power Flow Equation (AC Physics)
+        # Note the minus sign on B_ij * cos(theta_ij)
+        Q_ij = V_i * V_j * (conductance * torch.sin(theta_ij) - susceptance * torch.cos(theta_ij))
+        Q_ij = Q_ij.squeeze(-1)
+
+        Q_calc = torch.zeros(batch_size, voltages.shape[1], device=voltages.device)
+        for b in range(batch_size):
+            Q_calc[b].index_add_(0, src, Q_ij[b])
+            Q_calc[b].index_add_(0, dst, -Q_ij[b]) # Conservation
+
+        return F.mse_loss(Q_calc.unsqueeze(-1), reactive_injection)
+
     def forward(self, predictions: Dict[str, torch.Tensor],
                 targets: Dict[str, torch.Tensor],
                 graph_properties: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
@@ -888,11 +919,27 @@ class PhysicsInformedLoss(nn.Module):
                 power_imbalance=graph_properties['power_imbalance']
             )
         
+        L_voltage = F.mse_loss(predictions['voltages'], targets['voltages'])
+
+        batch_size = predictions['voltages'].shape[0]
+        num_edges = graph_properties['edge_index'].shape[1]
+        
+        L_reactive = self.reactive_power_loss(
+            voltages=predictions['voltages'],
+            angles=predictions['angles'],
+            edge_index=graph_properties['edge_index'],
+            conductance=graph_properties.get('conductance', torch.ones(batch_size, num_edges, device=predictions['voltages'].device)),
+            susceptance=graph_properties.get('susceptance', torch.ones(batch_size, num_edges, device=predictions['voltages'].device)),
+            reactive_injection=graph_properties.get('reactive_injection', torch.zeros_like(predictions['voltages']))
+        )
+
         L_total = (L_prediction + 
-                  self.lambda_powerflow * L_powerflow +
-                  self.lambda_capacity * L_capacity + 
-                  self.lambda_stability * L_stability +
-                  self.lambda_frequency * L_frequency)
+                   self.lambda_powerflow * L_powerflow + # Assuming you calculated L_powerflow above
+                   self.lambda_capacity * L_capacity +   # Assuming L_capacity above
+                   self.lambda_stability * L_stability + # Assuming L_stability above
+                   self.lambda_frequency * L_frequency + # Assuming L_frequency above
+                   self.lambda_voltage * L_voltage +     # <--- Add this
+                   self.lambda_reactive * L_reactive)    # <--- Add this
         
         return L_total, {
             'total': L_total.item(),
@@ -900,7 +947,9 @@ class PhysicsInformedLoss(nn.Module):
             'powerflow': L_powerflow.item(),
             'capacity': L_capacity.item(),
             'stability': L_stability.item(),
-            'frequency': L_frequency.item()  # Added frequency loss tracking
+            'frequency': L_frequency.item(),
+            'voltage': L_voltage.item(),   # <--- Now non-zero
+            'reactive': L_reactive.item()  # <--- Now non-zero
         }
 
 

@@ -393,23 +393,26 @@ class CascadeDataset(Dataset):
         # ====================================================================
 
         return {
-            'satellite_data': torch.stack(satellite_seq),
+            # --- MASKED MODALITIES (ZEROED) ---
+            'satellite_data': torch.zeros_like(torch.stack(satellite_seq)),
+            'weather_sequence': torch.zeros_like(torch.stack(weather_seq)),
+            'threat_indicators': torch.zeros_like(torch.stack(threat_seq)),
+            'visual_data': torch.zeros_like(torch.stack(visual_seq)),
+            'thermal_data': torch.zeros_like(torch.stack(thermal_seq)),
+            'sensor_data': torch.zeros_like(torch.stack(sensor_seq)),
+            
+            # --- KEPT MODALITIES (REAL PHYSICS) ---
             'scada_data': scada_tensor, 
-            'weather_sequence': torch.stack(weather_seq),
-            'threat_indicators': torch.stack(threat_seq),
-            'visual_data': torch.stack(visual_seq),
-            'thermal_data': torch.stack(thermal_seq),
-            'sensor_data': torch.stack(sensor_seq),
             'pmu_sequence': torch.stack(pmu_seq),
             'equipment_status': torch.stack(equipment_seq),
             'edge_index': to_tensor(edge_index).long(),
             'edge_attr': edge_attr,
-            'edge_mask': torch.stack(edge_mask_seq), # <--- RETURN FIXED MASK
+            'edge_mask': torch.stack(edge_mask_seq),
             'node_failure_labels': final_labels,
             'cascade_timing': correct_timing_tensor,
             'ground_truth_risk': to_tensor(ground_truth_risk),
             'graph_properties': self._extract_graph_properties(last_step, metadata, edge_attr),
-            'temporal_sequence': torch.stack(scada_seq),
+            'temporal_sequence': scada_tensor, # SCADA is the primary temporal source
             'sequence_length': len(sequence)
         }
     
@@ -460,13 +463,16 @@ class CascadeDataset(Dataset):
         ground_truth_risk = metadata.get('ground_truth_risk', np.zeros(7, dtype=np.float32))
 
         item = {
-            'satellite_data': satellite_data[0],
+            # --- MASKED MODALITIES (ZEROED) ---
+            'satellite_data': torch.zeros_like(satellite_data[0]),
+            'weather_sequence': torch.zeros_like(weather_sequence[0]),
+            'threat_indicators': torch.zeros_like(threat_indicators[0]),
+            'visual_data': torch.zeros_like(visual_data[0]),
+            'thermal_data': torch.zeros_like(thermal_data[0]),
+            'sensor_data': torch.zeros_like(sensor_data[0]),
+
+            # --- KEPT MODALITIES ---
             'scada_data': scada_data[0],
-            'weather_sequence': weather_sequence[0],
-            'threat_indicators': threat_indicators[0],
-            'visual_data': visual_data[0],
-            'thermal_data': thermal_data[0],
-            'sensor_data': sensor_data[0],
             'pmu_sequence': pmu_sequence[0],
             'equipment_status': equipment_status[0],
             'edge_index': to_tensor(edge_index).long(),

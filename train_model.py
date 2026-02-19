@@ -321,15 +321,15 @@ class Trainer:
         print_row("Frequency", "frequency", "lambda_frequency")
         print_row("Risk", "risk", "lambda_risk")
         
-        scaling_factor = 0.1 # to make the model focus on prediction rather than physics (at later training phase)
+        scaling_factor = 1.0 # to make the model focus on prediction rather than physics (at later training phase)
 
         # Initialized the criterion with the FINAL weight
         self.criterion = PhysicsInformedLoss(
             lambda_powerflow=final_lambdas['lambda_powerflow'] * scaling_factor,
             lambda_temperature=final_lambdas['lambda_temperature'] * scaling_factor,
-            lambda_stability=0,
+            lambda_stability=final_lambdas['lambda_stability'] * scaling_factor,
             lambda_frequency=final_lambdas['lambda_frequency'] * scaling_factor,
-            lambda_reactive=0,
+            lambda_reactive=final_lambdas['lambda_reactive'] * scaling_factor,
             lambda_risk=final_lambdas['lambda_risk'] * scaling_factor,
             lambda_timing=final_lambdas['lambda_timing'] * scaling_factor,
             
@@ -1352,8 +1352,8 @@ if __name__ == "__main__":
         batch_size=BATCH_SIZE,  # (Should be 256 or 512 for your L40S GPU)
         sampler=sampler,        # <--- KEEP THIS (It handles balancing AND shuffling)
         shuffle=False,          # <--- SET THIS TO FALSE (or remove it entirely)
-        num_workers=4,          # <--- Optimization
-        pin_memory=True,        # <--- Optimization
+        num_workers=1,          # <--- Optimization
+        pin_memory=False,        # <--- Optimization
         collate_fn=collate_cascade_batch,
         persistent_workers=True, # Recommended for speed
         prefetch_factor=2
@@ -1361,10 +1361,10 @@ if __name__ == "__main__":
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=BATCH_SIZE * 2, # Validation can use double batch size
+        batch_size=BATCH_SIZE, # Validation can use double batch size
         shuffle=False,          # Validation never needs shuffling
-        num_workers=4,
-        pin_memory=True,
+        num_workers=1,
+        pin_memory=False,
         collate_fn=collate_cascade_batch,
         persistent_workers=True,
         prefetch_factor=2
