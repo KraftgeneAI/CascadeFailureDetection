@@ -1,2 +1,2 @@
-# Just to train and test model on SCADA aspects. Do NOT merge.
+# Just to train and test model on SCADA datasets. Do NOT merge.
 
