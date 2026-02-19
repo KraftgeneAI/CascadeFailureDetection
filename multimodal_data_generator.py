@@ -1638,128 +1638,118 @@ class PhysicsBasedGridSimulator:
     # START: IMPROVEMENT 3 (Fix Timing Gaps)
     # ====================================================================
     def _propagate_cascade_controlled(
-        self,
-        initial_failed_nodes: List[int],
-        current_loading: np.ndarray,
-        current_voltage: np.ndarray,
-        current_temperature: np.ndarray,
-        current_frequency: float,
-        target_num_failures: int
-    ) -> List[Tuple[int, float, str]]:
-        """
-        Propagate cascade failures through the power grid with controlled severity and realistic chain propagation.
-        
-        This method simulates how failures propagate through the grid topology using a breadth-first
-        traversal approach. Starting from initial failed nodes, it evaluates neighboring nodes for
-        potential failures based on accumulated stress, loading conditions, voltage levels, temperature,
-        and frequency. The propagation follows a realistic chain pattern (A→B, B→C, ...) where each
-        failed node can trigger failures in its neighbors.
-        
-        The method implements a three-state failure model:
-        - State 0 (OK): Node remains operational, no propagation
-        - State 1 (Damaged/Partial): Node is degraded but cascade stops here
-        - State 2 (Failed): Node fails completely and can propagate to neighbors
-        
-        Args:
-            initial_failed_nodes (List[int]): List of node IDs that have already failed and serve
-                as the starting points for cascade propagation.
-            current_loading (np.ndarray): Array of current loading values for all nodes in the grid.
-                Used to calculate stress-induced loading increases on neighboring nodes.
-            current_voltage (np.ndarray): Array of current voltage values for all nodes. Used to
-                calculate voltage drops due to stress propagation.
-            current_temperature (np.ndarray): Array of current temperature values for all nodes.
-                Used to calculate temperature increases from stress accumulation.
-            current_frequency (float): Current grid frequency in Hz. Used in node state evaluation
-                to determine if frequency deviations contribute to failures.
-            target_num_failures (int): Maximum number of node failures to simulate. The propagation
-                stops once this target is reached to control cascade severity.
-        
-        Returns:
-            List[Tuple[int, float, str]]: A chronologically ordered list of failure events, where
-                each tuple contains:
-                - node_id (int): The ID of the failed node
-                - failure_time (float): Time of failure in minutes from cascade start
-                - reason (str): Description of the failure cause (e.g., "overload", "undervoltage")
-        
-        Implementation Details:
-            - Uses directed adjacency list for realistic power flow propagation
-            - Applies stress multipliers based on propagation weights between nodes
-            - Calculates physical relay-like delays (0.1-0.5 minutes) for realistic timing
-            - Tracks visited nodes to prevent duplicate processing
-            - Implements stress decay (0.8 multiplier) as cascade propagates
-            - Stops propagation at damaged nodes to prevent unrealistic cascade spread
-            
-        Example:
-            >>> initial_failures = [5, 12]
-            >>> failures = simulator._propagate_cascade_controlled(
-            ...     initial_failures, loading, voltage, temp, 60.0, target_num_failures=10
-            ... )
-            >>> # Returns: [(5, 0.0, 'initial'), (12, 0.0, 'initial'), (8, 0.3, 'overload'), ...]
-        """
-        failed_nodes = set(initial_failed_nodes)
-        failure_sequence = []
-        
-        # The queue now holds nodes to be processed for *their* neighbors
-        queue = [(node, 0.0, 1.0) for node in initial_failed_nodes] # (node_id, failure_time, stress)
-        visited = set(initial_failed_nodes)
-        
-        while queue and len(failed_nodes) < target_num_failures:
-            current_node, current_time, accumulated_stress = queue.pop(0)
-            
-            # --- MODIFIED: Uses DIRECTED adjacency_list ---
-            for neighbor, edge_idx, propagation_weight in self.adjacency_list[current_node]:
-                if neighbor in visited:
-                    continue
-                
-                visited.add(neighbor) # Mark as visited *immediately* to avoid duplicate processing
-                
-                stress_multiplier = accumulated_stress * propagation_weight
-                
-                neighbor_loading = current_loading[neighbor] * (1.0 + stress_multiplier * 0.4)
-                neighbor_voltage = current_voltage[neighbor] * (1.0 - stress_multiplier * 0.15)
-                neighbor_temperature = current_temperature[neighbor] + stress_multiplier * 25
-                
-                # --- MODIFIED: Handle 3-state failure (OK, Damaged, Failed) ---
-                failure_state, reason = self._check_node_state( # Renamed function
-                    neighbor,
-                    neighbor_loading,
-                    neighbor_voltage,
-                    neighbor_temperature,
-                    current_frequency
-                )
-                
-                if failure_state == 2: # 2 = Full Failure
-                    # --- PHYSICAL TIMING FIX ---
-                    # Replace random delay with a small, "relay-like" physical delay
-                    # e.g., 0.1 to 0.5 minutes (6 to 30 seconds)
-                    physical_delay = np.random.uniform(0.1, 0.5) 
-                    failure_time = current_time + physical_delay
-                    # --- END FIX ---
-                    
-                    # 1. Log this failure
-                    failure_sequence.append((neighbor, failure_time, reason))
-                    failed_nodes.add(neighbor)
-                    
-                    # 2. **CRITICAL FIX**: Add the *newly* failed node to the queue
-                    #    so it can propagate the cascade further.
-                    queue.append((neighbor, failure_time, stress_multiplier * 0.8))
-                    
-                    print(f"    [CASCADE] Node {current_node} → Node {neighbor} FAILS (reason: {reason}, time: {failure_time:.1f}s, stress: {stress_multiplier:.2f})")
-                    
-                    # 3. Check if we've hit our target
-                    if len(failed_nodes) >= target_num_failures:
-                        break # Stop checking neighbors
-                
-                elif failure_state == 1: # 1 = Partial Failure (Damaged)
-                    print(f"    [PARTIAL] Node {current_node} → Node {neighbor} DAMAGED (reason: {reason}, time: {current_time:.1f}s, stress: {stress_multiplier:.2f}) - Cascade stops here.")
-                    # Do NOT add to queue, so propagation stops at this node
-                
-                # If failure_state == 0 (OK), do nothing.
-            
-            if len(failed_nodes) >= target_num_failures:
-                break # Stop processing the main queue
-        
-        return failure_sequence
+            self,
+            initial_failed_nodes: List[int],
+            current_loading: np.ndarray,
+            current_voltage: np.ndarray,
+            current_temperature: np.ndarray,
+            current_frequency: float,
+            target_num_failures: int,
+            generation: np.ndarray,
+            load: np.ndarray
+        ) -> List[Tuple[int, float, str]]:
+            """
+            Propagate cascade failures through the power grid with physics-based power flow recomputation.
+
+            After each failure, this method recomputes the AC power flow using PyPSA to get accurate
+            voltages and line loadings for the remaining network. It then evaluates neighboring nodes
+            for potential failures based on the actual physics, not simplified stress multipliers.
+
+            Args:
+                initial_failed_nodes: List of initially failed node IDs
+                current_loading: Initial per-node loading ratios (not used after recomputation)
+                current_voltage: Initial voltages (not used after recomputation)
+                current_temperature: Node temperatures (Celsius)
+                current_frequency: Grid frequency (Hz)
+                target_num_failures: Maximum failures to simulate
+                generation: Active power generation array (MW)
+                load: Active power load array (MW)
+
+            Returns:
+                List of (node_id, failure_time_minutes, reason) tuples
+            """
+            failed_nodes = set(node[0] for node in initial_failed_nodes)
+            failed_reasons = [node[1] for node in initial_failed_nodes]
+            failure_sequence = [(fail_node, 0, fail_reason) for fail_node, fail_reason in zip(failed_nodes, failed_reasons)]
+            queue = [(node[0], 0.0) for node in initial_failed_nodes]
+            visited = set(initial_failed_nodes)
+
+            # Recompute power flow after initial failures
+            print(f"    [POWER FLOW] Recomputing after initial failures: {list(failed_nodes)}")
+            voltages, angles, line_flows, is_stable = \
+                self._compute_pypsa_power_flow(generation, load, failed_lines=[], failed_nodes=list(failed_nodes))
+
+            if not is_stable:
+                print(f"    [WARNING] Power flow unstable after initial failures")
+
+            # Calculate loading ratios
+            loading_ratios = np.abs(line_flows) / (self.thermal_limits + 1e-6)
+            src, dst = self.edge_index
+            node_loading = np.zeros(self.num_nodes)
+            for i in range(self.num_edges):
+                s, d = src[i].item(), dst[i].item()
+                node_loading[s] = max(node_loading[s], loading_ratios[i])
+                node_loading[d] = max(node_loading[d], loading_ratios[i])
+
+            print(f"    [POWER FLOW] Voltage: {voltages.min():.3f}-{voltages.max():.3f} p.u., Max loading: {loading_ratios.max():.3f}")
+
+            while queue and len(failed_nodes) < target_num_failures:
+                current_node, current_time = queue.pop(0)
+
+                for neighbor, edge_idx, propagation_weight in self.adjacency_list[current_node]:
+                    if neighbor in visited:
+                        continue
+                    visited.add(neighbor)
+
+                    # Use ACTUAL power flow values
+                    neighbor_loading = node_loading[neighbor]
+                    neighbor_voltage = voltages[neighbor]
+                    neighbor_temperature = current_temperature[neighbor]
+
+                    failure_state, reason = self._check_node_state(
+                        neighbor, neighbor_loading, neighbor_voltage, 
+                        neighbor_temperature, current_frequency
+                    )
+
+                    if failure_state == 2:  # Full Failure
+                        physical_delay = np.random.uniform(0.1, 0.5)
+                        failure_time = current_time + physical_delay
+
+                        failure_sequence.append((neighbor, failure_time, reason))
+                        failed_nodes.add(neighbor)
+                        queue.append((neighbor, failure_time))
+
+                        print(f"    [CASCADE] Node {current_node} → {neighbor} FAILS: {reason}, t={failure_time:.2f}min, V={neighbor_voltage:.3f}, L={neighbor_loading:.3f}")
+
+                        # Recompute power flow after this failure
+                        print(f"    [POWER FLOW] Recomputing after node {neighbor} failure...")
+                        voltages, angles, line_flows, is_stable = \
+                            self._compute_pypsa_power_flow(generation, load, failed_lines=[], failed_nodes=list(failed_nodes))
+
+                        if not is_stable:
+                            print(f"    [WARNING] Power flow unstable after {len(failed_nodes)} failures")
+
+                        # Update loading ratios
+                        loading_ratios = np.abs(line_flows) / (self.thermal_limits + 1e-6)
+                        node_loading = np.zeros(self.num_nodes)
+                        for i in range(self.num_edges):
+                            s, d = src[i].item(), dst[i].item()
+                            node_loading[s] = max(node_loading[s], loading_ratios[i])
+                            node_loading[d] = max(node_loading[d], loading_ratios[i])
+
+                        print(f"    [POWER FLOW] New voltage: {voltages.min():.3f}-{voltages.max():.3f} p.u., Max loading: {loading_ratios.max():.3f}")
+
+                        if len(failed_nodes) >= target_num_failures:
+                            break
+
+                    elif failure_state == 1:  # Partial Failure
+                        print(f"    [PARTIAL] Node {current_node} → {neighbor} DAMAGED: {reason} - Cascade stops")
+
+                if len(failed_nodes) >= target_num_failures:
+                    break
+
+            return failure_sequence
+
     # ====================================================================
     # END: IMPROVEMENT 3
     # ====================================================================
@@ -1934,7 +1924,7 @@ class PhysicsBasedGridSimulator:
         # --- 2. Check for failure ---
         initial_failed_nodes = []
         initial_reason = "none"
-        
+        failed_reason = []
         for n in range(self.num_nodes):
             # Check for a "damage" (state 1) or "failure" (state 2)
             state, reason = self._check_node_state(
@@ -1948,26 +1938,29 @@ class PhysicsBasedGridSimulator:
             if state == 2: # State 2 is a full failure
                 initial_failed_nodes.append(n)
                 initial_reason = reason
+                failed_reason.append(reason)
                 # Don't break; find *all* initial failures caused by the stress
         
         if len(initial_failed_nodes) > 0:
             is_cascade = True
             # Pick just one trigger node to start the propagation
             trigger_node = np.random.choice(initial_failed_nodes)
-            print(f"  [CASCADE] Node {trigger_node} FAILED deterministically. Reason: {initial_reason}")
+            print(f"  [CASCADE] Nodes {initial_failed_nodes} FAILED deterministically. Reason: {failed_reason}")
             
             failure_sequence = self._propagate_cascade_controlled(
-                [trigger_node], # Propagate from just one
+                list(zip(initial_failed_nodes, failed_reason)),
                 node_loading, # <-- Pass the fixed array
                 voltages,
                 equipment_temps, # <-- Pass the fixed array
                 current_frequency,
-                target_num_failures=int(self.num_nodes * 0.6) # Target 60%
+                target_num_failures=int(self.num_nodes * 0.6), # Target 60%
+                generation=generation,  # Pass generation for power flow recomputation
+                load=load_values        # Pass load for power flow recomputation
             )
             
-            failed_nodes = [trigger_node] + [node for node, _, _ in failure_sequence]
-            failure_times = [0.0] + [time for _, time, _ in failure_sequence]
-            failure_reasons = [initial_reason] + [r for _, _, r in failure_sequence]
+            failed_nodes = [node for node, _, _ in failure_sequence]
+            failure_times = [time for _, time, _ in failure_sequence]
+            failure_reasons = [r for _, _, r in failure_sequence]
             
             risk_vec = np.zeros(7, dtype=np.float32)
             risk_vec[0] = stress_level # threat_severity
