@@ -563,3 +563,37 @@ Epoch 19 Results:
     Cascade F1: 1.0000 (Thresh: 0.05)
     Node F1:    0.4454 (Thresh: 0.35)
     Node Prec:  0.3016 | Node Rec: 0.8509
+
+Epoch 20 Results:
+  Train Loss: 0.2444 | Val Loss: 0.2145
+
+  OPTIMAL VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 1.0000 (Thresh: 0.05)
+    Node F1:    0.4627 (Thresh: 0.35)
+    Node Prec:  0.3126 | Node Rec: 0.8902
+
+Epoch 21/100
+--------------------------------------------------------------------------------
+Training (Loss: 1.5394, Grad: 0.33): 100%|██████████████████████████████████████████████████████████████████████████████████| 270/270 [1:06:08<00:00, 14.70s/it, cF1=0.969, nF1=0.426, rMSE=0.002, pL=0.036, tL=16.279] 
+
+  Average gradient norm: 0.3234
+  Average loss components:
+    prediction: 0.020534
+    reactive: 0.000000
+    powerflow: 0.000000
+    temperature: 0.015646
+    frequency: 0.039291
+    temperature: 0.015646
+    frequency: 0.039291
+    frequency: 0.039291
+    risk: 0.001615
+    timing: 2.258875
+Validation: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 42/42 [03:18<00:00,  4.72s/it, loss=0.1604] 
+
+Epoch 21 Results:
+  Train Loss: 0.2343 | Val Loss: 0.2163
+
+  OPTIMAL VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 1.0000 (Thresh: 0.05)
+    Node F1:    0.4627 (Thresh: 0.35)
+    Node Prec:  0.3170 | Node Rec: 0.8561
