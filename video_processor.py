@@ -32,7 +32,7 @@ def extract_threat_curve(
         frame = cv2.resize(frame, resize)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        brightness = np.mean(gray) / 255.0   # ← 不要乘 5
+        brightness = np.mean(gray) / 255.0
         threat_values.append(brightness)
 
     cap.release()
@@ -47,7 +47,7 @@ def extract_threat_curve(
         kernel = np.ones(smoothing_window) / smoothing_window
         signal = np.convolve(signal, kernel, mode="same")
 
-    # Min-max normalization (关键)
+    # Min-max normalization
     min_val = signal.min()
     max_val = signal.max()
 
@@ -62,7 +62,13 @@ def extract_threat_curve(
 
 
 if __name__ == "__main__":
-    video_path = "videos/wildfire1.mp4"
+    import sys
+
+    if len(sys.argv) < 2:
+        print("Usage: python video_processor.py <video_path>")
+        sys.exit(1)
+
+    video_path = sys.argv[1]
 
     signal = extract_threat_curve(video_path)
 
