@@ -63,6 +63,7 @@ Author: Kraftgene AI Inc. (R&D)
 Date: October 2025
 """
 
+
 import numpy as np
 import torch
 import pickle
@@ -74,6 +75,7 @@ import warnings
 from scipy.ndimage import gaussian_filter
 import os
 import argparse
+from video_processor import extract_threat_curve
 
 
 class MemoryMonitor:
@@ -197,23 +199,84 @@ class PhysicsBasedGridSimulator:
         self._initialize_node_properties_and_rules()
         
         self._initialize_edge_features_and_cascade_rules()
+        self._initialize_pypsa_network()
         
         print(f"Initialized grid: {self.num_nodes} nodes, {self.num_edges} edges")
         print(f"  Node failure rules: loading, voltage, temperature, frequency thresholds")
         print(f"  Cascade propagation: graph-based (A->B->C)")
+
+
+    def _initialize_pypsa_network(self):
+        """
+        Initialize PyPSA network for accurate AC power flow calculations.
         
-        # ====================================================================
-        # START: PYPSA POWER FLOW INITIALIZATION
-        # ====================================================================
-        self._initialize_pypsa_network()
-        print("\n" + "="*80)
-        print("  Using PyPSA AC power flow for accurate physics-based simulation.")
-        print("  This provides realistic power flow calculations with proper AC equations.")
-        print("="*80 + "\n")
-        # ====================================================================
-        # END: PYPSA POWER FLOW INITIALIZATION
-        # ====================================================================
-    
+        This creates a PyPSA Network object that mirrors the grid topology
+        and electrical parameters, enabling realistic power flow computation.
+        """
+        import pypsa
+        self.base_generation = np.zeros(self.num_nodes)
+        self.pypsa_network = pypsa.Network()
+        
+        # Add buses (nodes)
+        for i in range(self.num_nodes):
+            self.pypsa_network.add(
+                "Bus",
+                f"bus_{i}",
+                v_nom=138.0,  # 138 kV transmission voltage
+                x=self.positions[i, 0],
+                y=self.positions[i, 1]
+            )
+        
+        # Add generators
+        gen_indices = np.where(self.node_types == 1)[0]
+        self.base_generation = np.zeros(self.num_nodes, dtype=float)
+        self.base_generation[gen_indices] = self.gen_capacity[gen_indices]
+
+        for idx in gen_indices:
+            self.pypsa_network.add(
+                "Generator",
+                f"gen_{idx}",
+                bus=f"bus_{idx}",
+                p_nom=self.gen_capacity[idx],
+                control="PQ",  # PQ control for non-slack generators
+                p_set=0.0  # Will be set dynamically during simulation
+            )
+        self.base_generation = self.pypsa_network.generators["p_nom"].values.copy()
+
+        # Set bus 0 as slack bus
+        if 0 in gen_indices:
+            self.pypsa_network.generators.loc[f"gen_0", "control"] = "Slack"
+        
+        # Add loads
+        for i in range(self.num_nodes):
+            self.pypsa_network.add(
+                "Load",
+                f"load_{i}",
+                bus=f"bus_{i}",
+                p_set = self.base_load[i]  # Will be set dynamically during simulation
+            )
+        
+        # Add transmission lines
+        src, dst = self.edge_index
+        for i in range(self.num_edges):
+            s, d = int(src[i]), int(dst[i])
+            self.pypsa_network.add(
+                "Line",
+                f"line_{i}",
+                bus0=f"bus_{s}",
+                bus1=f"bus_{d}",
+                x=self.line_reactance[i],
+                r=self.line_resistance[i],
+                b=self.line_susceptance[i],
+                g=self.line_conductance[i],
+                s_nom=self.thermal_limits[i] * 0.2,
+                length=1.0  # Normalized length
+            )
+        
+        print(f"  Initialized PyPSA network: {len(self.pypsa_network.buses)} buses, "
+              f"{len(self.pypsa_network.generators)} generators, "
+              f"{len(self.pypsa_network.lines)} lines")
+
     # ====================================================================
     # START: CONNECTIVITY FIX
     # ====================================================================
@@ -488,7 +551,7 @@ class PhysicsBasedGridSimulator:
         # STEP 5: FAILURE THRESHOLDS (unchanged)
         # ====================================================================
         # Loading threshold: node fails if loading > threshold
-        self.loading_failure_threshold = np.random.uniform(1.05, 1.15, self.num_nodes)
+        self.loading_failure_threshold = np.random.uniform(0.95, 1.02, self.num_nodes)
         self.loading_damage_threshold = self.loading_failure_threshold - np.random.uniform(0.05, 0.1)
         
         # Voltage threshold: node fails if voltage < threshold
@@ -581,29 +644,38 @@ class PhysicsBasedGridSimulator:
         avg_flow_per_line = total_load / self.num_edges  # Average flow
         
         self.thermal_limits = np.zeros(self.num_edges)
+
         for i in range(self.num_edges):
             s, d = int(src[i]), int(dst[i])
+
+            base_capacity = avg_flow_per_line * np.random.uniform(0.6, 1.1)
+
+            margin = np.random.uniform(1.0, 1.2)
+            self.thermal_limits[i] = base_capacity * margin
+
+        min_thermal_limit = avg_flow_per_line * 0.5
+        self.thermal_limits = np.maximum(self.thermal_limits, min_thermal_limit)
             
             # Estimate flow based on distance and connected nodes
             # Shorter lines carry more power (distribution)
             # Longer lines carry less power (transmission)
-            if distances[i] < 30:
+            #if distances[i] < 30:
                 # Short lines: high capacity (distribution)
-                base_capacity = avg_flow_per_line * np.random.uniform(1.5, 2.5)
-            elif distances[i] < 60:
+                #base_capacity = avg_flow_per_line * np.random.uniform(1.5, 2.5)
+            #elif distances[i] < 60:
                 # Medium lines: moderate capacity
-                base_capacity = avg_flow_per_line * np.random.uniform(1.0, 1.8)
-            else:
+                #base_capacity = avg_flow_per_line * np.random.uniform(1.0, 1.8)
+            #else:
                 # Long lines: lower capacity (but still adequate)
-                base_capacity = avg_flow_per_line * np.random.uniform(0.8, 1.5)
+            #base_capacity = avg_flow_per_line * np.random.uniform(0.6, 1.1)
             
             # Add margin for convergence (150-200% of expected flow)
-            margin = np.random.uniform(1.5, 2.0)
-            self.thermal_limits[i] = base_capacity * margin
+            #margin = np.random.uniform(1.0, 1.2)
+            #self.thermal_limits[i] = base_capacity * margin
         
         # Ensure minimum thermal limits
-        min_thermal_limit = total_load * 0.05  # At least 5% of total load
-        self.thermal_limits = np.maximum(self.thermal_limits, min_thermal_limit)
+        #min_thermal_limit = avg_flow_per_line * 0.5  # At least 5% of total load
+        #self.thermal_limits = np.maximum(self.thermal_limits, min_thermal_limit)
         
         print(f"  Convergence-aware thermal limits:")
         print(f"    Average thermal limit: {self.thermal_limits.mean():.1f} MVA")
@@ -653,73 +725,7 @@ class PhysicsBasedGridSimulator:
         total_directed_paths = sum(len(paths) for paths in self.adjacency_list)
         print(f"    Total directed propagation paths: {total_directed_paths} (vs {self.num_edges * 2} if undirected)")
         print(f"  Cascade propagation weights: {self.cascade_propagation_weight.mean():.2f} ± {self.cascade_propagation_weight.std():.2f}")
-    
-    def _initialize_pypsa_network(self):
-        """
-        Initialize PyPSA network for accurate AC power flow calculations.
 
-        This creates a PyPSA Network object that mirrors the grid topology
-        and electrical parameters, enabling realistic power flow computation.
-        """
-        import pypsa
-
-        self.pypsa_network = pypsa.Network()
-
-        # Add buses (nodes)
-        for i in range(self.num_nodes):
-            self.pypsa_network.add(
-                "Bus",
-                f"bus_{i}",
-                v_nom=138.0,  # 138 kV transmission voltage
-                x=self.positions[i, 0],
-                y=self.positions[i, 1]
-            )
-
-        # Add generators
-        gen_indices = np.where(self.node_types == 1)[0]
-        for idx in gen_indices:
-            self.pypsa_network.add(
-                "Generator",
-                f"gen_{idx}",
-                bus=f"bus_{idx}",
-                p_nom=self.gen_capacity[idx],
-                control="PQ",  # PQ control for non-slack generators
-                p_set=0.0  # Will be set dynamically during simulation
-            )
-
-        # Set bus 0 as slack bus
-        if 0 in gen_indices:
-            self.pypsa_network.generators.loc[f"gen_0", "control"] = "Slack"
-
-        # Add loads
-        for i in range(self.num_nodes):
-            self.pypsa_network.add(
-                "Load",
-                f"load_{i}",
-                bus=f"bus_{i}",
-                p_set=0.0  # Will be set dynamically during simulation
-            )
-
-        # Add transmission lines
-        src, dst = self.edge_index
-        for i in range(self.num_edges):
-            s, d = int(src[i]), int(dst[i])
-            self.pypsa_network.add(
-                "Line",
-                f"line_{i}",
-                bus0=f"bus_{s}",
-                bus1=f"bus_{d}",
-                x=self.line_reactance[i],
-                r=self.line_resistance[i],
-                b=self.line_susceptance[i],
-                g=self.line_conductance[i],
-                s_nom=self.thermal_limits[i],
-                length=1.0  # Normalized length
-            )
-
-        print(f"  Initialized PyPSA network: {len(self.pypsa_network.buses)} buses, "
-              f"{len(self.pypsa_network.generators)} generators, "
-              f"{len(self.pypsa_network.lines)} lines")
     
     def _initialize_realistic_grid_properties(self):
         """Initialize grid with REALISTIC electrical parameters."""
@@ -1760,8 +1766,10 @@ class PhysicsBasedGridSimulator:
     def _generate_scenario_data(
         self,
         stress_level: float,
-        sequence_length: int = 30
+        sequence_length: int = 30,
+        external_stress_signal=None
     ) -> Optional[Dict]:
+        print("DEBUG base_generation exists:", hasattr(self, "base_generation"))
         """
         Generate a complete power grid scenario with multi-modal data.
         
@@ -1877,24 +1885,41 @@ class PhysicsBasedGridSimulator:
         
         generation = np.zeros(self.num_nodes)
         load_values = np.zeros(self.num_nodes)
-        
+
         # Ramp up to the target stress level (simulating the lead-up)
-        ramp_factor = 1.0 # Use full stress for the check
+        ramp_factor = 1.0  # or whatever your ramp logic is
+
+        # Physics stress calculation (ONLY grid logic)
         current_stress = base_stress_level * ramp_factor
-        
-        load_multiplier = 0.7 + current_stress * 0.4 
+
+        # Video signal extracted separately (does NOT affect physics)
+        if external_stress_signal is not None:
+            try:
+                video_factor = float(external_stress_signal[0])
+            except (TypeError, IndexError, ValueError):
+                video_factor = 1.0
+        else:
+            video_factor = 1.0
+
+        load_multiplier = 0.7 + current_stress * 0.4
         load_noise = 0.05
-        
-        load_values = self.base_load * load_multiplier * (1 + np.random.normal(0, load_noise, self.num_nodes))
-        
+
+        load_values = self.base_load * load_multiplier * (
+                1 + np.random.normal(0, load_noise, self.num_nodes)
+        )
+
         total_load = load_values.sum()
+
         gen_indices = np.where(self.node_types == 1)[0]
         total_capacity = self.gen_capacity.sum()
+
         for idx in gen_indices:
             if total_capacity > 0:
-                generation[idx] = (self.gen_capacity[idx] / total_capacity) * total_load * 1.02
+                generation[idx] = (
+                        (self.gen_capacity[idx] / total_capacity) * total_load * 1.02
+                )
             else:
-                generation[idx] = 0
+                generation[idx] = 00
         
         voltages, angles, line_flows, is_stable = self._compute_pypsa_power_flow(
             generation, load_values, failed_lines=[], failed_nodes=[]
@@ -2014,15 +2039,19 @@ class PhysicsBasedGridSimulator:
         load_values = np.zeros(self.num_nodes)
         
         cumulative_failed_nodes = set()
-        
+
         for t in range(sequence_length):
-            
+
             current_stress = base_stress_level
-            if is_cascade and t < cascade_start_time:
-                ramp_factor = 0.6 + 0.4 * (t / max(1, cascade_start_time - 1))
-                current_stress = base_stress_level * ramp_factor
-            elif not is_cascade:
-                current_stress = base_stress_level
+
+            if external_stress_signal is not None:
+                if t < len(external_stress_signal):
+                    external_factor = float(external_stress_signal[t])             ############
+                else:
+                    external_factor = float(external_stress_signal[-1])
+            else:
+                external_factor = 1.0
+
             
             if is_cascade:
                 load_multiplier = 0.7 + current_stress * 0.4 
@@ -2036,9 +2065,10 @@ class PhysicsBasedGridSimulator:
             total_load = load_values.sum()
             gen_indices = np.where(self.node_types == 1)[0]
             total_capacity = self.gen_capacity.sum()
+            generation = np.zeros(self.num_nodes)
             for idx in gen_indices:
                 if total_capacity > 0:
-                    generation[idx] = (self.gen_capacity[idx] / total_capacity) * total_load * 1.02
+                    generation[idx] = (self.gen_capacity[idx] / total_capacity) * total_load * current_stress * 1.02
                 else:
                     generation[idx] = 0
             
@@ -2082,24 +2112,22 @@ class PhysicsBasedGridSimulator:
             vis_data, thermal_data, sensor_data = self._generate_correlated_robotic_data(
                 failed_nodes_t, failed_lines_t, t, cascade_start_time, equipment_temps
             )
-            
+
+            failure_time_map = dict(zip(failed_nodes, failure_times))
+
             if cascade_start_time >= 0:
-                current_cascade_timing = np.array([
-                    (failure_times[failed_nodes.index(node)] - (t - cascade_start_time) if t >= cascade_start_time else failure_times[failed_nodes.index(node)])
-                    if node in failed_nodes else -1.0
-                    for node in range(self.num_nodes)
-                ], dtype=np.float32)
+                current_cascade_timing = np.full(self.num_nodes, -1.0, dtype=np.float32)
+
+                for node, f_time in failure_time_map.items():
+                    if t >= cascade_start_time:
+                        remaining = f_time - (t - cascade_start_time)
+                    else:
+                        remaining = f_time
+
+                    current_cascade_timing[node] = max(0.0, remaining)
+
             else:
                 current_cascade_timing = np.full(self.num_nodes, -1.0, dtype=np.float32)
-            
-            for node_in_failure_list in timestep_to_failed_nodes.get(t, []):
-                current_cascade_timing[node_in_failure_list] = 0.0
-
-            current_cascade_timing = np.where(
-                np.array([node in cumulative_failed_nodes for node in range(self.num_nodes)]),
-                np.maximum(0.0, current_cascade_timing),
-                current_cascade_timing
-            )
 
             timestep_data = {
                 'satellite_data': sat_data.astype(np.float32),
@@ -2306,7 +2334,12 @@ Examples:
     parser.add_argument('--val-ratio', type=float, default=0.15, help='Validation set ratio')
     parser.add_argument('--test-ratio', type=float, default=0.15, help='Test set ratio')
     parser.add_argument('--start_batch', type=int, default=0, help='Starting batch number for output files (e.g., 5000)')
-
+    parser.add_argument(
+        '--video-path',
+        type=str,
+        default=None,
+        help='Optional path to wildfire video for external stress signal'
+    )
     args = parser.parse_args()
     
     assert abs(args.train_ratio + args.val_ratio + args.test_ratio - 1.0) < 1e-6, \
@@ -2425,18 +2458,27 @@ Examples:
 
             while scenario_data is None and retries < max_retries:
                 if gen_type == 'cascade':
-                    # Use a stress level high enough to *guarantee* a failure
-                    stress_level = np.random.uniform(0.7, 1.0)
+                    # High stress → should reliably trigger failures
+                    stress_level = np.random.uniform(0.92, 1.0)
+
                 elif gen_type == 'stressed':
-                    # Use a stress level that is *high* but *just below* the failure threshold
-                    stress_level = np.random.uniform(0.5, 0.62)
-                else: # gen_type == 'normal'
-                    stress_level = np.random.uniform(0.0, 0.5)
+                    # Near-critical but normally stable
+                    stress_level = np.random.uniform(0.80, 0.90)
+
+                else:  # gen_type == 'normal'
+                    # Clearly safe operating region
+                    stress_level = np.random.uniform(0.30, 0.70)
                 
                 # Generate a candidate scenario
+                if args.video_path is not None:
+                    external_signal = extract_threat_curve(args.video_path)
+                else:
+                    external_signal = None
+
                 candidate_scenario = simulator._generate_scenario_data(
                     stress_level=stress_level,
-                    sequence_length=args.sequence_length
+                    sequence_length=args.sequence_length,
+                    external_stress_signal=external_signal
                 )
 
                 if candidate_scenario is None:
@@ -2491,7 +2533,6 @@ Examples:
     generate_and_save_split_batched(num_test_normal, num_test_cascade, num_test_stressed, test_dir, "TEST", args.start_batch)
     
     # --- END: MODIFIED LOGIC ---
-    
     print(f"\n{'='*80}")
     print("DATA GENERATION COMPLETE")
     print(f"{'='*80}")
@@ -2505,3 +2546,5 @@ Examples:
 
 if __name__ == "__main__":
     main()
+
+#%#
