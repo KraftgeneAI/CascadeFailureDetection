@@ -1767,8 +1767,7 @@ class PhysicsBasedGridSimulator:
         self,
         stress_level: float,
         sequence_length: int = 30,
-        external_stress_signal=None,
-        force_cascade: bool = False
+        external_stress_signal=None
     ) -> Optional[Dict]:
         print("DEBUG base_generation exists:", hasattr(self, "base_generation"))
         """
@@ -1886,15 +1885,21 @@ class PhysicsBasedGridSimulator:
         
         generation = np.zeros(self.num_nodes)
         load_values = np.zeros(self.num_nodes)
-        
-        # Ramp up to the target stress level (simulating the lead-up)
-        ramp_factor = 1.0  # Use full stress for the check
 
+        # Ramp up to the target stress level (simulating the lead-up)
+        ramp_factor = 1.0  # or whatever your ramp logic is
+
+        # Physics stress calculation (ONLY grid logic)
+        current_stress = base_stress_level * ramp_factor
+
+        # Video signal extracted separately (does NOT affect physics)
         if external_stress_signal is not None:
-            video_factor = float(external_stress_signal[0])
-            current_stress = base_stress_level * video_factor
+            try:
+                video_factor = float(external_stress_signal[0])
+            except (TypeError, IndexError, ValueError):
+                video_factor = 1.0
         else:
-            current_stress = base_stress_level * ramp_factor
+            video_factor = 1.0
 
         load_multiplier = 0.7 + current_stress * 0.4
         load_noise = 0.05
@@ -2037,14 +2042,15 @@ class PhysicsBasedGridSimulator:
 
         for t in range(sequence_length):
 
+            current_stress = base_stress_level
+
             if external_stress_signal is not None:
                 if t < len(external_stress_signal):
-                    external_factor = float(external_stress_signal[t])
+                    external_factor = float(external_stress_signal[t])             ############
                 else:
                     external_factor = float(external_stress_signal[-1])
-                current_stress = base_stress_level * external_factor
             else:
-                current_stress = base_stress_level
+                external_factor = 1.0
 
             
             if is_cascade:
@@ -2540,7 +2546,5 @@ Examples:
 
 if __name__ == "__main__":
     main()
-
-
 
 #%#
