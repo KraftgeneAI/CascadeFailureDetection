@@ -13,6 +13,8 @@ Memory-efficient dataset loader for pre-generated cascade failure/normal data.
 Author: Kraftgene AI Inc. (R&D)
 Date: October 2025
 """
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
 import torch
 from torch.utils.data import Dataset
@@ -377,7 +379,7 @@ class CascadeDataset(Dataset):
             # ====================================================================
             
         else:
-            correct_timing_tensor = to_tensor(np.full(timing_shape, -1e6, dtype=np.float32))
+            correct_timing_tensor = to_tensor(np.full(timing_shape, -1, dtype=np.float32))
         
         # ====================================================================
         # START: DATA AUGMENTATION (Input Noise)

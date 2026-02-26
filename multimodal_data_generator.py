@@ -920,7 +920,7 @@ class PhysicsBasedGridSimulator:
         self.max_safe_temp = np.random.uniform(90, 110, self.num_nodes)
 
     # ====================================================================
-    # START: PYPSA AC POWER FLOW FUNCTION (FIXED)
+    # START: PYPSA AC POWER FLOW FUNCTION (UPDATED FOR Q)
     # ====================================================================
     def _compute_pypsa_power_flow(
         self,
@@ -928,13 +928,15 @@ class PhysicsBasedGridSimulator:
         load: np.ndarray,
         failed_lines: Optional[List[int]] = None,
         failed_nodes: Optional[List[int]] = None
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, bool]:
-        
-        # 1. Calculate Reactive Load based on 0.95 Power Factor (heuristic)
-        # This ensures Q is non-zero, creating voltage drops and reactive flows
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool]:
+        """
+        Returns:
+            voltages, angles, line_flows (P), node_reactive (Q), line_reactive_flows (Q), is_stable
+        """
+        # 1. Calculate Reactive Load (Q) based on ~0.95 Power Factor
         q_load = load * 0.33  
         
-        # 2. Update generator setpoints (Active Power)
+        # 2. Update generator setpoints
         gen_indices = np.where(self.node_types == 1)[0]
         for idx in gen_indices:
             gen_name = f"gen_{idx}"
@@ -943,17 +945,17 @@ class PhysicsBasedGridSimulator:
             else:
                 self.pypsa_network.generators.loc[gen_name, "p_set"] = generation[idx]
         
-        # 3. Update load setpoints (Active AND Reactive Power)
+        # 3. Update load setpoints (Active AND Reactive)
         for i in range(self.num_nodes):
             load_name = f"load_{i}"
             if failed_nodes and i in failed_nodes:
                 self.pypsa_network.loads.loc[load_name, "p_set"] = 0.0
-                self.pypsa_network.loads.loc[load_name, "q_set"] = 0.0 # FIXED: Zero out Q
+                self.pypsa_network.loads.loc[load_name, "q_set"] = 0.0 
             else:
                 self.pypsa_network.loads.loc[load_name, "p_set"] = load[i]
-                self.pypsa_network.loads.loc[load_name, "q_set"] = q_load[i] # FIXED: Set Q
+                self.pypsa_network.loads.loc[load_name, "q_set"] = q_load[i] 
         
-        # 4. Handle failed lines by temporarily removing them
+        # 4. Handle failed lines (Temporary high impedance)
         original_x = {}
         original_r = {}
         if failed_lines:
@@ -961,58 +963,55 @@ class PhysicsBasedGridSimulator:
                 line_name = f"line_{line_idx}"
                 original_x[line_name] = self.pypsa_network.lines.loc[line_name, "x"]
                 original_r[line_name] = self.pypsa_network.lines.loc[line_name, "r"]
-                # High impedance effectively opens the circuit
                 self.pypsa_network.lines.loc[line_name, "x"] = 1e6
                 self.pypsa_network.lines.loc[line_name, "r"] = 1e6
         
-        # 5. Run AC power flow
         try:
             status = self.pypsa_network.pf()
-            # Extract convergence status
             is_stable = status.get("converged",{}).get("0",{}).get("now", False)
             
             if not is_stable:
-                voltages = np.ones(self.num_nodes) * 0.95
-                angles = np.zeros(self.num_nodes)
-                line_flows = np.zeros(self.num_edges)
-                
-                # Cleanup and return unstable status
                 self._restore_lines(original_x, original_r)
-                return voltages, angles, line_flows, False
+                return (np.ones(self.num_nodes) * 0.95, np.zeros(self.num_nodes), 
+                        np.zeros(self.num_edges), np.zeros(self.num_nodes), 
+                        np.zeros(self.num_edges), False)
             
-            # 6. Extract results from PyPSA
+            # 5. Extract results from PyPSA
             voltages = np.zeros(self.num_nodes)
             angles = np.zeros(self.num_nodes)
+            node_reactive = np.zeros(self.num_nodes) # Net Q at Bus
+            
             for i in range(self.num_nodes):
                 bus_name = f"bus_{i}"
                 voltages[i] = self.pypsa_network.buses_t.v_mag_pu.loc["now", bus_name]
                 angles[i] = np.radians(self.pypsa_network.buses_t.v_ang.loc["now", bus_name])
+                
+                # Net reactive power at bus (Balance of Gen - Load - Line Shunts)
+                # Note: 'q' in buses_t represents the nodal balance
+                node_reactive[i] = self.pypsa_network.buses_t.q.loc["now", bus_name]
             
-            line_flows = np.zeros(self.num_edges)
+            line_flows_p = np.zeros(self.num_edges)
+            line_flows_q = np.zeros(self.num_edges)
+            
             for i in range(self.num_edges):
                 line_name = f"line_{i}"
                 if failed_lines and i in failed_lines:
-                    line_flows[i] = 0.0
+                    line_flows_p[i] = 0.0
+                    line_flows_q[i] = 0.0
                 else:
-                    line_flows[i] = self.pypsa_network.lines_t.p0.loc["now", line_name]
+                    # p0 and q0 are the active/reactive flows leaving the source bus
+                    line_flows_p[i] = self.pypsa_network.lines_t.p0.loc["now", line_name]
+                    line_flows_q[i] = self.pypsa_network.lines_t.q0.loc["now", line_name]
             
             self._restore_lines(original_x, original_r)
-            return voltages, angles, line_flows, True
+            return voltages, angles, line_flows_p, node_reactive, line_flows_q, True
             
         except Exception as e:
             print(f"  [WARNING] PyPSA power flow exception: {e}")
             self._restore_lines(original_x, original_r)
-            return np.ones(self.num_nodes) * 0.95, np.zeros(self.num_nodes), np.zeros(self.num_edges), False
-
-    def _restore_lines(self, original_x, original_r):
-        """Helper to reset line impedances after a failure simulation."""
-        for line_name, x_val in original_x.items():
-            self.pypsa_network.lines.loc[line_name, "x"] = x_val
-        for line_name, r_val in original_r.items():
-            self.pypsa_network.lines.loc[line_name, "r"] = r_val
-    # ====================================================================
-    # END: PYPSA AC POWER FLOW FUNCTION
-    # ====================================================================
+            return (np.ones(self.num_nodes) * 0.95, np.zeros(self.num_nodes), 
+                    np.zeros(self.num_edges), np.zeros(self.num_nodes), 
+                    np.zeros(self.num_edges), False)
 
     def _restore_lines(self, original_x, original_r):
         """Helper to reset line impedances after a failure simulation."""
@@ -1913,7 +1912,7 @@ class PhysicsBasedGridSimulator:
 
             # Recompute power flow after initial failures
             print(f"    [POWER FLOW] Recomputing after initial failures: {list(failed_nodes)}")
-            voltages, angles, line_flows, is_stable = \
+            voltages, angles, line_flows_p, node_reactive, line_flows_q, is_stable= \
                 self._compute_pypsa_power_flow(generation, load, failed_lines=[], failed_nodes=list(failed_nodes))
 
             if not is_stable:
@@ -1960,7 +1959,7 @@ class PhysicsBasedGridSimulator:
 
                         # Recompute power flow after this failure
                         print(f"    [POWER FLOW] Recomputing after node {neighbor} failure...")
-                        voltages, angles, line_flows, is_stable = \
+                        voltages, angles, line_flows_p, node_reactive, line_flows_q, is_stable = \
                             self._compute_pypsa_power_flow(generation, load, failed_lines=[], failed_nodes=list(failed_nodes))
 
                         if not is_stable:
@@ -2132,7 +2131,7 @@ class PhysicsBasedGridSimulator:
             else:
                 generation[idx] = 0
         
-        voltages, angles, line_flows, is_stable = self._compute_pypsa_power_flow(
+        voltages, angles, line_flows_p, node_reactive, line_flows_q, is_stable = self._compute_pypsa_power_flow(
             generation, load_values, failed_lines=[], failed_nodes=[]
         )
         
@@ -2285,11 +2284,9 @@ class PhysicsBasedGridSimulator:
             failed_nodes_t = list(cumulative_failed_nodes)
             failed_lines_t = []
             
-            voltages, angles, line_flows, is_stable = self._compute_pypsa_power_flow(
+            voltages, angles, line_flows_p, node_reactive, line_flows_q, is_stable = self._compute_pypsa_power_flow(
                 generation, load_values, failed_lines_t, failed_nodes_t
             )
-            
-            reactive_generation = generation * 0.33
 
             num_failed = len(failed_nodes_t)
             failure_ratio = num_failed / self.num_nodes
@@ -2347,9 +2344,9 @@ class PhysicsBasedGridSimulator:
                     voltages,
                     angles,
                     generation,
-                    reactive_generation,
+                    node_reactive,
                     load_values,
-                    load_values * 0.33,
+                    line_flows_q,
                     equipment_temps,
                     np.full(self.num_nodes, current_frequency),
                     self.equipment_age,
@@ -2369,7 +2366,7 @@ class PhysicsBasedGridSimulator:
                     equipment_temps,
                     np.full(self.num_nodes, current_frequency),
                     loading_ratios.mean() * np.ones(self.num_nodes),
-                    reactive_generation,
+                    node_reactive,
                 ]).astype(np.float32),
                 
                 'equipment_status': np.column_stack([
@@ -2406,7 +2403,7 @@ class PhysicsBasedGridSimulator:
                 'susceptance': self.line_susceptance.astype(np.float32),
                 'thermal_limits': self.thermal_limits.astype(np.float32),
                 'power_injection': (generation - load_values).astype(np.float32),
-                'reactive_injection': (reactive_generation - load_values * 0.33).astype(np.float32),
+                'reactive_injection': (node_reactive).astype(np.float32),
             }
             
             sequence.append(timestep_data)

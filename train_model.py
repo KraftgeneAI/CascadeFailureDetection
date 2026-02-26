@@ -7,6 +7,8 @@ Training Script for Cascade Prediction Model
 - Data leakage fix (pos_weight=1.0)
 - "Resume" bug fix
 """
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
 import torch
 import torch.nn as nn
