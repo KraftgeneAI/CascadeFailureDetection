@@ -16,6 +16,14 @@ This specific implementation validates the core GNN and its physics-informed lea
 -   **Multi-Modal Ground Truth**: The data generator creates a rich, labeled dataset that includes not just failure states but also the ground truth *causal path*, *failure timings*, and *risk profiles* for every scenario.
 -   **Dynamic Loss Balancing**: An automatic calibration step in the training script balances the weights of all loss components (physics, timing, risk, etc.) for stable and effective training.
 
+## Video-Driven Stress Modeling
+
+-   **Video-Driven Stress Injection**: Introduces an external stress signal derived from environmental video data, enabling dynamic modulation of cascade simulations.
+-   **CV-Based Signal Extraction**: Implements `video_processor.py` to generate per-frame stress signals. The current baseline uses brightness-normalized intensity with optional smoothing, producing a bounded [0, 1] stress factor.
+-   **External Stress Integration**: Extends `_generate_scenario_data()` to support an `external_stress_signal` input, allowing timestep-level modulation without disrupting core grid physics.
+-   **Physics-Safe Decoupling**: Ensures external video signals act as an independent modulation layer rather than overriding base physical stress variables, preserving numerical stability and AC power-flow consistency.
+-   **Detection-Ready Architecture**: The pipeline is structured to support future integration of object-detection-based CV models (e.g., wildfire detection via YOLO), enabling semantically meaningful stress signals beyond raw frame intensity.
+
 ## System Architecture
 
 The model is a multi-task spatio-temporal GNN. An input scenario is processed in parallel by three encoders, fused, and then passed through a GNN-LSTM core to make simultaneous predictions.
