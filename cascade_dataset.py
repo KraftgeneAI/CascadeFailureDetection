@@ -13,8 +13,6 @@ Memory-efficient dataset loader for pre-generated cascade failure/normal data.
 Author: Kraftgene AI Inc. (R&D)
 Date: October 2025
 """
-import os
-os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
 import torch
 from torch.utils.data import Dataset
@@ -262,7 +260,7 @@ class CascadeDataset(Dataset):
             return data
 
         # Check the shape of the last step to determine feature count
-        scada_shape = (last_step.get('scada_data', np.zeros((118,13))).shape[0], 13)
+        scada_shape = (last_step.get('scada_data', np.zeros((118,12))).shape[0], 12)
         num_nodes = scada_shape[0]
         num_edges = edge_index.shape[1]
         
@@ -279,17 +277,16 @@ class CascadeDataset(Dataset):
 
         for i, ts in enumerate(sequence): # Loop over the *sliced* sequence
             # Use 15-col default for safe_get to load old data
-            scada_data_raw = safe_get(ts, 'scada_data', np.zeros((num_nodes, 15))).astype(np.float32)
+            scada_data_raw = safe_get(ts, 'scada_data', np.zeros((num_nodes, 14))).astype(np.float32)
             
             if scada_data_raw.shape[1] >= 6:
                 scada_data_raw[:, 2] = self._normalize_power(scada_data_raw[:, 2]) # generation
-                scada_data_raw[:, 3] = self._normalize_power(scada_data_raw[:, 3]) # reactive_generation
+                scada_data_raw[:, 3] = self._normalize_power(scada_data_raw[:, 3]) # node_reactive
                 scada_data_raw[:, 4] = self._normalize_power(scada_data_raw[:, 4]) # load_values
-                scada_data_raw[:, 5] = self._normalize_power(scada_data_raw[:, 5]) # reactive_load
             
             # Slice off the "cheat" features (time and stress) if present
-            if scada_data_raw.shape[1] > 13:
-                scada_data = scada_data_raw[:, :13]
+            if scada_data_raw.shape[1] > 12:
+                scada_data = scada_data_raw[:, :12]
             else:
                 scada_data = scada_data_raw
             
@@ -345,9 +342,11 @@ class CascadeDataset(Dataset):
             # END: DYNAMIC TOPOLOGY MASKING
             # ====================================================================
             
-        edge_attr = safe_get(last_step, 'edge_attr', np.zeros((num_edges, 5))).astype(np.float32)
+        edge_attr = safe_get(last_step, 'edge_attr', np.zeros((num_edges, 7))).astype(np.float32)
         if edge_attr.shape[1] >= 2:
             edge_attr[:, 1] = self._normalize_power(edge_attr[:, 1]) # thermal_limits
+            edge_attr[:, 5] = self._normalize_power(edge_attr[:, 5]) # line flow p power
+            edge_attr[:, 6] = self._normalize_power(edge_attr[:, 6]) # line flow q power
         edge_attr = to_tensor(edge_attr)
         
         ground_truth_risk = metadata.get('ground_truth_risk', np.zeros(7, dtype=np.float32))
@@ -451,7 +450,7 @@ class CascadeDataset(Dataset):
         visual_data = torch.randn(T, num_nodes, 3, 32, 32)
         thermal_data = torch.randn(T, num_nodes, 1, 32, 32)
         sensor_data = torch.randn(T, num_nodes, 12)
-        edge_attr = torch.randn(num_edges, 5)
+        edge_attr = torch.randn(num_edges, 7)
         
         # --- NEW: Default Mask for Metadata format ---
         edge_mask = torch.ones(T, num_edges)

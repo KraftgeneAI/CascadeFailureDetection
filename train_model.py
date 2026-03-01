@@ -7,9 +7,6 @@ Training Script for Cascade Prediction Model
 - Data leakage fix (pos_weight=1.0)
 - "Resume" bug fix
 """
-import os
-os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -68,40 +65,8 @@ class PhysicsInformedLoss(nn.Module):
         loss = alpha_t * (1 - p_t) ** self.focal_gamma * bce_loss
         return loss.mean()
 
-    def flow_consistency_loss(self, predicted_flows, angles, edge_index, susceptance, edge_mask=None):
-        """
-        Forces Line Flow Head to match: 100 * B * sin(theta_i - theta_j)
-        This connects Angle Head -> Flow Head.
-        """
-        src, dst = edge_index
-        
-        # Ensure susceptance is [B, E, 1]
-        # It comes from graph_properties as [B, E] (collated) or [E] (unbatched)
-        if susceptance.dim() == 2: # [B, E]
-            susceptance = susceptance.unsqueeze(-1)
-        elif susceptance.dim() == 1: # [E]
-            susceptance = susceptance.unsqueeze(0).unsqueeze(-1)
-            
-        # 2. Calculate Angle Difference
-        theta_src = angles[:, src, :]
-        theta_dst = angles[:, dst, :]
-        theta_diff = theta_src - theta_dst
-        
-        # 3. GENERATOR FORMULA (Found in multimodal_data_generator.py)
-        # line_flows = susceptance * sin(angle_diff) * 100.0
-        target_flow_physics = susceptance * torch.sin(theta_diff) * 100.0
-        
-        # 4. Apply Mask (Ignore failed lines)
-        if edge_mask is not None:
-            mask = edge_mask.unsqueeze(-1)
-            target_flow_physics = target_flow_physics * mask
-            predicted_flows = predicted_flows * mask
-            
-        # 5. Consistency Loss
-        # FIX: Use Smooth L1 Loss (Huber Loss). 
-        # It handles the "Scale 100" large errors linearly (like MAE) without exploding.
-        # It handles small errors quadratically (like MSE) for precision.
-        return F.smooth_l1_loss(predicted_flows, target_flow_physics.detach(), beta=1.0)
+    def flow_consistency_loss(self, predicted_flows, target_line_flows):
+        return F.mse_loss(predicted_flows, target_line_flows)
 
     def temperature_loss(self, predicted_temp, ground_truth_temp):
         """Supervised learning for Temperature (Rule 5)"""
@@ -151,16 +116,8 @@ class PhysicsInformedLoss(nn.Module):
         """Supervised Voltage Loss (p.u.)"""
         return F.mse_loss(predicted_v, target_v)
 
-    def reactive_power_loss(self, predicted_q, voltages, edge_index, susceptance):
-        """Rule 2: Q_ij = B_ij * (V_i - V_j) - Consistency check"""
-        src, dst = edge_index
-        v_i, v_j = voltages[:, src, :], voltages[:, dst, :]
-        
-        # Simplified reactive flow heuristic from generator
-        target_q = susceptance.unsqueeze(-1) * (v_i - v_j) 
-        
-        # Compare prediction to the physics-derived target
-        return F.mse_loss(predicted_q, target_q.detach())
+    def reactive_power_loss(self, predicted_q, target_q):
+        return F.mse_loss(predicted_q, target_q)
 
     def forward(self, predictions, targets, graph_properties, edge_mask=None):
         loss_dict = {}
@@ -185,31 +142,22 @@ class PhysicsInformedLoss(nn.Module):
             loss_dict['voltage'] = L_volt.item() 
 
         # --- 2. REACTIVE POWER CONSISTENCY ---
-        if 'reactive_flows' in predictions and 'voltages' in predictions:
-            susceptance = get_prop('susceptance')
-            if susceptance is not None:
-                L_react = self.reactive_power_loss(
-                    predictions['reactive_flows'],
-                    predictions['voltages'],
-                    graph_properties['edge_index'],
-                    susceptance
-                )
-                total_loss += self.lambdas.get('reactive', 1.0) * L_react
-                loss_dict['reactive'] = L_react.item() 
+        if 'reactive_flows' in predictions and 'node_reactive_power' in targets:
+            L_react = self.reactive_power_loss(
+                predictions['reactive_flows'],
+                targets['node_reactive_power']
+            )
+            total_loss += self.lambdas.get('reactive', 1.0) * L_react
+            loss_dict['reactive'] = L_react.item() 
 
         # --- 3. FLOW CONSISTENCY (Rule 1: Active Power) ---
-        if 'line_flows' in predictions and 'angles' in predictions:
-            susceptance = get_prop('susceptance')
-            if susceptance is not None:
-                L_flow = self.flow_consistency_loss(
-                    predictions['line_flows'],
-                    predictions['angles'],
-                    graph_properties['edge_index'],
-                    susceptance,
-                    edge_mask
-                )
-                total_loss += self.lambdas.get('flow_consistency', 0.05) * L_flow
-                loss_dict['powerflow'] = L_flow.item()
+        if 'line_flows' in predictions and 'line_reactive_power' in targets:
+            L_flow = self.flow_consistency_loss(
+                predictions['line_flows'],
+                targets['line_reactive_power']
+            )
+            total_loss += self.lambdas.get('flow_consistency', 0.05) * L_flow
+            loss_dict['powerflow'] = L_flow.item()
 
         # --- 4. TEMPERATURE (Rule 5) ---
         if 'temperature' in predictions and get_prop('ground_truth_temperature') is not None:
@@ -444,8 +392,10 @@ class Trainer:
                 'ground_truth_risk': batch_device.get('ground_truth_risk'),
                 'cascade_timing': batch_device.get('cascade_timing'),
                 # Extract Voltage (Feature 0) from the LAST timestep (-1) of the SCADA sequence
-                'voltages': batch_device['scada_data'][:, -1, :, 0:1] if 'scada_data' in batch_device else None
-            }
+                'voltages': batch_device['scada_data'][:, -1, :, 0:1] if 'scada_data' in batch_device else None,
+                'node_reactive_power': batch_device['scada_data'][:,-1,:, 3:4] if 'scada_data' in batch_device else None,
+                'line_reactive_power': batch_device['edge_attr'][:,:,6:7] if 'edge_attr' in batch_device else None,
+                }
 
                 # === ADD THIS BLOCK ===
                 edge_mask = batch_device.get('edge_mask')
@@ -667,7 +617,7 @@ class Trainer:
         check_shape('temperature', ('B', 'N', 1)) # <-- Added this
 
         print("\nChecking other model outputs...")
-        check_shape('reactive_flows', ('B', 'E', 1))
+        check_shape('reactive_flows', ('B', 'N', 1))
 
         if 'temporal_sequence' in batch:
             if batch['temporal_sequence'].dim() > 0:
@@ -719,7 +669,10 @@ class Trainer:
             targets = {
                 'failure_label': batch_device['node_failure_labels'],
                 'ground_truth_risk': batch_device.get('ground_truth_risk'),
-                'cascade_timing': batch_device.get('cascade_timing')
+                'cascade_timing': batch_device.get('cascade_timing'),
+                'voltages': batch_device['scada_data'][:, -1, :, 0:1] if 'scada_data' in batch_device else None,
+                'node_reactive_power': batch_device['scada_data'][:,-1,:, 3:4] if 'scada_data' in batch_device else None,
+                'line_reactive_power': batch_device['edge_attr'][:,:,6:7] if 'edge_attr' in batch_device else None,
             }
 
             if self.use_amp and self.scaler is not None:

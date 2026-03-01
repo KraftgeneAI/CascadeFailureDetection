@@ -1912,14 +1912,16 @@ class PhysicsBasedGridSimulator:
 
             # Recompute power flow after initial failures
             print(f"    [POWER FLOW] Recomputing after initial failures: {list(failed_nodes)}")
-            voltages, angles, line_flows_p, node_reactive, line_flows_q, is_stable= \
+            voltages, angles, line_flows, node_reactive, line_flows_q, is_stable= \
                 self._compute_pypsa_power_flow(generation, load, failed_lines=[], failed_nodes=list(failed_nodes))
 
             if not is_stable:
                 print(f"    [WARNING] Power flow unstable after initial failures")
 
-            # Calculate loading ratios
-            loading_ratios = np.abs(line_flows) / (self.thermal_limits + 1e-6)
+            # More accurate thermal loading. In real power systems, thermal loading should consider apparent power (both P and Q)
+            apparent_power = np.sqrt(line_flows**2 + line_flows_q**2)
+            loading_ratios = apparent_power / (self.thermal_limits + 1e-6)
+
             src, dst = self.edge_index
             node_loading = np.zeros(self.num_nodes)
             for i in range(self.num_edges):
@@ -1959,7 +1961,7 @@ class PhysicsBasedGridSimulator:
 
                         # Recompute power flow after this failure
                         print(f"    [POWER FLOW] Recomputing after node {neighbor} failure...")
-                        voltages, angles, line_flows_p, node_reactive, line_flows_q, is_stable = \
+                        voltages, angles, line_flows, node_reactive, line_flows_q, is_stable = \
                             self._compute_pypsa_power_flow(generation, load, failed_lines=[], failed_nodes=list(failed_nodes))
 
                         if not is_stable:
@@ -2131,7 +2133,7 @@ class PhysicsBasedGridSimulator:
             else:
                 generation[idx] = 0
         
-        voltages, angles, line_flows_p, node_reactive, line_flows_q, is_stable = self._compute_pypsa_power_flow(
+        voltages, angles, line_flows, node_reactive, line_flows_q, is_stable = self._compute_pypsa_power_flow(
             generation, load_values, failed_lines=[], failed_nodes=[]
         )
         
@@ -2284,7 +2286,7 @@ class PhysicsBasedGridSimulator:
             failed_nodes_t = list(cumulative_failed_nodes)
             failed_lines_t = []
             
-            voltages, angles, line_flows_p, node_reactive, line_flows_q, is_stable = self._compute_pypsa_power_flow(
+            voltages, angles, line_flows, node_reactive, line_flows_q, is_stable = self._compute_pypsa_power_flow(
                 generation, load_values, failed_lines_t, failed_nodes_t
             )
 
@@ -2346,7 +2348,6 @@ class PhysicsBasedGridSimulator:
                     generation,
                     node_reactive,
                     load_values,
-                    line_flows_q,
                     equipment_temps,
                     np.full(self.num_nodes, current_frequency),
                     self.equipment_age,
@@ -2392,6 +2393,8 @@ class PhysicsBasedGridSimulator:
                     self.line_resistance,
                     self.line_susceptance,
                     self.line_conductance,
+                    line_flows,
+                    line_flows_q,
                 ]).astype(np.float32),
                 
                 'node_labels': np.array([1.0 if node in cumulative_failed_nodes else 0.0 

@@ -1008,10 +1008,10 @@ class UnifiedCascadePredictionModel(nn.Module):
             nn.LayerNorm(hidden_dim) for _ in range(num_gnn_layers)
         ])
         
-        # Edge embedding - Updated to accept 5 features:
-        # [reactance, thermal_limits, resistance, susceptance, conductance]
+        # Edge embedding - Updated to accept 7 features:
+        # [reactance, thermal_limits, resistance, susceptance, conductance, line_flows_p, line_flows_q]
         self.edge_embedding = nn.Sequential(
-            nn.Linear(5, hidden_dim),  # Changed from 4 to 5
+            nn.Linear(7, hidden_dim),  # Changed from 5 to 7
             nn.ReLU(),
             nn.Dropout(dropout)
         )
@@ -1076,10 +1076,10 @@ class UnifiedCascadePredictionModel(nn.Module):
         # Reactive flow head: NEW head, learns this task separately.
         # Also a linear output.
         self.reactive_flow_head = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Linear(hidden_dim , hidden_dim // 2),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(hidden_dim // 2, 1)
         )
         
         # Frequency head: Must be able to predict "bad" frequencies.
@@ -1153,7 +1153,7 @@ class UnifiedCascadePredictionModel(nn.Module):
         edge_attr_input = batch.get('edge_attr')
         if edge_attr_input is None:
             E = batch['edge_index'].shape[1]
-            edge_attr_input = torch.zeros(env_emb.shape[0], E, 5, device=env_emb.device)  # Changed from 4 to 5
+            edge_attr_input = torch.zeros(env_emb.shape[0], E, 7, device=env_emb.device)  # Changed from 5 to 7
         
         if edge_attr_input.dim() == 2 and env_emb.dim() > 2:
              edge_attr_input = edge_attr_input.unsqueeze(0).expand(env_emb.shape[0], -1, -1)
@@ -1268,7 +1268,7 @@ class UnifiedCascadePredictionModel(nn.Module):
         edge_features = torch.cat([h_src, h_dst], dim=-1)
         
         line_flows = self.line_flow_head(edge_features)
-        reactive_flows = self.reactive_flow_head(edge_features)
+        reactive_flows = self.reactive_flow_head(h)
 
         risk_scores = self.risk_head(h)
         
