@@ -39,15 +39,16 @@ class PhysicsInformedLoss(nn.Module):
     """
     
     def __init__(self, lambda_flow=0.05, lambda_risk=0.1, lambda_timing=0.1, 
-                 pos_weight=1.0, focal_alpha=0.25, focal_gamma=2.0, 
-                 label_smoothing=0.0, **kwargs):
+                 lambda_active_flow=0.1, pos_weight=1.0, focal_alpha=0.25, 
+                 focal_gamma=2.0, label_smoothing=0.0, **kwargs):
         super().__init__()
         # We only need explicit physics lambdas for the consistency check (Rule 1).
         # The others (V, Theta, F, T) are supervised tasks learned from data.
         self.lambdas = {
             'flow_consistency': lambda_flow, # Enforces Rule 1
             'risk': lambda_risk,
-            'timing': lambda_timing
+            'timing': lambda_timing,
+            'active_flow': lambda_active_flow,
         }
         
         # Classification Loss Settings
@@ -118,6 +119,10 @@ class PhysicsInformedLoss(nn.Module):
 
     def reactive_power_loss(self, predicted_q, target_q):
         return F.mse_loss(predicted_q, target_q)
+    
+    def active_power_line_flow_loss(self, predicted_p, target_p):
+        """Active power line flow loss"""
+        return F.mse_loss(predicted_p, target_p)
 
     def forward(self, predictions, targets, graph_properties, edge_mask=None):
         loss_dict = {}
@@ -150,7 +155,7 @@ class PhysicsInformedLoss(nn.Module):
             total_loss += self.lambdas.get('reactive', 1.0) * L_react
             loss_dict['reactive'] = L_react.item() 
 
-        # --- 3. FLOW CONSISTENCY (Rule 1: Active Power) ---
+        # --- 3. FLOW CONSISTENCY  ---
         if 'line_flows' in predictions and 'line_reactive_power' in targets:
             L_flow = self.flow_consistency_loss(
                 predictions['line_flows'],
@@ -158,6 +163,15 @@ class PhysicsInformedLoss(nn.Module):
             )
             total_loss += self.lambdas.get('flow_consistency', 0.05) * L_flow
             loss_dict['powerflow'] = L_flow.item()
+        
+        # --- 3b. ACTIVE POWER LINE FLOW SUPERVISION ---
+        if 'active_power_line_flows' in predictions and 'active_power_line_flows' in targets:
+            L_active_flow = self.active_power_line_flow_loss(
+                predictions['active_power_line_flows'],
+                targets['active_power_line_flows']
+            )
+            total_loss += self.lambdas.get('active_flow', 0.1) * L_active_flow
+            loss_dict['active_flow'] = L_active_flow.item()
 
         # --- 4. TEMPERATURE (Rule 5) ---
         if 'temperature' in predictions and get_prop('ground_truth_temperature') is not None:
@@ -395,6 +409,7 @@ class Trainer:
                 'voltages': batch_device['scada_data'][:, -1, :, 0:1] if 'scada_data' in batch_device else None,
                 'node_reactive_power': batch_device['scada_data'][:,-1,:, 3:4] if 'scada_data' in batch_device else None,
                 'line_reactive_power': batch_device['edge_attr'][:,:,6:7] if 'edge_attr' in batch_device else None,
+                'active_power_line_flows': batch_device['edge_attr'][:,:,5:6] if 'edge_attr' in batch_device else None,
                 }
 
                 # === ADD THIS BLOCK ===

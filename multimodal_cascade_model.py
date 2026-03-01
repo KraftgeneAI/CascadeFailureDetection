@@ -33,7 +33,6 @@ from torch_geometric.utils import add_self_loops, softmax
 from typing import Optional, Tuple, Dict
 import logging # Added for debug logging
 
-
 # Set up basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -1104,6 +1103,16 @@ class UnifiedCascadePredictionModel(nn.Module):
             nn.Linear(hidden_dim // 2, 1),
             nn.ReLU() # Temperature must be positive
         )
+        
+        # Active power line flow head: Predicts active power flow on edges
+        # Uses edge features (concatenated source and destination node embeddings)
+        self.active_power_line_flow_head = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(hidden_dim, 1)
+            # No activation - active power can be positive or negative
+        )
         # ====================================================================
         # END: ADDITION
         # ====================================================================
@@ -1268,6 +1277,7 @@ class UnifiedCascadePredictionModel(nn.Module):
         edge_features = torch.cat([h_src, h_dst], dim=-1)
         
         line_flows = self.line_flow_head(edge_features)
+        active_power_line_flows = self.active_power_line_flow_head(edge_features)
         reactive_flows = self.reactive_flow_head(h)
 
         risk_scores = self.risk_head(h)
@@ -1281,6 +1291,7 @@ class UnifiedCascadePredictionModel(nn.Module):
             'voltages': voltages,
             'angles': angles,
             'line_flows': line_flows,
+            'active_power_line_flows': active_power_line_flows,
             'temperature': temperature,
             'reactive_flows': reactive_flows,
             'frequency': frequency,
