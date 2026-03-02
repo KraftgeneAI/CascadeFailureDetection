@@ -630,9 +630,7 @@ class Trainer:
         check_shape('risk_scores', ('B', 'N', 7))
         check_shape('cascade_timing', ('B', 'N', 1))
         check_shape('temperature', ('B', 'N', 1)) # <-- Added this
-
-        print("\nChecking other model outputs...")
-        check_shape('reactive_flows', ('B', 'N', 1))
+        check_shape('reactive_nodes', ('B', 'N', 1))
 
         if 'temporal_sequence' in batch:
             if batch['temporal_sequence'].dim() > 0:
@@ -688,6 +686,7 @@ class Trainer:
                 'voltages': batch_device['scada_data'][:, -1, :, 0:1] if 'scada_data' in batch_device else None,
                 'node_reactive_power': batch_device['scada_data'][:,-1,:, 3:4] if 'scada_data' in batch_device else None,
                 'line_reactive_power': batch_device['edge_attr'][:,:,6:7] if 'edge_attr' in batch_device else None,
+                'active_power_line_flows': batch_device['edge_attr'][:,:,5:6] if 'edge_attr' in batch_device else None,
             }
 
             if self.use_amp and self.scaler is not None:

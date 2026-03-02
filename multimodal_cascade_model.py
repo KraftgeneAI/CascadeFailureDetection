@@ -1072,9 +1072,9 @@ class UnifiedCascadePredictionModel(nn.Module):
             # <-- FIX: Removed Softplus
         )
         
-        # Reactive flow head: NEW head, learns this task separately.
+        # Reactive node head: NEW head, learns this task separately.
         # Also a linear output.
-        self.reactive_flow_head = nn.Sequential(
+        self.reactive_nodes_head = nn.Sequential(
             nn.Linear(hidden_dim , hidden_dim // 2),
             nn.ReLU(),
             nn.Dropout(0.3),
@@ -1278,7 +1278,7 @@ class UnifiedCascadePredictionModel(nn.Module):
         
         line_flows = self.line_flow_head(edge_features)
         active_power_line_flows = self.active_power_line_flow_head(edge_features)
-        reactive_flows = self.reactive_flow_head(h)
+        reactive_nodes = self.reactive_nodes_head(h)
 
         risk_scores = self.risk_head(h)
         
@@ -1293,7 +1293,7 @@ class UnifiedCascadePredictionModel(nn.Module):
             'line_flows': line_flows,
             'active_power_line_flows': active_power_line_flows,
             'temperature': temperature,
-            'reactive_flows': reactive_flows,
+            'reactive_nodes': reactive_nodes,
             'frequency': frequency,
             'risk_scores': risk_scores,
             'node_embeddings': h,
