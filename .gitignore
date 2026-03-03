@@ -9,11 +9,28 @@
 !*.pth
 !*.JPG
 !*.log
+
+# Allow specific directories and their contents
 !agentic_cascade_system/
-!agentic_cascade_system/agents/
+!agentic_cascade_system/**
 !checkpoints/
+!checkpoints/**
 !images/
+!images/**
 !cascade_prediction/
+!cascade_prediction/**
 
 # And exclude the .gitignore file itself
 !.gitignore
+
+# Ignore Python cache directories (even in allowed directories)
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.Python
+**/*.so
+**/*.egg
+**/*.egg-info/
+**/dist/
+**/build/
