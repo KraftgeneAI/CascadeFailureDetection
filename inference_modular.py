@@ -1,9 +1,7 @@
 """
-Cascade Failure Prediction Inference Script
-============================================================
-Main entry point for running inference on cascade scenarios.
-
-Author: Kraftgene AI Inc.
+Cascade Failure Prediction Inference Script (Modular Version)
+=============================================================
+Uses modular components from cascade_prediction package.
 """
 
 import torch
@@ -19,13 +17,10 @@ try:
         print_prediction_report
     )
     from cascade_prediction.utils import NumpyEncoder
-except ImportError:
-    print("Error: Could not import cascade_prediction modules.")
+except ImportError as e:
+    print(f"Error: Could not import cascade_prediction modules. {e}")
     print("Make sure the cascade_prediction package is properly installed.")
     sys.exit(1)
-
-
-
 
 
 def main():
@@ -91,6 +86,7 @@ def main():
         traceback.print_exc()
         print(f"\nError: {e}")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
