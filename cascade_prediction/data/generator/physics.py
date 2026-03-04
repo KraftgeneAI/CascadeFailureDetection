@@ -175,8 +175,7 @@ class PowerFlowSimulator:
         for i in range(self.num_nodes):
             load_name = f"load_{i}"
             if failed_nodes and i in failed_nodes:
-                self.network.loads.loc[load_name, "p_set"] = 0.0
-                self.network.loads.loc[load_name, "q_set"] = 0.0
+                self.network.loads.loc[load_name, "in_service"] = False
             else:
                 self.network.loads.loc[load_name, "p_set"] = load[i]
                 self.network.loads.loc[load_name, "q_set"] = q_load[i]
@@ -189,8 +188,7 @@ class PowerFlowSimulator:
                 line_name = f"line_{line_idx}"
                 original_x[line_name] = self.network.lines.loc[line_name, "x"]
                 original_r[line_name] = self.network.lines.loc[line_name, "r"]
-                self.network.lines.loc[line_name, "x"] = 1e6
-                self.network.lines.loc[line_name, "r"] = 1e6
+                self.network.lines.loc[line_name, "in_service"] = False
         
         try:
             # Run power flow

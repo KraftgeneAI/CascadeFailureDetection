@@ -31,6 +31,7 @@ from .physics import PowerFlowSimulator, FrequencyDynamicsSimulator, ThermalDyna
 from .cascade import CascadeSimulator, create_adjacency_list
 from .environmental import EnvironmentalDataGenerator
 from .robotic import RoboticDataGenerator
+from .utils import get_failed_lines_from_nodes
 
 
 class PhysicsBasedGridSimulator:
@@ -258,7 +259,7 @@ class PhysicsBasedGridSimulator:
             if total_capacity > 0:
                 generation[idx] = (self.gen_capacity[idx] / total_capacity) * total_load * 1.02
         
-        # Run initial power flow
+        # Run initial power flow (no failures yet)
         voltages, angles, line_flows, node_reactive, line_flows_q, is_stable = (
             self.power_flow_sim.compute_power_flow(generation, load_values, [], [])
         )
@@ -297,6 +298,8 @@ class PhysicsBasedGridSimulator:
             if state == 2:  # Full failure
                 initial_failed_nodes.append(n)
                 failed_reasons.append(reason)
+                generation[n]=0
+                load_values[n]=0
         
         # Determine if cascade occurs
         if len(initial_failed_nodes) > 0:
@@ -452,7 +455,11 @@ class PhysicsBasedGridSimulator:
                 cumulative_failed_nodes.update(timestep_to_failed_nodes[t])
             
             failed_nodes_t = list(cumulative_failed_nodes)
-            failed_lines_t = []
+            
+            # Calculate failed lines from failed nodes
+            failed_lines_t = get_failed_lines_from_nodes(
+                self.edge_index.numpy(), cumulative_failed_nodes
+            )
             
             # Run power flow
             voltages, angles, line_flows, node_reactive, line_flows_q, is_stable = (
@@ -663,3 +670,4 @@ class PhysicsBasedGridSimulator:
             'sequence': sequence,
             'edge_index': self.edge_index.numpy(),
         }
+

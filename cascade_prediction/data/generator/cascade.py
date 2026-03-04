@@ -12,6 +12,7 @@ This module implements:
 
 import numpy as np
 from typing import List, Tuple, Set, Dict, Optional
+from .utils import get_failed_lines_from_nodes
 
 
 class CascadeSimulator:
@@ -229,12 +230,16 @@ class CascadeSimulator:
         queue = [(node[0], 0.0) for node in initial_failed_nodes]
         visited = set(node[0] for node in initial_failed_nodes)
         
+        # Calculate failed lines from failed nodes
+        failed_lines = get_failed_lines_from_nodes(edge_index, failed_nodes)
+        
         # Recompute power flow after initial failures
         print(f"    [POWER FLOW] Recomputing after initial failures: {list(failed_nodes)}")
+        print(f"    [POWER FLOW] Failed lines connected to failed nodes: {failed_lines}")
         voltages, angles, line_flows, node_reactive, line_flows_q, is_stable = \
             power_flow_simulator.compute_power_flow(
                 generation, load,
-                failed_lines=[],
+                failed_lines=failed_lines,
                 failed_nodes=list(failed_nodes)
             )
         
@@ -290,11 +295,18 @@ class CascadeSimulator:
                           f"L={neighbor_loading:.3f}")
                     
                     # Recompute power flow after this failure
+                    generation[neighbor]=0
+                    load[neighbor]=0
+                    
+                    # Calculate failed lines from all failed nodes
+                    failed_lines = get_failed_lines_from_nodes(edge_index, failed_nodes)
+                    
                     print(f"    [POWER FLOW] Recomputing after node {neighbor} failure...")
+                    print(f"    [POWER FLOW] Total failed nodes: {len(failed_nodes)}, Failed lines: {len(failed_lines)}")
                     voltages, angles, line_flows, node_reactive, line_flows_q, is_stable = \
                         power_flow_simulator.compute_power_flow(
                             generation, load,
-                            failed_lines=[],
+                            failed_lines=failed_lines,
                             failed_nodes=list(failed_nodes)
                         )
                     
@@ -347,6 +359,7 @@ class CascadeSimulator:
             node_loading[d] = max(node_loading[d], loading_ratios[i])
         
         return node_loading
+
 
 
 def create_adjacency_list(

@@ -209,3 +209,28 @@ def validate_scenario(scenario: Dict) -> bool:
     except Exception as e:
         print(f"Validation error: {e}")
         return False
+
+
+def get_failed_lines_from_nodes(
+    edge_index: np.ndarray,
+    failed_nodes: set
+) -> List[int]:
+    """
+    Get line indices connected to any failed node.
+    
+    When a node (substation/bus) fails, all transmission lines connected
+    to it are effectively out of service and should be marked as failed.
+    
+    Args:
+        edge_index: Edge connectivity [2, num_edges]
+        failed_nodes: Set of failed node indices
+        
+    Returns:
+        List of line indices that are connected to failed nodes
+    """
+    failed_lines = []
+    for line_idx in range(edge_index.shape[1]):
+        source, target = edge_index[:, line_idx]
+        if source in failed_nodes or target in failed_nodes:
+            failed_lines.append(line_idx)
+    return failed_lines
