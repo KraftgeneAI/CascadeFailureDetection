@@ -432,7 +432,7 @@ class NodePropertyInitializer:
         
         # Voltage threshold: node fails if voltage < threshold
         voltage_failure_threshold = np.random.uniform(0.88, 0.92, self.num_nodes)
-        voltage_damage_threshold = voltage_failure_threshold - np.random.uniform(0.03, 0.05)
+        voltage_damage_threshold = voltage_failure_threshold + np.random.uniform(0.03, 0.05)
         
         # Temperature threshold: node fails if temperature > threshold
         temperature_failure_threshold = np.random.uniform(85, 95, self.num_nodes)
