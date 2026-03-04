@@ -159,6 +159,10 @@ class PhysicsBasedGridSimulator:
             margin = np.random.uniform(1.5, 2.0)
             self.thermal_limits[i] = base_capacity * margin
 
+        # Ensure minimum thermal limits
+        min_thermal_limit = total_load * 0.05  # At least 5% of total load
+        self.thermal_limits = np.maximum(self.thermal_limits, min_thermal_limit)
+        
         # Initialize physics simulators
         print(f"Initializing physics simulators...")
         self.power_flow_sim = PowerFlowSimulator(

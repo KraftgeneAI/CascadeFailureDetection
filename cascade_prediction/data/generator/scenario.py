@@ -397,7 +397,8 @@ def generate_dataset_from_config(
     output_dir: str = 'data',
     batch_size: int = 10,
     seed: int = 42,
-    topology_file: Optional[str] = None
+    topology_file: Optional[str] = None,
+    start_batch: int = 0
 ) -> Dict[str, int]:
     """
     Convenience function to generate dataset from configuration.
@@ -422,6 +423,8 @@ def generate_dataset_from_config(
         Random seed
     topology_file : str, optional
         Path to saved topology
+    start_batch : int
+        Starting batch number (for parallel generation)
     
     Returns:
     --------
@@ -461,7 +464,8 @@ def generate_dataset_from_config(
         num_normal=num_normal,
         num_cascade=num_cascade,
         num_stressed=num_stressed,
-        sequence_length=sequence_length
+        sequence_length=sequence_length,
+        start_batch=start_batch
     )
     
     return stats
