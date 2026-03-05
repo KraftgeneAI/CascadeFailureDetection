@@ -286,6 +286,9 @@ class CascadeDataset(Dataset):
                 prev_failed_node_indices,
                 num_edges
             )
+            # Ensure edge_mask is a tensor
+            if not isinstance(edge_mask, torch.Tensor):
+                edge_mask = to_tensor(edge_mask)
             data_arrays['edge_mask'].append(edge_mask)
         
         # Process edge attributes
