@@ -102,6 +102,9 @@ class Trainer:
             weight_decay=1e-3
         )
         
+        # Initialize learning rate scheduler
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, 'min', patience=5)
+        
         # Initialize AMP scaler if using mixed precision
         self.scaler = torch.amp.GradScaler('cuda') if use_amp and device.type == 'cuda' else None
         
@@ -121,13 +124,17 @@ class Trainer:
             'learning_rate': []
         }
         
-        # Best model tracking
+        # Training state tracking
+        self.start_epoch = 0
         self.best_val_loss = float('inf')
+        self.best_val_mae = float('inf')
+        self.best_val_timing_loss = float('inf')
+        self.best_val_f1 = 0.0
         self.epochs_without_improvement = 0
         
         # Thresholds for metrics calculation
-        self.cascade_threshold = 0.5
-        self.node_threshold = 0.5
+        self.cascade_threshold = 0.25
+        self.node_threshold = 0.25
         
         # Model validation flag
         self._model_validated = False
@@ -312,7 +319,7 @@ class Trainer:
             'time_mae': time_mae
         }
     
-    def train_epoch(self) -> float:
+    def train_epoch(self) -> Dict[str, float]:
         """
         Train for one epoch.
         
@@ -322,17 +329,16 @@ class Trainer:
             Dictionary containing loss and all metrics for the epoch
         """
         self.model.train()
+        
         total_loss = 0.0
-        num_batches = 0
-        loss_component_sums = {}
         grad_norms = []
+        loss_component_sums = {}
         
         metric_sums = {}
         total_timing_batches = 0
-        
+
         pbar = tqdm(self.train_loader, desc="Training", mininterval=240.0)
         for batch_idx, batch in enumerate(pbar):
-            # Move batch to device (handle graph_properties specially)
             batch_device = {}
             for k, v in batch.items():
                 if k == 'graph_properties':
@@ -347,10 +353,9 @@ class Trainer:
             
             if 'node_failure_labels' not in batch_device:
                 continue
-            
+
             self.optimizer.zero_grad()
             
-            # Prepare graph_properties and targets for loss function
             graph_properties = batch_device.get('graph_properties', {})
             if 'edge_index' not in graph_properties:
                 graph_properties['edge_index'] = batch_device['edge_index']
@@ -360,18 +365,15 @@ class Trainer:
                 'ground_truth_risk': batch_device.get('ground_truth_risk'),
                 'cascade_timing': batch_device.get('cascade_timing'),
                 'voltages': batch_device['scada_data'][:, -1, :, 0:1] if 'scada_data' in batch_device else None,
-                'node_reactive_power': batch_device['scada_data'][:, -1, :, 3:4] if 'scada_data' in batch_device else None,
-                'line_reactive_power': batch_device['edge_attr'][:, :, 6:7] if 'edge_attr' in batch_device else None,
-                'active_power_line_flows': batch_device['edge_attr'][:, :, 5:6] if 'edge_attr' in batch_device else None,
+                'node_reactive_power': batch_device['scada_data'][:,-1,:, 3:4] if 'scada_data' in batch_device else None,
+                'line_reactive_power': batch_device['edge_attr'][:,:,6:7] if 'edge_attr' in batch_device else None,
+                'active_power_line_flows': batch_device['edge_attr'][:,:,5:6] if 'edge_attr' in batch_device else None,
             }
-            
-            # Forward pass with optional AMP
+
             if self.use_amp and self.scaler is not None:
-                # Mixed precision training
                 with torch.amp.autocast('cuda'):
-                    outputs = self.model(batch_device)
+                    outputs = self.model(batch_device, return_sequence=True)
                     
-                    # Validate model outputs on first batch
                     if not self._model_validated:
                         self._validate_model_outputs(outputs, batch_device)
                         self._model_validated = True
@@ -380,33 +382,23 @@ class Trainer:
                     edge_mask = batch_device.get('edge_mask')
                     if edge_mask is not None and edge_mask.dim() == 3:
                         edge_mask = edge_mask[:, -1, :]
-                    
+
                     loss, loss_components = self.criterion(
-                        outputs,
+                        outputs, 
                         targets,
                         graph_properties,
                         edge_mask=edge_mask
                     )
                 
-                # Backward pass with gradient scaling
                 self.scaler.scale(loss).backward()
-                
-                # Gradient clipping (unscale first)
                 self.scaler.unscale_(self.optimizer)
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    self.max_grad_norm
-                )
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
                 grad_norms.append(grad_norm.item())
-                
-                # Optimizer step with scaler
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
-                # Standard training
-                outputs = self.model(batch_device)
+                outputs = self.model(batch_device, return_sequence=True)
                 
-                # Validate model outputs on first batch
                 if not self._model_validated:
                     self._validate_model_outputs(outputs, batch_device)
                     self._model_validated = True
@@ -415,47 +407,37 @@ class Trainer:
                 edge_mask = batch_device.get('edge_mask')
                 if edge_mask is not None and edge_mask.dim() == 3:
                     edge_mask = edge_mask[:, -1, :]
-                
+
                 loss, loss_components = self.criterion(
-                    outputs,
+                    outputs, 
                     targets,
                     graph_properties,
                     edge_mask=edge_mask
                 )
                 
-                # Backward pass
                 loss.backward()
-                
-                # Gradient clipping
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    self.max_grad_norm
-                )
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
                 grad_norms.append(grad_norm.item())
-                
-                # Optimizer step
                 self.optimizer.step()
             
-            # Track loss
             total_loss += loss.item()
-            num_batches += 1
             
-            # Track loss components
             for comp_name, comp_value in loss_components.items():
                 loss_component_sums[comp_name] = loss_component_sums.get(comp_name, 0.0) + comp_value
             
-            # Calculate metrics
+            
+            pbar.set_description(f"Training (Loss: {loss.item():.4f}, Grad: {grad_norm:.2f})")
+            
             with torch.no_grad():
                 batch_metrics = self._calculate_metrics(outputs, batch_device)
-            
+                
             for key, value in batch_metrics.items():
                 metric_sums[key] = metric_sums.get(key, 0) + value
-            
             if batch_metrics['valid_timing_nodes'] > 0:
                 total_timing_batches += 1
-            
-            # Update progress bar with running metrics
+
             running_metrics = self._aggregate_epoch_metrics(metric_sums, batch_idx + 1, total_timing_batches)
+            
             pbar.set_postfix({
                 'cF1': f"{running_metrics['cascade_f1']:.3f}",
                 'nF1': f"{running_metrics['node_f1']:.3f}",
@@ -463,36 +445,37 @@ class Trainer:
                 'pL': f"{loss_components.get('prediction', 0):.3f}",
                 'tL': f"{loss_components.get('timing', 0):.3f}",
             })
-        
-        avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
-        epoch_metrics = self._aggregate_epoch_metrics(metric_sums, num_batches, total_timing_batches)
+            
+
+        avg_loss = total_loss / (len(self.train_loader) + 1e-7)
+        epoch_metrics = self._aggregate_epoch_metrics(metric_sums, len(self.train_loader), total_timing_batches)
         epoch_metrics['loss'] = avg_loss
-        
-        # Print gradient norm statistics
+        epoch_metrics['timing_loss'] = loss_component_sums.get('timing', 0.0) / (len(self.train_loader) + 1e-7)
+
         avg_grad_norm = np.mean(grad_norms) if grad_norms else 0.0
-        print(f"\n  Average gradient norm: {avg_grad_norm:.4f}")
         
-        # Print loss components
+        print(f"\n  Average gradient norm: {avg_grad_norm:.4f}")
         if loss_component_sums:
             print(f"  Average loss components:")
             for comp_name, comp_sum in loss_component_sums.items():
-                avg_comp = comp_sum / num_batches
+                avg_comp = comp_sum / (len(self.train_loader) + 1e-7)
                 print(f"    {comp_name}: {avg_comp:.6f}")
         
         return epoch_metrics
     
-    def validate(self) -> float:
+    def validate(self) -> Dict[str, float]:
         """
-        Validate the model.
-        
-        Returns:
-        --------
-        metrics : dict
-            Dictionary containing loss and all metrics for validation
+        Validate and find OPTIMAL thresholds (Cascade F1 & Node F_beta Score).
         """
         self.model.eval()
+        
         total_loss = 0.0
-        num_batches = 0
+        total_timing_loss_sum = 0.0
+        
+        all_node_probs = []
+        all_node_labels = []
+        all_cascade_probs = []
+        all_cascade_labels = []
         
         metric_sums = {}
         total_timing_batches = 0
@@ -500,23 +483,25 @@ class Trainer:
         with torch.no_grad():
             pbar = tqdm(self.val_loader, desc="Validation", mininterval=240.0)
             for batch_idx, batch in enumerate(pbar):
-                # Move batch to device (handle graph_properties specially)
+                # 1. Move to device
                 batch_device = {}
                 for k, v in batch.items():
                     if k == 'graph_properties':
                         batch_device[k] = {
-                            prop_k: prop_v.to(self.device) if isinstance(prop_v, torch.Tensor) else prop_v
-                            for prop_k, prop_v in v.items()
+                            pk: pv.to(self.device) if isinstance(pv, torch.Tensor) else pv
+                            for pk, pv in v.items()
                         }
                     elif isinstance(v, torch.Tensor):
                         batch_device[k] = v.to(self.device)
                     else:
                         batch_device[k] = v
                 
-                if 'node_failure_labels' not in batch_device:
-                    continue
+                if 'node_failure_labels' not in batch_device: continue
+
+                # 2. Forward
+                outputs = self.model(batch_device, return_sequence=True)
                 
-                # Prepare graph_properties and targets for loss function
+                # 3. Loss
                 graph_properties = batch_device.get('graph_properties', {})
                 if 'edge_index' not in graph_properties:
                     graph_properties['edge_index'] = batch_device['edge_index']
@@ -524,49 +509,136 @@ class Trainer:
                 targets = {
                     'failure_label': batch_device['node_failure_labels'],
                     'ground_truth_risk': batch_device.get('ground_truth_risk'),
-                    'cascade_timing': batch_device.get('cascade_timing'),
-                    'voltages': batch_device['scada_data'][:, -1, :, 0:1] if 'scada_data' in batch_device else None,
-                    'node_reactive_power': batch_device['scada_data'][:, -1, :, 3:4] if 'scada_data' in batch_device else None,
-                    'line_reactive_power': batch_device['edge_attr'][:, :, 6:7] if 'edge_attr' in batch_device else None,
-                    'active_power_line_flows': batch_device['edge_attr'][:, :, 5:6] if 'edge_attr' in batch_device else None,
+                    'cascade_timing': batch_device.get('cascade_timing')
                 }
-                
-                # Forward pass
-                outputs = self.model(batch_device)
                 
                 # Extract edge mask
                 edge_mask = batch_device.get('edge_mask')
                 if edge_mask is not None and edge_mask.dim() == 3:
                     edge_mask = edge_mask[:, -1, :]
-                
-                loss, loss_components = self.criterion(
-                    outputs,
-                    targets,
-                    graph_properties,
-                    edge_mask=edge_mask
-                )
-                
-                # Track loss
+
+                loss, loss_components = self.criterion(outputs, targets, graph_properties, edge_mask=edge_mask)
                 total_loss += loss.item()
-                num_batches += 1
+                total_timing_loss_sum += loss_components.get('timing', 0.0)
                 
-                # Calculate metrics
+                # 4. Accumulate
+                node_probs = outputs['failure_probability'].squeeze(-1)
+                node_labels = batch_device['node_failure_labels']
+                
+                all_node_probs.append(node_probs.view(-1).cpu())
+                all_node_labels.append(node_labels.view(-1).cpu())
+                
+                all_cascade_probs.append(node_probs.max(dim=1)[0].cpu())
+                all_cascade_labels.append((node_labels.max(dim=1)[0] > 0.5).float().cpu())
+
+                # 5. Fixed metrics
                 batch_metrics = self._calculate_metrics(outputs, batch_device)
-                
                 for key, value in batch_metrics.items():
                     metric_sums[key] = metric_sums.get(key, 0) + value
-                
                 if batch_metrics['valid_timing_nodes'] > 0:
                     total_timing_batches += 1
                 
-                # Update progress bar
-                pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+                pbar.set_postfix({'loss': f"{loss.item():.4f}"})
         
-        avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
-        epoch_metrics = self._aggregate_epoch_metrics(metric_sums, num_batches, total_timing_batches)
-        epoch_metrics['loss'] = avg_loss
+        avg_loss = total_loss / (len(self.val_loader) + 1e-7)
+        avg_timing_loss = total_timing_loss_sum / (len(self.val_loader) + 1e-7)
         
-        return epoch_metrics
+        # --- DYNAMIC SEARCH ---
+        if not all_node_probs: return {'loss': avg_loss, 'timing_loss': avg_timing_loss}
+
+        global_node_probs = torch.cat(all_node_probs)
+        global_node_labels = torch.cat(all_node_labels)
+        global_cascade_probs = torch.cat(all_cascade_probs)
+        global_cascade_labels = torch.cat(all_cascade_labels)
+        
+        # Helper 1: Best F1 (Standard)
+        def find_best_f1(probs, targets):
+            best_f1, best_thresh = 0.0, 0.5
+            for t in np.arange(0.05, 0.96, 0.05):
+                preds = (probs > t).float()
+                tp = (preds * targets).sum()
+                fp = (preds * (1-targets)).sum()
+                fn = ((1-preds) * targets).sum()
+                f1 = 2*tp / (2*tp + fp + fn + 1e-7)
+                if f1 > best_f1:
+                    best_f1 = f1.item()
+                    best_thresh = t
+            return best_f1, best_thresh
+
+        # Helper 2: Best F-beta Score (Favors Precision)
+        def find_best_fbeta(probs, targets, beta=0.5):
+            best_score, best_thresh = 0.0, 0.5
+            beta_sq = beta**2
+            
+            for t in np.arange(0.05, 0.96, 0.05):
+                preds = (probs > t).float()
+                tp = (preds * targets).sum()
+                fp = (preds * (1-targets)).sum()
+                fn = ((1-preds) * targets).sum()
+                
+                precision = tp / (tp + fp + 1e-7)
+                recall = tp / (tp + fn + 1e-7)
+                
+                # Calculate F-beta Score
+                score = (1 + beta_sq) * (precision * recall) / (beta_sq * precision + recall + 1e-7)
+                
+                if score > best_score:
+                    best_score = score.item()
+                    best_thresh = t
+            return best_score, best_thresh
+
+        # --- 1. Find Thresholds ---
+        best_c_f1, best_c_thresh = find_best_f1(global_cascade_probs, global_cascade_labels)
+        
+        # Use the F-beta finder for Nodes, with beta=0.5 (Precision focus)
+        best_n_score, best_n_thresh = find_best_fbeta(global_node_probs, global_node_labels, beta=0.5)
+        
+        # --- 2. Recalculate Metrics ---
+        
+        # Node Metrics (using F-beta Threshold)
+        final_n_preds = (global_node_probs > best_n_thresh).float()
+        node_tp = (final_n_preds * global_node_labels).sum().item()
+        node_fp = (final_n_preds * (1-global_node_labels)).sum().item()
+        node_tn = ((1-final_n_preds) * (1-global_node_labels)).sum().item()
+        node_fn = ((1-final_n_preds) * global_node_labels).sum().item()
+        
+        node_precision = node_tp / (node_tp + node_fp + 1e-7)
+        node_recall = node_tp / (node_tp + node_fn + 1e-7)
+        node_f1 = 2 * node_precision * node_recall / (node_precision + node_recall + 1e-7)
+        node_acc = (node_tp + node_tn) / (node_tp + node_tn + node_fp + node_fn + 1e-7)
+        
+        # Cascade Metrics (using F1 Threshold)
+        final_c_preds = (global_cascade_probs > best_c_thresh).float()
+        cascade_tp = (final_c_preds * global_cascade_labels).sum().item()
+        cascade_fp = (final_c_preds * (1-global_cascade_labels)).sum().item()
+        cascade_tn = ((1-final_c_preds) * (1-global_cascade_labels)).sum().item()
+        cascade_fn = ((1-final_c_preds) * global_cascade_labels).sum().item()
+        
+        cascade_precision = cascade_tp / (cascade_tp + cascade_fp + 1e-7)
+        cascade_recall = cascade_tp / (cascade_tp + cascade_fn + 1e-7)
+        cascade_acc = (cascade_tp + cascade_tn) / (cascade_tp + cascade_tn + cascade_fp + cascade_fn + 1e-7)
+
+        return {
+            'loss': avg_loss,
+            'timing_loss': avg_timing_loss,
+            'time_mae': metric_sums.get('time_mae', 0) / (total_timing_batches + 1e-7),
+            'risk_mse': metric_sums.get('risk_mse', 0) / (len(self.val_loader) + 1e-7),
+            
+            # Metrics
+            'node_f1': node_f1,
+            'node_precision': node_precision,
+            'node_recall': node_recall,
+            'node_acc': node_acc,
+            
+            'cascade_f1': best_c_f1,
+            'cascade_precision': cascade_precision,
+            'cascade_recall': cascade_recall,
+            'cascade_acc': cascade_acc,
+            
+            # Thresholds
+            'best_node_thresh': best_n_thresh,
+            'best_cascade_thresh': best_c_thresh
+        }
     
     def save_checkpoint(self, filename: str, epoch: int, is_best: bool = False):
         """
@@ -585,8 +657,12 @@ class Trainer:
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
             'history': self.history,
-            'best_val_loss': self.best_val_loss
+            'best_val_loss': self.best_val_loss,
+            'best_val_mae': self.best_val_mae,
+            'cascade_threshold': self.cascade_threshold,
+            'node_threshold': self.node_threshold
         }
         
         filepath = os.path.join(self.output_dir, filename)
@@ -615,46 +691,40 @@ class Trainer:
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        # Load scheduler state if available
+        if 'scheduler_state_dict' in checkpoint:
+            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        
+        # Load training state
         self.history = checkpoint.get('history', self.history)
         self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        self.best_val_mae = checkpoint.get('best_val_mae', float('inf'))
+        
+        # Load thresholds if available
+        self.cascade_threshold = checkpoint.get('cascade_threshold', 0.25)
+        self.node_threshold = checkpoint.get('node_threshold', 0.25)
         
         return checkpoint['epoch']
     
-    def train(self, num_epochs: int, save_every: int = 5) -> Dict:
-        """
-        Train the model for multiple epochs.
+    def train(self, num_epochs: int):
+        """Train the model and save history/plots."""
+        patience_counter = 0
         
-        Parameters:
-        -----------
-        num_epochs : int
-            Number of epochs to train
-        save_every : int
-            Save checkpoint every N epochs
-        
-        Returns:
-        --------
-        history : Dict
-            Training history
-        """
-        print(f"\nStarting training for {num_epochs} epochs...")
-        print(f"Device: {self.device}")
-        print(f"Output directory: {self.output_dir}")
-        print(f"Early stopping patience: {self.patience} epochs")
-        
-        for epoch in range(1, num_epochs + 1):
-            print(f"\nEpoch {epoch}/{num_epochs}")
-            print("-" * 50)
+        for epoch in range(self.start_epoch, num_epochs):
+            print(f"\nEpoch {epoch + 1}/{num_epochs}")
+            print("-" * 80)
             
-            # Train
             train_metrics = self.train_epoch()
-            
-            # Validate
             val_metrics = self.validate()
             
-            # Get current learning rate
-            current_lr = self.optimizer.param_groups[0]['lr']
+            # Note: Scheduler still steps on TOTAL validation loss
+            self.scheduler.step(val_metrics['loss'])
             
-            # Update history - all metrics
+            current_lr = self.optimizer.param_groups[0]['lr']
+            self.history['learning_rate'].append(current_lr)
+            
+            # Append history (all keys)
             self.history['train_loss'].append(train_metrics['loss'])
             self.history['val_loss'].append(val_metrics['loss'])
             self.history['train_cascade_acc'].append(train_metrics['cascade_acc'])
@@ -677,50 +747,192 @@ class Trainer:
             self.history['val_time_mae'].append(val_metrics['time_mae'])
             self.history['train_risk_mse'].append(train_metrics['risk_mse'])
             self.history['val_risk_mse'].append(val_metrics['risk_mse'])
-            self.history['learning_rate'].append(current_lr)
-            
-            # Print epoch summary
-            print(f"\nEpoch {epoch} Summary:")
+
+            print(f"\nEpoch {epoch + 1} Results:")
             print(f"  Train Loss: {train_metrics['loss']:.4f} | Val Loss: {val_metrics['loss']:.4f}")
-            print(f"  Cascade F1: Train={train_metrics['cascade_f1']:.4f}, Val={val_metrics['cascade_f1']:.4f}")
-            print(f"  Node F1:    Train={train_metrics['node_f1']:.4f}, Val={val_metrics['node_f1']:.4f}")
-            print(f"  Time MAE:   Train={train_metrics['time_mae']:.4f}, Val={val_metrics['time_mae']:.4f}")
-            print(f"  Risk MSE:   Train={train_metrics['risk_mse']:.4f}, Val={val_metrics['risk_mse']:.4f}")
             
-            # Check for improvement
-            is_best = val_metrics['loss'] < self.best_val_loss
-            if is_best:
+            # LOG OPTIMAL METRICS
+            print(f"\n  OPTIMAL VALIDATION METRICS (Dynamic Thresholds):")
+            print(f"    Cascade F1: {val_metrics['cascade_f1']:.4f} (Thresh: {val_metrics['best_cascade_thresh']:.2f})")
+            print(f"    Node F1:    {val_metrics['node_f1']:.4f} (Thresh: {val_metrics['best_node_thresh']:.2f})")
+            print(f"    Node Prec:  {val_metrics['node_precision']:.4f} | Node Rec: {val_metrics['node_recall']:.4f}")
+            
+            #current_f1 = (val_metrics['cascade_f1'] + val_metrics['node_f1']) / 2.0
+            # At later stage of fine-tuning node f1
+            current_f1 = val_metrics['node_f1']
+            
+            if current_f1 > self.best_val_f1:
+                self.best_val_f1 = current_f1
+                
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'val_loss': val_metrics['loss'],
+                    'cascade_f1': val_metrics['cascade_f1'],
+                    'node_f1': val_metrics['node_f1'],
+                    'cascade_threshold': float(val_metrics['best_cascade_thresh']),
+                    'node_threshold': float(val_metrics['best_node_thresh']),
+                    'history': self.history
+                }, f"{self.output_dir}/best_f1_model.pth")
+                
+                print(f"  ★ SAVED BEST F1 MODEL (Avg F1: {current_f1:.4f} | cF1: {val_metrics['cascade_f1']:.3f}, nF1: {val_metrics['node_f1']:.3f})")
+            
+            if val_metrics['loss'] < self.best_val_loss:
                 self.best_val_loss = val_metrics['loss']
-                self.epochs_without_improvement = 0
-                print(f"  New best model! (val_loss: {val_metrics['loss']:.4f})")
+                patience_counter = 0
+
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'val_loss': val_metrics['loss'],
+                    'val_timing_loss': val_metrics['timing_loss'], 
+                    
+                    'cascade_threshold': float(val_metrics['best_cascade_thresh']),
+                    'node_threshold': float(val_metrics['best_node_thresh']),
+                    
+                    'history': self.history
+                }, f"{self.output_dir}/best_model.pth")
+                print(f"  ✓ Saved best model (New best Val Loss: {val_metrics['loss']:.4f})")
             else:
-                self.epochs_without_improvement += 1
-                print(f"  No improvement for {self.epochs_without_improvement} epoch(s)")
-            
-            # Save checkpoint
-            if epoch % save_every == 0 or is_best:
-                self.save_checkpoint(
-                    f'checkpoint_epoch_{epoch}.pth',
-                    epoch,
-                    is_best=is_best
-                )
-            
-            # Always save latest
-            self.save_checkpoint('latest_checkpoint.pth', epoch)
-            
-            # Early stopping check
-            if self.epochs_without_improvement >= self.patience:
-                print(f"\n[EARLY STOPPING] No improvement for {self.patience} epochs.")
-                print(f"Stopping training at epoch {epoch}.")
-                break
+                patience_counter += 1
+                if patience_counter >= self.patience:
+                    print(f"\nEarly stopping at epoch {epoch + 1}")
+                    break
+
+            # Save latest checkpoint (always includes the latest optimal thresholds)
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'val_loss': val_metrics['loss'],
+                'val_time_mae': val_metrics['time_mae'],
+                'val_timing_loss': val_metrics['timing_loss'], # Save current timing loss
+                
+                'cascade_threshold': float(val_metrics['best_cascade_thresh']),
+                'node_threshold': float(val_metrics['best_node_thresh']),
+                
+                'history': self.history
+            }, f"{self.output_dir}/latest_checkpoint.pth")
         
-        # Save final history
-        history_path = os.path.join(self.output_dir, 'training_history.json')
-        with open(history_path, 'w') as f:
-            json.dump(self.history, f, indent=2)
+        self.save_history()
+        self.plot_training_curves()
         
-        print(f"\nTraining complete!")
-        print(f"Best validation loss: {self.best_val_loss:.4f}")
-        print(f"Checkpoints saved to: {self.output_dir}")
+        print(f"\n{'='*80}")
+        print(f"Training complete!")
+        print(f"  Best validation Timing Loss: {self.best_val_timing_loss:.4f}")
+        print(f"  Training history saved to: {self.output_dir}/training_history.json")
+        print(f"  Training curves saved to: {self.output_dir}/training_curves.png")
+        print(f"  Best model saved to: {self.output_dir}/best_model.pth")
+        print(f"{'='*80}")
         
         return self.history
+
+    def save_history(self):
+        history_path = f"{self.output_dir}/training_history.json"
+        with open(history_path, 'w') as f:
+            json.dump(self.history, f, indent=2)
+        print(f"\n✓ Training history saved to {history_path}")
+    
+    def plot_training_curves(self):
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("Matplotlib not available. Skipping plot generation.")
+            return
+            
+        fig, axes = plt.subplots(3, 3, figsize=(18, 15))
+        fig.suptitle('Training Progress', fontsize=16, fontweight='bold')
+        
+        if not self.history['train_loss']:
+            print("No history to plot. Skipping plot generation.")
+            plt.close()
+            return
+
+        epochs = range(1, len(self.history['train_loss']) + 1)
+        
+        axes[0, 0].plot(epochs, self.history['train_loss'], 'b-', label='Train', linewidth=2)
+        axes[0, 0].plot(epochs, self.history['val_loss'], 'r-', label='Validation', linewidth=2)
+        axes[0, 0].set_xlabel('Epoch')
+        axes[0, 0].set_ylabel('Loss')
+        axes[0, 0].set_title('Total Training Loss')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, alpha=0.3)
+        
+        axes[0, 1].plot(epochs, self.history['train_cascade_f1'], 'b-', label='Train', linewidth=2)
+        axes[0, 1].plot(epochs, self.history['val_cascade_f1'], 'r-', label='Validation', linewidth=2)
+        axes[0, 1].set_xlabel('Epoch')
+        axes[0, 1].set_ylabel('F1 Score')
+        axes[0, 1].set_title('Cascade Detection F1')
+        axes[0, 1].legend()
+        axes[0, 1].grid(True, alpha=0.3)
+        
+        axes[0, 2].plot(epochs, self.history['train_node_f1'], 'b-', label='Train', linewidth=2)
+        axes[0, 2].plot(epochs, self.history['val_node_f1'], 'r-', label='Validation', linewidth=2)
+        axes[0, 2].set_xlabel('Epoch')
+        axes[0, 2].set_ylabel('F1 Score')
+        axes[0, 2].set_title('Node Failure F1')
+        axes[0, 2].legend()
+        axes[0, 2].grid(True, alpha=0.3)
+        
+        axes[1, 0].plot(epochs, self.history['train_cascade_precision'], 'b--', label='Train Precision', linewidth=2)
+        axes[1, 0].plot(epochs, self.history['val_cascade_precision'], 'r--', label='Val Precision', linewidth=2)
+        axes[1, 0].plot(epochs, self.history['train_cascade_recall'], 'b:', label='Train Recall', linewidth=2)
+        axes[1, 0].plot(epochs, self.history['val_cascade_recall'], 'r:', label='Val Recall', linewidth=2)
+        axes[1, 0].set_xlabel('Epoch')
+        axes[1, 0].set_ylabel('Score')
+        axes[1, 0].set_title('Cascade Precision/Recall')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True, alpha=0.3)
+        
+        axes[1, 1].plot(epochs, self.history['train_node_precision'], 'b--', label='Train Precision', linewidth=2)
+        axes[1, 1].plot(epochs, self.history['val_node_precision'], 'r--', label='Val Precision', linewidth=2)
+        axes[1, 1].plot(epochs, self.history['train_node_recall'], 'b:', label='Train Recall', linewidth=2)
+        axes[1, 1].plot(epochs, self.history['val_node_recall'], 'r:', label='Val Recall', linewidth=2)
+        axes[1, 1].set_xlabel('Epoch')
+        axes[1, 1].set_ylabel('Score')
+        axes[1, 1].set_title('Node Precision/Recall')
+        axes[1, 1].legend()
+        axes[1, 1].grid(True, alpha=0.3)
+        
+        axes[1, 2].plot(epochs, self.history.get('train_time_mae', [0]*len(epochs)), 'b-', label='Train', linewidth=2)
+        axes[1, 2].plot(epochs, self.history.get('val_time_mae', [0]*len(epochs)), 'r-', label='Validation', linewidth=2)
+        axes[1, 2].set_xlabel('Epoch')
+        axes[1, 2].set_ylabel('MAE (minutes)')
+        axes[1, 2].set_title('Cascade Timing MAE')
+        axes[1, 2].legend()
+        axes[1, 2].grid(True, alpha=0.3)
+        
+        axes[2, 0].plot(epochs, self.history.get('train_risk_mse', [0]*len(epochs)), 'b-', label='Train', linewidth=2)
+        axes[2, 0].plot(epochs, self.history.get('val_risk_mse', [0]*len(epochs)), 'r-', label='Validation', linewidth=2)
+        axes[2, 0].set_xlabel('Epoch')
+        axes[2, 0].set_ylabel('MSE')
+        axes[2, 0].set_title('7-D Risk Score MSE')
+        axes[2, 0].legend()
+        axes[2, 0].grid(True, alpha=0.3)
+        
+        axes[2, 1].plot(epochs, self.history['learning_rate'], 'g-', label='Learning Rate', linewidth=2)
+        axes[2, 1].set_xlabel('Epoch')
+        axes[2, 1].set_ylabel('LR')
+        axes[2, 1].set_title('Learning Rate Schedule')
+        axes[2, 1].legend()
+        axes[2, 1].grid(True, alpha=0.3)
+        
+        axes[2, 2].plot(epochs, self.history['train_cascade_acc'], 'b-', label='Train Cascade', linewidth=2)
+        axes[2, 2].plot(epochs, self.history['val_cascade_acc'], 'r-', label='Val Cascade', linewidth=2)
+        axes[2, 2].plot(epochs, self.history['train_node_acc'], 'b--', label='Train Node', linewidth=2, alpha=0.6)
+        axes[2, 2].plot(epochs, self.history['val_node_acc'], 'r--', label='Val Node', linewidth=2, alpha=0.6)
+        axes[2, 2].set_xlabel('Epoch')
+        axes[2, 2].set_ylabel('Accuracy')
+        axes[2, 2].set_title('Accuracy Comparison')
+        axes[2, 2].legend()
+        axes[2, 2].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        plot_path = f"{self.output_dir}/training_curves.png"
+        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"✓ Training curves saved to {plot_path}")

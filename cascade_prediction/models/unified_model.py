@@ -327,7 +327,7 @@ class UnifiedCascadePredictionModel(nn.Module):
             'cascade_timing': failure_timing,
             'voltages': voltages,
             'angles': angles,
-            'line_flows': line_flows,
+            'line_flows': line_flows, #line_reactive_power
             'active_power_line_flows': active_power_line_flows,
             'temperature': temperature,
             'reactive_nodes': reactive_nodes,

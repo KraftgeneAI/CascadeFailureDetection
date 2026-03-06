@@ -70,12 +70,10 @@ def calibrate_loss_weights(
     dummy_criterion = PhysicsInformedLoss(
         lambda_powerflow=1.0,
         lambda_temperature=1.0,
-        lambda_stability=1.0,
         lambda_frequency=1.0,
         lambda_reactive=1.0,
         lambda_risk=1.0,
         lambda_timing=1.0,
-        lambda_flow=1.0,
         lambda_active_flow=1.0,
         lambda_voltage=1.0,
         lambda_capacity=1.0,
@@ -185,7 +183,7 @@ def calibrate_loss_weights(
     physics_loss_keys = [
         'powerflow', 'temperature', 'voltage', 'frequency', 
         'reactive', 'risk', 'timing', 'flow_consistency', 
-        'active_flow', 'stability', 'capacity'
+        'active_flow', 'capacity'
     ]
     
     for key in physics_loss_keys:
@@ -197,12 +195,8 @@ def calibrate_loss_weights(
         else:
             lambda_val = 1.0  # Default if component is too small
         
-        # Store with lambda_ prefix (except for special cases)
-        if key == 'voltage':
-            lambda_key = 'lambda_stability'  # voltage maps to stability in original
-        else:
-            lambda_key = f"lambda_{key}"
-        
+        # Store with lambda_ prefix
+        lambda_key = f"lambda_{key}"
         calibrated_lambdas[lambda_key] = lambda_val
     
     # Print calibration report
@@ -213,10 +207,7 @@ def calibrate_loss_weights(
     
     for key in physics_loss_keys:
         raw = avg_losses.get(key, 0.0)
-        if key == 'voltage':
-            lambda_key = 'lambda_stability'
-        else:
-            lambda_key = f"lambda_{key}"
+        lambda_key = f"lambda_{key}"
         final = calibrated_lambdas.get(lambda_key, 0.0)
         weighted = raw * final
         print(f"  {key:<20} | {raw:<12.4f} | {final:<12.4f} | {weighted:12.4f}")

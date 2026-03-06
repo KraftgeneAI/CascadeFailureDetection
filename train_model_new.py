@@ -266,15 +266,13 @@ def main():
         criterion = PhysicsInformedLoss(
             lambda_powerflow=calibrated_lambdas.get('lambda_powerflow', 0.1),
             lambda_temperature=calibrated_lambdas.get('lambda_temperature', 0.05),
-            lambda_stability=calibrated_lambdas.get('lambda_stability', 0.05),
-            lambda_frequency=calibrated_lambdas.get('lambda_frequency', 0.08),
-            lambda_reactive=calibrated_lambdas.get('lambda_reactive', 0.1),
-            lambda_risk=calibrated_lambdas.get('lambda_risk', 0.1),
-            lambda_timing=calibrated_lambdas.get('lambda_timing', 0.1),
-            lambda_flow=calibrated_lambdas.get('lambda_flow_consistency', 0.05),
-            lambda_active_flow=calibrated_lambdas.get('lambda_active_flow', 0.1),
+            lambda_frequency=calibrated_lambdas.get('lambda_frequency', 0.08) ,
+            lambda_reactive=calibrated_lambdas.get('lambda_reactive', 0.1) ,
+            lambda_risk=calibrated_lambdas.get('lambda_risk', 0.1) ,
+            lambda_timing=calibrated_lambdas.get('lambda_timing', 0.1) ,
+            lambda_active_flow=calibrated_lambdas.get('lambda_active_flow', 0.1) ,
             lambda_voltage=calibrated_lambdas.get('lambda_voltage', 1.0),
-            lambda_capacity=calibrated_lambdas.get('lambda_capacity', 0.05),
+            lambda_capacity=calibrated_lambdas.get('lambda_capacity', 0.05) ,
             pos_weight=1.0,
             focal_alpha=0.15,
             focal_gamma=2.0,
@@ -283,32 +281,28 @@ def main():
             base_mva=args.base_mva,
             base_freq=args.base_freq
         )
-        print(f"  Calibrated loss weights:")
-        print(f"    Powerflow:       {calibrated_lambdas.get('lambda_powerflow', 0.1):.6f}")
-        print(f"    Temperature:     {calibrated_lambdas.get('lambda_temperature', 0.05):.6f}")
-        print(f"    Stability:       {calibrated_lambdas.get('lambda_stability', 0.05):.6f}")
-        print(f"    Frequency:       {calibrated_lambdas.get('lambda_frequency', 0.08):.6f}")
-        print(f"    Reactive:        {calibrated_lambdas.get('lambda_reactive', 0.1):.6f}")
-        print(f"    Risk:            {calibrated_lambdas.get('lambda_risk', 0.1):.6f}")
-        print(f"    Timing:          {calibrated_lambdas.get('lambda_timing', 0.1):.6f}")
-        print(f"    Flow:            {calibrated_lambdas.get('lambda_flow_consistency', 0.05):.6f}")
-        print(f"    Active flow:     {calibrated_lambdas.get('lambda_active_flow', 0.1):.6f}")
-        print(f"    Voltage:         {calibrated_lambdas.get('lambda_voltage', 1.0):.6f}")
-        print(f"    Capacity:        {calibrated_lambdas.get('lambda_capacity', 0.05):.6f}")
+        print(f"  Calibrated loss weights :")
+        print(f"    Powerflow:       {calibrated_lambdas.get('lambda_powerflow', 0.1) :.6f}")
+        print(f"    Temperature:     {calibrated_lambdas.get('lambda_temperature', 0.05) :.6f}")
+        print(f"    Frequency:       {calibrated_lambdas.get('lambda_frequency', 0.08) :.6f}")
+        print(f"    Reactive:        {calibrated_lambdas.get('lambda_reactive', 0.1) :.6f}")
+        print(f"    Risk:            {calibrated_lambdas.get('lambda_risk', 0.1) :.6f}")
+        print(f"    Timing:          {calibrated_lambdas.get('lambda_timing', 0.1) :.6f}")
+        print(f"    Active flow:     {calibrated_lambdas.get('lambda_active_flow', 0.1) :.6f}")
+        print(f"    Voltage:         {calibrated_lambdas.get('lambda_voltage', 1.0) :.6f}")
+        print(f"    Capacity:        {calibrated_lambdas.get('lambda_capacity', 0.05) :.6f}")
     else:
         print("[WARNING] Calibration failed, using default lambda values")
         criterion = PhysicsInformedLoss(
             lambda_powerflow=0.1,
             lambda_temperature=0.05,
-            lambda_stability=0.05,
             lambda_frequency=0.08,
             lambda_reactive=0.1,
             lambda_risk=0.1,
-            lambda_timing=0.1,
-            lambda_flow=0.05,
-            lambda_active_flow=0.1,
-            lambda_voltage=1.0,
-            lambda_capacity=0.05,
+            lambda_timing=0.1 ,
+            lambda_active_flow=0.1 ,
+            lambda_voltage=1.0 ,
+            lambda_capacity=0.05 ,
             pos_weight=1.0,
             focal_alpha=0.15,
             focal_gamma=2.0,
@@ -350,21 +344,31 @@ def main():
     
     # Resume from checkpoint if specified
     if args.resume:
-        checkpoint_path = args.resume
+        checkpoint_path = args.resume 
         if os.path.exists(checkpoint_path):
-            print(f"\nResuming from checkpoint: {checkpoint_path}")
-            start_epoch = trainer.load_checkpoint(checkpoint_path)
-            print(f"  Resumed from epoch {start_epoch}")
+            trainer.load_checkpoint(checkpoint_path)
+            
+            # --- NEW: FORCE LR RESET FOR PHASE 2 ---
+            print(f"\n[PHASE 2 RESET] Manually resetting Learning Rate to {LEARNING_RATE}...")
+            for param_group in trainer.optimizer.param_groups:
+                param_group['lr'] = LEARNING_RATE  # Resets to 0.0001 (or whatever arg you passed)
+            
+            # OPTIONAL: Reset Scheduler to forget "patience" history
+            trainer.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                trainer.optimizer, 'min', patience=5
+            )
+            print("[PHASE 2 RESET] Scheduler reset.")
+            # ---------------------------------------
+
         else:
-            print(f"\n[WARNING] Checkpoint file not found: {checkpoint_path}")
-            print("Starting training from scratch...")
+            print(f"Warning: Checkpoint file not found...")
     
     # Train
     print(f"\n{'='*80}")
     print("STARTING TRAINING")
     print(f"{'='*80}\n")
     
-    history = trainer.train(num_epochs=NUM_EPOCHS, save_every=5)
+    history = trainer.train(num_epochs=NUM_EPOCHS)
     
     print("\n" + "="*80)
     print("TRAINING COMPLETED SUCCESSFULLY!")

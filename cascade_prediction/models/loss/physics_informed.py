@@ -38,13 +38,11 @@ class PhysicsInformedLoss(nn.Module):
     
     def __init__(
         self,
-        lambda_flow: float = 0.05,
+        lambda_powerflow: float = 0.1,
         lambda_risk: float = 0.1,
         lambda_timing: float = 0.1,
         lambda_active_flow: float = 0.1,
-        lambda_powerflow: float = 0.1,
         lambda_temperature: float = 0.05,
-        lambda_stability: float = 0.05,
         lambda_frequency: float = 0.08,
         lambda_reactive: float = 0.1,
         lambda_voltage: float = 1.0,
@@ -62,13 +60,11 @@ class PhysicsInformedLoss(nn.Module):
         Initialize physics-informed loss.
         
         Args:
-            lambda_flow: Weight for flow consistency loss
+            lambda_powerflow: Weight for reactive power flow consistency loss
             lambda_risk: Weight for risk assessment loss
             lambda_timing: Weight for timing prediction loss
             lambda_active_flow: Weight for active power flow loss
-            lambda_powerflow: Weight for power flow physics loss
             lambda_temperature: Weight for temperature prediction loss
-            lambda_stability: Weight for voltage stability loss
             lambda_frequency: Weight for frequency dynamics loss
             lambda_reactive: Weight for reactive power loss
             lambda_voltage: Weight for voltage prediction loss
@@ -85,13 +81,11 @@ class PhysicsInformedLoss(nn.Module):
         
         # Store lambda weights
         self.lambdas = {
-            'flow_consistency': lambda_flow,
+            'powerflow': lambda_powerflow,
             'risk': lambda_risk,
             'timing': lambda_timing,
             'active_flow': lambda_active_flow,
-            'powerflow': lambda_powerflow,
             'temperature': lambda_temperature,
-            'stability': lambda_stability,
             'frequency': lambda_frequency,
             'reactive': lambda_reactive,
             'voltage': lambda_voltage,
@@ -297,6 +291,33 @@ class PhysicsInformedLoss(nn.Module):
         """
         return F.mse_loss(predicted_p, target_p)
     
+    def capacity_loss(
+        self,
+        line_flows: torch.Tensor,
+        thermal_limits: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute thermal capacity constraint violations.
+        
+        Penalizes line flows that exceed thermal limits.
+        
+        Args:
+            line_flows: Predicted line flows [batch_size, num_edges, 1]
+            thermal_limits: Thermal limits [batch_size, num_edges] or [num_edges]
+        
+        Returns:
+            Mean squared violation loss
+        """
+        # Handle different thermal_limits dimensions
+        if thermal_limits.dim() == 1:
+            thermal_limits = thermal_limits.unsqueeze(0).unsqueeze(-1)
+        elif thermal_limits.dim() == 2:
+            thermal_limits = thermal_limits.unsqueeze(-1)
+        
+        # Violations occur when |line_flow| > thermal_limit
+        violations = F.relu(torch.abs(line_flows) - thermal_limits)
+        return torch.mean(violations ** 2)
+    
     def forward(
         self,
         predictions: Dict[str, torch.Tensor],
@@ -347,13 +368,13 @@ class PhysicsInformedLoss(nn.Module):
             total_loss += self.lambdas.get('reactive', 1.0) * L_react
             loss_dict['reactive'] = L_react.item()
         
-        # --- 3. FLOW CONSISTENCY ---
+        # --- 3. REACTIVE POWER FLOW CONSISTENCY ---
         if 'line_flows' in predictions and 'line_reactive_power' in targets:
             L_flow = self.flow_consistency_loss(
                 predictions['line_flows'],
                 targets['line_reactive_power']
             )
-            total_loss += self.lambdas.get('flow_consistency', 0.05) * L_flow
+            total_loss += self.lambdas.get('powerflow', 0.1) * L_flow
             loss_dict['powerflow'] = L_flow.item()
         
         # --- 3b. ACTIVE POWER LINE FLOW SUPERVISION ---
@@ -371,7 +392,7 @@ class PhysicsInformedLoss(nn.Module):
                 predictions['temperature'],
                 get_prop('ground_truth_temperature')
             )
-            total_loss += 0.05 * L_temp
+            total_loss += self.lambdas.get('temperature',0.05) * L_temp
             loss_dict['temperature'] = L_temp.item()
         
         # --- 5. FREQUENCY (Rule 4) ---
@@ -380,7 +401,7 @@ class PhysicsInformedLoss(nn.Module):
                 predictions['frequency'],
                 get_prop('power_injection')
             )
-            total_loss += 0.05 * L_freq
+            total_loss += self.lambdas.get('frequency',0.05) * L_freq
             loss_dict['frequency'] = L_freq.item()
         
         # --- 6. RISK & TIMING ---
@@ -394,4 +415,13 @@ class PhysicsInformedLoss(nn.Module):
             total_loss += self.lambdas.get('timing', 0.1) * L_time
             loss_dict['timing'] = L_time.item()
         
+        # --- 7. THERMAL CAPACITY CONSTRAINTS ---
+        if 'line_flows' in predictions and get_prop('thermal_limits') is not None:
+            L_capacity = self.capacity_loss(
+                predictions['line_flows'],
+                get_prop('thermal_limits')
+            )
+            total_loss += self.lambdas.get('capacity', 0.05) * L_capacity
+            loss_dict['capacity'] = L_capacity.item()
+
         return total_loss, loss_dict
