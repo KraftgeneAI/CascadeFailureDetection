@@ -38,6 +38,7 @@ class PhysicsInformedLoss(nn.Module):
     
     def __init__(
         self,
+        lambda_prediction: float = 1.0,
         lambda_powerflow: float = 0.1,
         lambda_risk: float = 0.1,
         lambda_timing: float = 0.1,
@@ -60,6 +61,7 @@ class PhysicsInformedLoss(nn.Module):
         Initialize physics-informed loss.
         
         Args:
+            lambda_prediction: Weight for failure prediction loss (focal loss)
             lambda_powerflow: Weight for reactive power flow consistency loss
             lambda_risk: Weight for risk assessment loss
             lambda_timing: Weight for timing prediction loss
@@ -81,6 +83,7 @@ class PhysicsInformedLoss(nn.Module):
         
         # Store lambda weights
         self.lambdas = {
+            'prediction': lambda_prediction,
             'powerflow': lambda_powerflow,
             'risk': lambda_risk,
             'timing': lambda_timing,
@@ -351,7 +354,7 @@ class PhysicsInformedLoss(nn.Module):
         
         L_pred = self.focal_loss(logits, targets['failure_label'])
         loss_dict['prediction'] = L_pred.item()
-        total_loss += L_pred
+        total_loss += self.lambdas.get('prediction', 1.0) * L_pred
         
         # --- 1. VOLTAGE SUPERVISION ---
         if 'voltages' in predictions and targets.get('voltages') is not None:

@@ -264,6 +264,7 @@ def main():
     # Create loss function with calibrated weights
     if calibrated_lambdas:
         criterion = PhysicsInformedLoss(
+            lambda_prediction=calibrated_lambdas.get('lambda_prediction', 1.0),
             lambda_powerflow=calibrated_lambdas.get('lambda_powerflow', 0.1),
             lambda_temperature=calibrated_lambdas.get('lambda_temperature', 0.05),
             lambda_frequency=calibrated_lambdas.get('lambda_frequency', 0.08) ,
@@ -282,6 +283,7 @@ def main():
             base_freq=args.base_freq
         )
         print(f"  Calibrated loss weights :")
+        print(f"    Prediction:      {calibrated_lambdas.get('lambda_prediction', 1.0) :.6f}")
         print(f"    Powerflow:       {calibrated_lambdas.get('lambda_powerflow', 0.1) :.6f}")
         print(f"    Temperature:     {calibrated_lambdas.get('lambda_temperature', 0.05) :.6f}")
         print(f"    Frequency:       {calibrated_lambdas.get('lambda_frequency', 0.08) :.6f}")
@@ -294,6 +296,7 @@ def main():
     else:
         print("[WARNING] Calibration failed, using default lambda values")
         criterion = PhysicsInformedLoss(
+            lambda_prediction=1.0,
             lambda_powerflow=0.1,
             lambda_temperature=0.05,
             lambda_frequency=0.08,
@@ -312,6 +315,7 @@ def main():
             base_freq=args.base_freq
         )
         print(f"  Default loss weights:")
+        print(f"    Prediction:      1.0")
         print(f"    Powerflow:       0.1")
         print(f"    Temperature:     0.05")
         print(f"    Stability:       0.05")

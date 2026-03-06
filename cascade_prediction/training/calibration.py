@@ -68,6 +68,7 @@ def calibrate_loss_weights(
     
     # Create dummy criterion with all weights = 1.0 (matching original train_model.py)
     dummy_criterion = PhysicsInformedLoss(
+        lambda_prediction=1.0,
         lambda_powerflow=1.0,
         lambda_temperature=1.0,
         lambda_frequency=1.0,
@@ -179,9 +180,12 @@ def calibrate_loss_weights(
     
     calibrated_lambdas = {}
     
+    # Add prediction lambda (typically 1.0, but can be adjusted)
+    calibrated_lambdas['lambda_prediction'] = 1.0
+    
     # Define which loss components to calibrate (matching original train_model.py)
     physics_loss_keys = [
-        'powerflow', 'temperature', 'voltage', 'frequency', 
+        'prediction','powerflow', 'temperature', 'voltage', 'frequency', 
         'reactive', 'risk', 'timing', 'flow_consistency', 
         'active_flow', 'capacity'
     ]
@@ -205,6 +209,12 @@ def calibrate_loss_weights(
     print(f"  {'Component':<20} | {'Raw Loss':<12} | {'Final Lambda':<12} | {'Weighted Loss'}")
     print(f"  {'-'*20} | {'-'*12} | {'-'*12} | {'-'*20}")
     
+    # Print prediction first
+    pred_raw = avg_losses.get('prediction', 0.0)
+    pred_lambda = calibrated_lambdas.get('lambda_prediction', 1.0)
+    print(f"  {'prediction':<20} | {pred_raw:<12.4f} | {pred_lambda:<12.4f} | {pred_raw * pred_lambda:12.4f}")
+    
+    # Print physics losses
     for key in physics_loss_keys:
         raw = avg_losses.get(key, 0.0)
         lambda_key = f"lambda_{key}"
