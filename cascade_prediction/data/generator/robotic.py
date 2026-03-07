@@ -205,7 +205,8 @@ class RoboticDataGenerator:
                 # Temperature rises before failure
                 thermal_data[node] += 15.0 * precursor_strength
         
-        return thermal_data
+        # Ensure float16 dtype
+        return thermal_data.astype(np.float16)
     
     def generate_sensor_data(
         self,

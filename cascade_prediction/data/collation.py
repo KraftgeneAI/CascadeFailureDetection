@@ -101,7 +101,10 @@ def collate_cascade_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor
             batch_dict[key] = graph_props_batch
         
         else:
-            # Handle other keys
+            # Handle other keys - skip if not present in all items
+            if not all(key in item for item in batch):
+                continue
+                
             items = [item[key] for item in batch]
             
             # Convert to tensors if needed

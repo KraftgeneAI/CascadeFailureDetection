@@ -32,22 +32,23 @@ def create_edge_mask_from_failures(
     Returns:
         Edge mask with shape [num_edges] where 1.0 = active, 0.0 = failed
     """
-    # Create default mask (all edges active)
-    if isinstance(edge_index, torch.Tensor):
-        edge_mask = torch.ones(num_edges, dtype=torch.float32)
+    # Determine if input is tensor
+    is_tensor_input = isinstance(edge_index, torch.Tensor)
+    
+    # Convert everything to numpy for processing
+    if is_tensor_input:
         src, dst = edge_index
-        
-        # Convert to numpy for masking operation
-        if isinstance(src, torch.Tensor):
-            src = src.cpu().numpy()
-            dst = dst.cpu().numpy()
+        src = src.cpu().numpy()
+        dst = dst.cpu().numpy()
     else:
-        edge_mask = np.ones(num_edges, dtype=np.float32)
         src, dst = edge_index
+    
+    # Create default mask (all edges active) as numpy
+    edge_mask = np.ones(num_edges, dtype=np.float32)
     
     # If no failures, return all-active mask
     if len(failed_node_indices) == 0:
-        if isinstance(edge_index, torch.Tensor):
+        if is_tensor_input:
             return torch.from_numpy(edge_mask).float()
         return edge_mask
     
@@ -56,7 +57,7 @@ def create_edge_mask_from_failures(
     edge_mask[edge_failed_mask] = 0.0
     
     # Convert back to tensor if input was tensor
-    if isinstance(edge_index, torch.Tensor):
+    if is_tensor_input:
         return torch.from_numpy(edge_mask).float()
     
     return edge_mask
