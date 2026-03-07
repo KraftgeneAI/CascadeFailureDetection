@@ -2342,21 +2342,37 @@ class PhysicsBasedGridSimulator:
                 'weather_sequence': weather_seq.astype(np.float32),
                 'threat_indicators': threat_ind.astype(np.float32),
                 
+                # SCADA Data Format (14 features per node)
+                # CRITICAL: Keep this order synchronized with dataset.py extraction!
+                # Index 0: voltages (p.u.)
+                # Index 1: angles (radians)
+                # Index 2: generation (MW)
+                # Index 3: node_reactive (MVAr)
+                # Index 4: load_values (MW)
+                # Index 5: equipment_temps (°C) ← Used for ground_truth_temperature
+                # Index 6: current_frequency (Hz) ← NOT temperature!
+                # Index 7: equipment_age (years)
+                # Index 8: equipment_condition (0-1)
+                # Index 9: gen_capacity (MW)
+                # Index 10: base_load (MW)
+                # Index 11: node_types (0=load, 1=gen, 2=sub)
+                # Index 12: time_ratio (0-1)
+                # Index 13: stress_level (0-1)
                 'scada_data': np.column_stack([
-                    voltages,
-                    angles,
-                    generation,
-                    node_reactive,
-                    load_values,
-                    equipment_temps,
-                    np.full(self.num_nodes, current_frequency),
-                    self.equipment_age,
-                    self.equipment_condition,
-                    self.gen_capacity,
-                    self.base_load,
-                    self.node_types,
-                    np.full(self.num_nodes, t / sequence_length),
-                    np.full(self.num_nodes, current_stress),
+                    voltages,                                    # 0
+                    angles,                                      # 1
+                    generation,                                  # 2
+                    node_reactive,                               # 3
+                    load_values,                                 # 4
+                    equipment_temps,                             # 5 ← TEMPERATURE
+                    np.full(self.num_nodes, current_frequency), # 6 ← FREQUENCY
+                    self.equipment_age,                          # 7
+                    self.equipment_condition,                    # 8
+                    self.gen_capacity,                           # 9
+                    self.base_load,                              # 10
+                    self.node_types,                             # 11
+                    np.full(self.num_nodes, t / sequence_length), # 12
+                    np.full(self.num_nodes, current_stress),     # 13
                 ]).astype(np.float32),
                 
                 'pmu_sequence': np.column_stack([

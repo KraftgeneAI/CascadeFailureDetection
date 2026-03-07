@@ -547,9 +547,12 @@ class CascadeDataset(Dataset):
         
         if 'scada_data' in timestep_data:
              scada_data = timestep_data['scada_data']
-             if scada_data.shape[1] > 6:
-                 # Use 13-feature-safe index
-                 graph_props['ground_truth_temperature'] = torch.from_numpy(scada_data[:, 6]).float()
+             # Ground truth temperature (index 5 in scada_data)
+             # CRITICAL: scada_data[:, 5] is equipment_temps, NOT frequency!
+             # scada_data[:, 6] is frequency (around 60 Hz) - DO NOT USE for temperature!
+             if scada_data.shape[1] > 5:
+                 # Extract equipment_temps from index 5 (range: 25-150°C)
+                 graph_props['ground_truth_temperature'] = torch.from_numpy(scada_data[:, 5]).float()
              else:
                  graph_props['ground_truth_temperature'] = torch.zeros(scada_data.shape[0])
         
