@@ -303,15 +303,22 @@ class CascadeDataset(Dataset):
         final_labels = to_tensor(sequence_original[-1].get('node_labels', np.zeros(num_nodes)))
         
         # Timing with shift correction
+        # CRITICAL: cascade_timing values are RELATIVE times (minutes until failure),
+        # NOT absolute timesteps. Do NOT subtract start_idx from them!
         original_cascade_start_time = metadata.get('cascade_start_time', -1)
         if is_cascade and 0 <= original_cascade_start_time < len(sequence_original):
-            correct_timing_tensor = to_tensor(
-                sequence_original[original_cascade_start_time].get('cascade_timing', np.zeros(num_nodes))
-            )
-            
-            # Shift timing by start_idx
-            mask_failure = correct_timing_tensor >= 0
-            correct_timing_tensor[mask_failure] = correct_timing_tensor[mask_failure] - start_idx
+            # Check if cascade_start_time falls within our windowed sequence
+            if start_idx <= original_cascade_start_time < end_idx:
+                # Cascade starts within our window
+                # Get timing from the cascade start timestep
+                correct_timing_tensor = to_tensor(
+                    sequence_original[original_cascade_start_time].get('cascade_timing', np.zeros(num_nodes))
+                )
+                # Timing values are already relative (time until failure from cascade start)
+                # No adjustment needed - they represent "minutes until failure"
+            else:
+                # Cascade starts outside our window - no valid timing info
+                correct_timing_tensor = to_tensor(np.full(num_nodes, -1, dtype=np.float32))
         else:
             correct_timing_tensor = to_tensor(np.full(num_nodes, -1, dtype=np.float32))
         

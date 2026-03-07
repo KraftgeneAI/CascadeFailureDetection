@@ -355,28 +355,28 @@ class CascadeDataset(Dataset):
         final_labels = to_tensor(sequence_original[-1].get('node_labels', np.zeros(label_shape)))
         
         # --- Get the ground truth timing from the *original* cascade start time ---
+        # CRITICAL: cascade_timing values are RELATIVE times (minutes until failure),
+        # NOT absolute timesteps. Do NOT subtract start_idx from them!
         original_cascade_start_time = metadata.get('cascade_start_time', -1)
         
         if is_cascade and 0 <= original_cascade_start_time < len(sequence_original):
-            correct_timing_tensor = to_tensor(sequence_original[original_cascade_start_time].get('cascade_timing', np.zeros(timing_shape)))
-            
-            # ====================================================================
-            # START: TIMING SHIFT FIX (Crucial for Sliding Window)
-            # ====================================================================
-            # 1. Filter for nodes that actually fail (target >= 0)
-            mask_failure = correct_timing_tensor >= 0
-            
-            # 2. Shift the timing by start_idx 
-            # If failure is at t=50 and we start at t=10, the model sees failure at t=40.
-            correct_timing_tensor[mask_failure] = correct_timing_tensor[mask_failure] - start_idx
-            
-            # 3. Normalize (Optional: if using 0-1 targets, ensure max_time_horizon is set)
-            if hasattr(self, 'max_time_horizon') and self.max_time_horizon > 0:
-                 correct_timing_tensor[mask_failure] = correct_timing_tensor[mask_failure] / self.max_time_horizon
-            # ====================================================================
-            # END: TIMING SHIFT FIX
-            # ====================================================================
-            
+            # Check if cascade_start_time falls within our windowed sequence
+            if start_idx <= original_cascade_start_time < end_idx:
+                # Cascade starts within our window
+                # Get timing from the cascade start timestep
+                correct_timing_tensor = to_tensor(
+                    sequence_original[original_cascade_start_time].get('cascade_timing', np.zeros(timing_shape))
+                )
+                # Timing values are already relative (time until failure from cascade start)
+                # No adjustment needed - they represent "minutes until failure"
+                
+                # Optional: Normalize to 0-1 range if max_time_horizon is set
+                if hasattr(self, 'max_time_horizon') and self.max_time_horizon > 0:
+                    mask_failure = correct_timing_tensor >= 0
+                    correct_timing_tensor[mask_failure] = correct_timing_tensor[mask_failure] / self.max_time_horizon
+            else:
+                # Cascade starts outside our window - no valid timing info
+                correct_timing_tensor = to_tensor(np.full(timing_shape, -1, dtype=np.float32))
         else:
             correct_timing_tensor = to_tensor(np.full(timing_shape, -1, dtype=np.float32))
         
