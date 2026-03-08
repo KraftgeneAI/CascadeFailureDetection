@@ -479,7 +479,7 @@ class Trainer:
     
     def validate(self) -> Dict[str, float]:
         """
-        Validate using fixed thresholds (self.cascade_threshold and self.node_threshold).
+        Validate using dynamic threshold optimization (find_best_f1 and find_best_fbeta).
         """
         self.model.eval()
         
@@ -489,9 +489,11 @@ class Trainer:
         metric_sums = {}
         total_timing_batches = 0
         
-        # Accumulators for computing metrics with fixed thresholds
-        cascade_tp = cascade_fp = cascade_tn = cascade_fn = 0
-        node_tp = node_fp = node_tn = node_fn = 0
+        # Collect all probabilities and labels for threshold optimization
+        all_node_probs = []
+        all_node_labels = []
+        all_cascade_probs = []
+        all_cascade_labels = []
         
         with torch.no_grad():
             pbar = tqdm(self.val_loader, desc="Validation", mininterval=240.0)
@@ -532,26 +534,20 @@ class Trainer:
                 total_loss += loss.item()
                 total_timing_loss_sum += loss_components.get('timing', 0.0)
                 
-                # 4. Calculate metrics using FIXED thresholds
+                # 4. Collect probabilities and labels for threshold optimization
                 node_probs = outputs['failure_probability'].squeeze(-1)  # [B, N]
                 node_labels = batch_device['node_failure_labels']  # [B, N]
                 
-                # Node predictions using self.node_threshold
-                node_pred = (node_probs > self.node_threshold).float()
-                node_tp += ((node_pred == 1) & (node_labels == 1)).sum().item()
-                node_fp += ((node_pred == 1) & (node_labels == 0)).sum().item()
-                node_tn += ((node_pred == 0) & (node_labels == 0)).sum().item()
-                node_fn += ((node_pred == 0) & (node_labels == 1)).sum().item()
+                # Flatten and collect
+                all_node_probs.append(node_probs.flatten())
+                all_node_labels.append(node_labels.flatten())
                 
-                # Cascade predictions using self.cascade_threshold
+                # Cascade level
                 cascade_prob = node_probs.max(dim=1)[0]  # [B]
-                cascade_pred = (cascade_prob > self.cascade_threshold).float()
                 cascade_labels = (node_labels.max(dim=1)[0] > 0.5).float()
                 
-                cascade_tp += ((cascade_pred == 1) & (cascade_labels == 1)).sum().item()
-                cascade_fp += ((cascade_pred == 1) & (cascade_labels == 0)).sum().item()
-                cascade_tn += ((cascade_pred == 0) & (cascade_labels == 0)).sum().item()
-                cascade_fn += ((cascade_pred == 0) & (cascade_labels == 1)).sum().item()
+                all_cascade_probs.append(cascade_prob)
+                all_cascade_labels.append(cascade_labels)
                 
                 # 5. Other metrics (risk, timing)
                 batch_metrics = self._calculate_metrics(outputs, batch_device)
@@ -565,21 +561,82 @@ class Trainer:
                 
                 pbar.set_postfix({'loss': f"{loss.item():.4f}"})
         
-        avg_loss = total_loss / (len(self.val_loader) + 1e-7)
-        avg_timing_loss = total_timing_loss_sum / (len(self.val_loader) + 1e-7)
+        # Concatenate all probabilities and labels
+        global_node_probs = torch.cat(all_node_probs)
+        global_node_labels = torch.cat(all_node_labels)
+        global_cascade_probs = torch.cat(all_cascade_probs)
+        global_cascade_labels = torch.cat(all_cascade_labels)
         
-        # Calculate final metrics using accumulated confusion matrix values
-        # Node metrics
+        # Helper 1: Best F1 (Standard)
+        def find_best_f1(probs, targets):
+            best_f1, best_thresh = 0.0, 0.5
+            for t in np.arange(0.05, 0.96, 0.05):
+                preds = (probs > t).float()
+                tp = (preds * targets).sum()
+                fp = (preds * (1-targets)).sum()
+                fn = ((1-preds) * targets).sum()
+                f1 = 2*tp / (2*tp + fp + fn + 1e-7)
+                if f1 > best_f1:
+                    best_f1 = f1.item()
+                    best_thresh = t
+            return best_f1, best_thresh
+
+        # Helper 2: Best F-beta Score (Favors Precision)
+        def find_best_fbeta(probs, targets, beta=0.5):
+            best_score, best_thresh = 0.0, 0.5
+            beta_sq = beta**2
+            
+            for t in np.arange(0.05, 0.96, 0.05):
+                preds = (probs > t).float()
+                tp = (preds * targets).sum()
+                fp = (preds * (1-targets)).sum()
+                fn = ((1-preds) * targets).sum()
+                
+                precision = tp / (tp + fp + 1e-7)
+                recall = tp / (tp + fn + 1e-7)
+                
+                # Calculate F-beta Score
+                score = (1 + beta_sq) * (precision * recall) / (beta_sq * precision + recall + 1e-7)
+                
+                if score > best_score:
+                    best_score = score.item()
+                    best_thresh = t
+            return best_score, best_thresh
+
+        # --- 1. Find Thresholds ---
+        best_c_f1, best_c_thresh = find_best_f1(global_cascade_probs, global_cascade_labels)
+        
+        # Use the F-beta finder for Nodes, with beta=0.5 (Precision focus)
+        best_n_score, best_n_thresh = find_best_fbeta(global_node_probs, global_node_labels, beta=0.5)
+        
+        # --- 2. Recalculate Metrics ---
+        
+        # Node Metrics (using F-beta Threshold)
+        final_n_preds = (global_node_probs > best_n_thresh).float()
+        node_tp = (final_n_preds * global_node_labels).sum().item()
+        node_fp = (final_n_preds * (1-global_node_labels)).sum().item()
+        node_tn = ((1-final_n_preds) * (1-global_node_labels)).sum().item()
+        node_fn = ((1-final_n_preds) * global_node_labels).sum().item()
+        
         node_precision = node_tp / (node_tp + node_fp + 1e-7)
         node_recall = node_tp / (node_tp + node_fn + 1e-7)
         node_f1 = 2 * node_precision * node_recall / (node_precision + node_recall + 1e-7)
         node_acc = (node_tp + node_tn) / (node_tp + node_tn + node_fp + node_fn + 1e-7)
         
-        # Cascade metrics
+        # Cascade Metrics (using F1 Threshold)
+        final_c_preds = (global_cascade_probs > best_c_thresh).float()
+        cascade_tp = (final_c_preds * global_cascade_labels).sum().item()
+        cascade_fp = (final_c_preds * (1-global_cascade_labels)).sum().item()
+        cascade_tn = ((1-final_c_preds) * (1-global_cascade_labels)).sum().item()
+        cascade_fn = ((1-final_c_preds) * global_cascade_labels).sum().item()
+        
         cascade_precision = cascade_tp / (cascade_tp + cascade_fp + 1e-7)
         cascade_recall = cascade_tp / (cascade_tp + cascade_fn + 1e-7)
         cascade_f1 = 2 * cascade_precision * cascade_recall / (cascade_precision + cascade_recall + 1e-7)
         cascade_acc = (cascade_tp + cascade_tn) / (cascade_tp + cascade_tn + cascade_fp + cascade_fn + 1e-7)
+        
+        avg_loss = total_loss / (len(self.val_loader) + 1e-7)
+        avg_timing_loss = total_timing_loss_sum / (len(self.val_loader) + 1e-7)
 
         return {
             'loss': avg_loss,
@@ -598,9 +655,9 @@ class Trainer:
             'cascade_recall': cascade_recall,
             'cascade_acc': cascade_acc,
             
-            # Return current thresholds (not optimized)
-            'best_node_thresh': self.node_threshold,
-            'best_cascade_thresh': self.cascade_threshold
+            # Thresholds
+            'best_cascade_threshold': best_c_thresh,
+            'best_node_threshold': best_n_thresh,
         }
     
     def save_checkpoint(self, filename: str, epoch: int, is_best: bool = False):
@@ -714,11 +771,15 @@ class Trainer:
             print(f"\nEpoch {epoch + 1} Results:")
             print(f"  Train Loss: {train_metrics['loss']:.4f} | Val Loss: {val_metrics['loss']:.4f}")
             
-            # LOG VALIDATION METRICS (using fixed thresholds)
-            print(f"\n  VALIDATION METRICS (Fixed Thresholds):")
-            print(f"    Cascade F1: {val_metrics['cascade_f1']:.4f} (Thresh: {self.cascade_threshold:.2f})")
-            print(f"    Node F1:    {val_metrics['node_f1']:.4f} (Thresh: {self.node_threshold:.2f})")
+            # LOG VALIDATION METRICS (using dynamic thresholds)
+            print(f"\n  VALIDATION METRICS (Dynamic Thresholds):")
+            print(f"    Cascade F1: {val_metrics['cascade_f1']:.4f} (Thresh: {val_metrics['best_cascade_threshold']:.2f})")
+            print(f"    Node F1:    {val_metrics['node_f1']:.4f} (Thresh: {val_metrics['best_node_threshold']:.2f})")
             print(f"    Node Prec:  {val_metrics['node_precision']:.4f} | Node Rec: {val_metrics['node_recall']:.4f}")
+            
+            # Update thresholds with dynamically found values
+            self.cascade_threshold = val_metrics['best_cascade_threshold']
+            self.node_threshold = val_metrics['best_node_threshold']
             
             #current_f1 = (val_metrics['cascade_f1'] + val_metrics['node_f1']) / 2.0
             # At later stage of fine-tuning node f1

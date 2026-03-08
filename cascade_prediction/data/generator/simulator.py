@@ -283,7 +283,7 @@ class PhysicsBasedGridSimulator:
 
         equipment_temps = self.thermal_sim.update_temperatures(heat_generation, 1.0)
         
-        # Calculate node loading
+        # Calculate node loading ratio
         node_loading = load_values / (self.base_load + 1e-6)
         
         # Calculate frequency
