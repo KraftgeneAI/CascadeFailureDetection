@@ -38,7 +38,7 @@ class PhysicsInformedLoss(nn.Module):
     
     def __init__(
         self,
-        lambda_prediction: float = 1.0,
+        lambda_prediction: float = 10.0,
         lambda_powerflow: float = 0.1,
         lambda_risk: float = 0.1,
         lambda_timing: float = 0.1,
@@ -49,7 +49,7 @@ class PhysicsInformedLoss(nn.Module):
         lambda_voltage: float = 1.0,
         lambda_capacity: float = 0.05,
         pos_weight: float = 1.0,
-        focal_alpha: float = 0.25,
+        focal_alpha: float = 0.85,
         focal_gamma: float = 2.0,
         label_smoothing: float = 0.0,
         use_logits: bool = False,
@@ -222,7 +222,7 @@ class PhysicsInformedLoss(nn.Module):
         
         for b in range(pred_s.shape[0]):
             t = target[b]
-            pos_idx = torch.where(t > -1e5)[0]
+            pos_idx = torch.where(t >=0)[0]
             
             if len(pos_idx) < 2:
                 continue

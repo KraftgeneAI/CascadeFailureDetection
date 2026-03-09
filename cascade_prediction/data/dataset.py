@@ -253,8 +253,17 @@ class CascadeDataset(Dataset):
                 scada_data_raw[:, 3] = normalize_power(scada_data_raw[:, 3], self.base_mva)
                 scada_data_raw[:, 4] = normalize_power(scada_data_raw[:, 4], self.base_mva)
             
-            # Slice off "cheat" features
-            scada_data = scada_data_raw[:, :12] if scada_data_raw.shape[1] > 12 else scada_data_raw
+            # Keep all 14 features, but make the time relative to the window
+            scada_data = scada_data_raw.copy()
+            if scada_data.shape[1] > 12:
+                # Feature 12 is time_ratio. Change it to delta_t (progress within this specific window)
+                # i is the current step in the truncated sequence, len(sequence) is total steps
+                scada_data = scada_data_raw[:, :13]
+                scada_data[:, 12] = i / max(1, len(sequence)) 
+                
+                # Feature 13 is global stress. We leave it so the model understands baseline intensity,
+                # but because we truncated early, it can't be used as a guaranteed failure trigger.
+                
             data_arrays['scada_data'].append(to_tensor(scada_data))
             
             # PMU data with normalization

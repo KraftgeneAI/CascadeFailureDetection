@@ -275,7 +275,7 @@ def main():
             lambda_voltage=calibrated_lambdas.get('lambda_voltage', 1.0),
             lambda_capacity=calibrated_lambdas.get('lambda_capacity', 0.05) ,
             pos_weight=1.0,
-            focal_alpha=0.15,
+            focal_alpha=0.25,
             focal_gamma=2.0,
             label_smoothing=0.0,
             use_logits=False,
