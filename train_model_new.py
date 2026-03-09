@@ -380,7 +380,7 @@ def main():
     print(f"\nBest validation loss: {trainer.best_val_loss:.4f}")
     print(f"Checkpoints saved to: {OUTPUT_DIR}")
     print(f"\nYou can now run inference using:")
-    print(f"  python inference_new.py --model {OUTPUT_DIR}/best_model.pth")
+    print(f"  python inference.py --model {OUTPUT_DIR}/best_model.pth")
 
 
 if __name__ == "__main__":
