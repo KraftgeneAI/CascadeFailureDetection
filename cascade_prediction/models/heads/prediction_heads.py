@@ -328,7 +328,7 @@ class TimingHead(nn.Module):
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, 1),
-            nn.Softplus()  # Ensures time is always positive
+            # nn.Softplus()  # Ensures time is always positive
         )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
