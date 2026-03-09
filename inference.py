@@ -1,12 +1,14 @@
 """
 Cascade Failure Prediction Inference Script
 ============================================================
-ALIGNED TO TRAINING: Sliding Window / Full Sequence Analysis
-- Replicates Validation Methodology (Teacher Forcing).
-- FIXED: Dimension handling for (Batch, Nodes, 1) output.
-- FIXED: Sequence generation based on Risk Score (Ranking Loss logic).
-- FIXED: 'base_freq' argument name in CascadePredictor instantiation.
-- IMPROVED: Human-readable Risk Assessment output.
+UPDATED: Using refactored cascade_prediction module classes
+- Uses cascade_prediction.models.unified_model.UnifiedCascadePredictionModel
+- Uses cascade_prediction.data.collation.collate_cascade_batch
+- Uses cascade_prediction.data.preprocessing for normalization
+- Replicates Validation Methodology (Teacher Forcing)
+- FIXED: Dimension handling for (Batch, Nodes, 1) output
+- FIXED: Sequence generation based on Risk Score (Ranking Loss logic)
+- IMPROVED: Human-readable Risk Assessment output
 ============================================================
 
 Author: Kraftgene AI Inc.
@@ -25,12 +27,19 @@ import time
 import sys
 from tqdm import tqdm
 
-# Ensure the model class is importable
+# Import refactored classes
 try:
-    from multimodal_cascade_model import UnifiedCascadePredictionModel
-    from cascade_dataset import collate_cascade_batch
-except ImportError:
-    print("Error: Could not import UnifiedCascadePredictionModel or collate_cascade_batch.")
+    from cascade_prediction.models.unified_model import UnifiedCascadePredictionModel
+    from cascade_prediction.data.collation import collate_cascade_batch
+    from cascade_prediction.data.preprocessing import (
+        normalize_power,
+        normalize_frequency,
+        create_edge_mask_from_failures,
+        to_tensor
+    )
+except ImportError as e:
+    print(f"Error: Could not import from cascade_prediction module: {e}")
+    print("Make sure the cascade_prediction package is in your Python path.")
     sys.exit(1)
 
 
@@ -50,6 +59,9 @@ class NumpyEncoder(json.JSONEncoder):
 # INFERENCE DATASET
 # ============================================================================
 class ScenarioInferenceDataset(Dataset):
+    """
+    Inference dataset using refactored preprocessing functions.
+    """
     def __init__(self, scenario: Dict, window_size: int, base_mva: float = 100.0, base_frequency: float = 60.0):
         self.window_size = window_size
         self.base_mva = base_mva
@@ -59,72 +71,103 @@ class ScenarioInferenceDataset(Dataset):
         if not isinstance(self.edge_index, torch.Tensor):
             self.edge_index = torch.from_numpy(self.edge_index).long()
         self.total_steps = len(self.sequence_original)
+        self.num_edges = self.edge_index.shape[1]
         self.preprocessed_sequence = self._preprocess_full_sequence()
-        
-    def _normalize_power(self, tensor: torch.Tensor) -> torch.Tensor:
-        return tensor / self.base_mva
-    def _normalize_frequency(self, tensor: torch.Tensor) -> torch.Tensor:
-        return tensor / self.base_frequency
 
     def _preprocess_full_sequence(self):
-        if self.total_steps == 0: return {}
-        data_dicts = {'scada_data': [], 'pmu_sequence': [], 'satellite_data': [], 'weather_sequence': [], 
-                      'threat_indicators': [], 'equipment_status': [], 'visual_data': [], 'thermal_data': [], 'sensor_data': [], 'edge_mask': []}
+        """Preprocess full sequence using refactored preprocessing functions."""
+        if self.total_steps == 0: 
+            return {}
         
-        num_edges = self.edge_index.shape[1]
+        data_dicts = {
+            'scada_data': [], 'pmu_sequence': [], 'satellite_data': [], 
+            'weather_sequence': [], 'threat_indicators': [], 'equipment_status': [], 
+            'visual_data': [], 'thermal_data': [], 'sensor_data': [], 'edge_mask': []
+        }
         
         for i, ts in enumerate(self.sequence_original):
-            s = torch.tensor(ts.get('scada_data'), dtype=torch.float32)
-            if s.shape[1] >= 13: s = s[:, :13]
+            # SCADA data with normalization using refactored function
+            scada_raw = ts.get('scada_data', np.zeros((118, 14)))
+            s = to_tensor(scada_raw)
+            
+            # Slice to 13 features (remove data leakage columns)
+            if s.shape[1] >= 13: 
+                s = s[:, :13]
+            
+            # Normalize power values (indices 2, 3, 4)
             if s.shape[1] >= 6:
-                s[:, 2] = self._normalize_power(s[:, 2])
-                s[:, 3] = self._normalize_power(s[:, 3])
-                s[:, 4] = self._normalize_power(s[:, 4])
-                s[:, 5] = self._normalize_power(s[:, 5])
+                s[:, 2] = normalize_power(s[:, 2], self.base_mva)
+                s[:, 3] = normalize_power(s[:, 3], self.base_mva)
+                s[:, 4] = normalize_power(s[:, 4], self.base_mva)
             data_dicts['scada_data'].append(s)
             
-            p = torch.tensor(ts.get('pmu_sequence'), dtype=torch.float32)
-            if p.shape[1] >= 6: p[:, 5] = self._normalize_frequency(p[:, 5])
+            # PMU data with frequency normalization
+            pmu_raw = ts.get('pmu_sequence', np.zeros((118, 8)))
+            p = to_tensor(pmu_raw)
+            if p.shape[1] >= 6: 
+                p[:, 5] = normalize_frequency(p[:, 5], self.base_frequency)
             data_dicts['pmu_sequence'].append(p)
             
-            data_dicts['satellite_data'].append(torch.tensor(ts.get('satellite_data'), dtype=torch.float32))
-            data_dicts['weather_sequence'].append(torch.tensor(ts.get('weather_sequence'), dtype=torch.float32).reshape(s.shape[0], -1))
-            data_dicts['threat_indicators'].append(torch.tensor(ts.get('threat_indicators'), dtype=torch.float32))
-            data_dicts['equipment_status'].append(torch.tensor(ts.get('equipment_status'), dtype=torch.float32))
-            data_dicts['visual_data'].append(torch.tensor(ts.get('visual_data'), dtype=torch.float32))
-            data_dicts['thermal_data'].append(torch.tensor(ts.get('thermal_data'), dtype=torch.float32))
-            data_dicts['sensor_data'].append(torch.tensor(ts.get('sensor_data'), dtype=torch.float32))
+            # Other modalities
+            data_dicts['satellite_data'].append(to_tensor(ts.get('satellite_data', np.zeros((118, 12, 16, 16)))))
             
-            # Mask Logic (Teacher Forcing)
-            mask = torch.ones(num_edges, dtype=torch.float32)
+            weather_raw = ts.get('weather_sequence', np.zeros((118, 10, 8)))
+            weather_tensor = to_tensor(weather_raw)
+            data_dicts['weather_sequence'].append(weather_tensor.reshape(s.shape[0], -1))
+            
+            data_dicts['threat_indicators'].append(to_tensor(ts.get('threat_indicators', np.zeros((118, 6)))))
+            data_dicts['equipment_status'].append(to_tensor(ts.get('equipment_status', np.zeros((118, 10)))))
+            data_dicts['visual_data'].append(to_tensor(ts.get('visual_data', np.zeros((118, 3, 32, 32)))))
+            data_dicts['thermal_data'].append(to_tensor(ts.get('thermal_data', np.zeros((118, 1, 32, 32)))))
+            data_dicts['sensor_data'].append(to_tensor(ts.get('sensor_data', np.zeros((118, 12)))))
+            
+            # Edge mask using refactored function (Teacher Forcing)
+            prev_failed_node_indices = []
             if i > 0:
                 prev = self.sequence_original[i-1]
                 labels = prev.get('node_labels')
                 if labels is not None:
-                    failed = np.where(labels > 0.5)[0]
-                    if len(failed) > 0:
-                        src, dst = self.edge_index.numpy()
-                        edge_failed = np.isin(src, failed) | np.isin(dst, failed)
-                        mask[edge_failed] = 0.0
-            data_dicts['edge_mask'].append(mask)
+                    prev_failed_node_indices = np.where(labels > 0.5)[0]
+            
+            mask = create_edge_mask_from_failures(
+                self.edge_index,
+                prev_failed_node_indices,
+                self.num_edges
+            )
+            data_dicts['edge_mask'].append(to_tensor(mask))
 
-        for k, v in data_dicts.items(): data_dicts[k] = torch.stack(v)
+        # Stack all timesteps
+        for k, v in data_dicts.items(): 
+            data_dicts[k] = torch.stack(v)
+        
         return data_dicts
 
-    def __len__(self): return self.total_steps
+    def __len__(self): 
+        return self.total_steps
+    
     def __getitem__(self, idx):
+        """Get a windowed sequence ending at idx."""
         end_idx = idx + 1
         start_idx = max(0, end_idx - self.window_size)
+        
+        # Extract window from preprocessed sequence
         item = {k: v[start_idx:end_idx] for k, v in self.preprocessed_sequence.items()}
         
+        # Edge attributes with normalization
         last_step = self.sequence_original[idx]
-        edge_attr = torch.tensor(last_step.get('edge_attr'), dtype=torch.float32)
-        if edge_attr.shape[1] >= 2: edge_attr[:, 1] = self._normalize_power(edge_attr[:, 1])
+        edge_attr_raw = last_step.get('edge_attr', np.zeros((self.num_edges, 7)))
+        edge_attr = to_tensor(edge_attr_raw)
+        
+        # Normalize thermal limits (index 1)
+        if edge_attr.shape[1] >= 2: 
+            edge_attr[:, 1] = normalize_power(edge_attr[:, 1], self.base_mva)
+        
         item['edge_attr'] = edge_attr
         item['edge_index'] = self.edge_index
         item['sequence_length'] = end_idx - start_idx
         item['temporal_sequence'] = item['scada_data']
         item['graph_properties'] = {}
+        
         return item
 
 # ============================================================================
@@ -138,7 +181,8 @@ class CascadePredictor:
             self.edge_index = topology['edge_index']
         
         print(f"Loading model from {model_path}...")
-        checkpoint = torch.load(model_path, map_location=device)
+        # Set weights_only=False since we trust our own checkpoint
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
         self.model = UnifiedCascadePredictionModel(
             embedding_dim=128, hidden_dim=128, num_gnn_layers=3, heads=4, dropout=0.1
         )

@@ -68,7 +68,7 @@ def calibrate_loss_weights(
     
     # Create dummy criterion with all weights = 1.0 (matching original train_model.py)
     dummy_criterion = PhysicsInformedLoss(
-        lambda_prediction=20.0,
+        lambda_prediction=50.0,
         lambda_powerflow=1.0,
         lambda_temperature=1.0,
         lambda_frequency=1.0,
@@ -181,7 +181,7 @@ def calibrate_loss_weights(
     calibrated_lambdas = {}
     
     # Add prediction lambda (typically 1.0, but can be adjusted)
-    calibrated_lambdas['lambda_prediction'] = 20.0
+    calibrated_lambdas['lambda_prediction'] = 50.0
     
     # Define which loss components to calibrate (matching original train_model.py)
     physics_loss_keys = [
