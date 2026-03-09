@@ -20,6 +20,8 @@
 !cascade_prediction/
 !cascade_prediction/**
 !test/
+!archive/
+
 # And exclude the .gitignore file itself
 !.gitignore
 
