@@ -149,12 +149,34 @@ class Trainer:
         Returns:
             Dictionary of target tensors for loss calculation
         """
+        # Extract features from the last valid timestep of each sequence
+        # scada_data shape: [B, T, N, F]
+        # sequence_length shape: [B]
+        
+        if 'scada_data' in batch_device and 'sequence_length' in batch_device:
+            B = batch_device['scada_data'].shape[0]
+            N = batch_device['scada_data'].shape[2]
+            
+            # Get the indices of the last valid timesteps (0-based indexing)
+            last_step_indices = batch_device['sequence_length'] - 1  # [B]
+            
+            # Create batch indices for advanced indexing
+            batch_indices = torch.arange(B, device=last_step_indices.device)  # [B]
+            
+            # Extract voltages and reactive power from last valid timestep
+            # Use advanced indexing: [batch_indices, last_step_indices, :, feature_idx]
+            voltages = batch_device['scada_data'][batch_indices, last_step_indices, :, 0:1]  # [B, N, 1]
+            node_reactive_power = batch_device['scada_data'][batch_indices, last_step_indices, :, 3:4]  # [B, N, 1]
+        else:
+            voltages = None
+            node_reactive_power = None
+        
         targets = {
             'failure_label': batch_device['node_failure_labels'],
             'ground_truth_risk': batch_device.get('ground_truth_risk'),
             'cascade_timing': batch_device.get('cascade_timing'),
-            'voltages': batch_device['scada_data'][:, -1, :, 0:1] if 'scada_data' in batch_device else None,
-            'node_reactive_power': batch_device['scada_data'][:, -1, :, 3:4] if 'scada_data' in batch_device else None,
+            'voltages': voltages,
+            'node_reactive_power': node_reactive_power,
             'line_reactive_power': batch_device['edge_attr'][:, :, 6:7] if 'edge_attr' in batch_device else None,
             'active_power_line_flows': batch_device['edge_attr'][:, :, 5:6] if 'edge_attr' in batch_device else None,
         }
