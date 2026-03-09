@@ -185,8 +185,8 @@ def calibrate_loss_weights(
     
     # Define which loss components to calibrate (matching original train_model.py)
     physics_loss_keys = [
-        'prediction','powerflow', 'temperature', 'voltage', 'frequency', 
-        'reactive', 'risk', 'timing', 'flow_consistency', 
+        'powerflow', 'temperature', 'voltage', 'frequency', 
+        'reactive', 'risk', 'timing',  
         'active_flow', 'capacity'
     ]
     
