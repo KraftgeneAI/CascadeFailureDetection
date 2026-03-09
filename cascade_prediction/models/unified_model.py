@@ -323,7 +323,6 @@ class UnifiedCascadePredictionModel(nn.Module):
         
         return {
             'failure_probability': failure_prob,
-            'failure_timing': failure_timing,
             'cascade_timing': failure_timing,
             'voltages': voltages,
             'angles': angles,
