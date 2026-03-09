@@ -1222,10 +1222,12 @@ class UnifiedCascadePredictionModel(nn.Module):
             
             if 'sequence_length' in batch:
                 lengths = batch['sequence_length']
+                # Move lengths to CPU to avoid CUDA illegal memory access
+                lengths_cpu = lengths.cpu()
                 h_final_list = []
                 for b in range(B):
                     # --- FIX 3: Cast Tensor to Integer for Slicing ---
-                    valid_idx = int(lengths[b]) - 1  # <--- CAST TO INT
+                    valid_idx = int(lengths_cpu[b]) - 1  # <--- CAST TO INT
                     
                     if valid_idx < 0: valid_idx = 0
                     if valid_idx >= T: valid_idx = T - 1

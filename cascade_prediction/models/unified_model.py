@@ -246,9 +246,11 @@ class UnifiedCascadePredictionModel(nn.Module):
             
             if 'sequence_length' in batch:
                 lengths = batch['sequence_length']
+                # Move lengths to CPU to avoid CUDA illegal memory access
+                lengths_cpu = lengths.cpu()
                 h_final_list = []
                 for b in range(B):
-                    valid_idx = int(lengths[b]) - 1
+                    valid_idx = int(lengths_cpu[b]) - 1
                     
                     if valid_idx < 0:
                         valid_idx = 0
@@ -295,15 +297,23 @@ class UnifiedCascadePredictionModel(nn.Module):
             h_new = gnn_layer(h, batch['edge_index'], edge_embedded, edge_mask=final_mask)
             h = layer_norm(h + h_new)
         
+        # ====================================================================
+        # THE OVERSMOOTHING FIX (Skip Connection)
+        # ====================================================================
+        # 'h' is heavily smoothed by 4 GNN layers (smeared across neighbors).
+        # 'fused' contains the raw, purely local multi-modal sensor data.
+        # We concatenate them so the model can see BOTH the neighborhood and the exact node.
+        h_combined = torch.cat([h, fused], dim=-1)
+
         # Multi-task predictions
-        failure_prob = self.failure_prob_head(h)
+        failure_prob = self.failure_prob_head(h_combined)
+        temperature = self.temperature_head(h_combined)
         failure_timing = self.failure_time_head(h)
         voltages = self.voltage_head(h)
         angles = self.angle_head(h)
         
         h_global = h.mean(dim=1, keepdim=True)
         frequency = self.frequency_head(h_global)
-        temperature = self.temperature_head(h)
         
         # Edge-based predictions
         src, dst = batch['edge_index']

@@ -29,10 +29,10 @@ class FailureProbabilityHead(nn.Module):
         super(FailureProbabilityHead, self).__init__()
         
         self.head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 1),
+            nn.Linear(hidden_dim, 1),
             nn.Sigmoid()
         )
     
@@ -156,7 +156,7 @@ class TemperatureHead(nn.Module):
         super(TemperatureHead, self).__init__()
         
         self.head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Linear(hidden_dim * 2, hidden_dim // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, 1),
