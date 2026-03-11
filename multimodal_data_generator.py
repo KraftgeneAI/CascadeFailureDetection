@@ -239,7 +239,7 @@ Examples:
     print(f"  Test:  {args.output_dir}/test/")
     
     print(f"\nYou can now train the model using:")
-    print(f"  python train_model_modular.py")
+    print(f"  python train_model.py")
     print("="*80 + "\n")
 
 
