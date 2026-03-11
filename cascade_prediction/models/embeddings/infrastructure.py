@@ -11,7 +11,7 @@ import torch.nn as nn
 class InfrastructureEmbedding(nn.Module):
     """Embedding network for infrastructure data (φ_infra)."""
     
-    def __init__(self, scada_features: int = 13, pmu_features: int = 8, 
+    def __init__(self, scada_features: int = 18, pmu_features: int = 8, 
                  equipment_features: int = 10, embedding_dim: int = 128):
         super(InfrastructureEmbedding, self).__init__()
         

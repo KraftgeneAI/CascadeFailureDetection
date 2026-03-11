@@ -593,7 +593,7 @@ class PhysicsBasedGridSimulator:
             'weather_sequence': weather_seq.astype(np.float32),
             'threat_indicators': threat_ind.astype(np.float32),
 
-            # SCADA Data Format (14 features per node)
+            # SCADA Data Format (18 features per node)
             # CRITICAL: Keep this order synchronized with dataset.py extraction!
             # Index 0: voltages (p.u.)
             # Index 1: angles (radians)
@@ -609,6 +609,10 @@ class PhysicsBasedGridSimulator:
             # Index 11: node_types (0=load, 1=gen, 2=sub)
             # Index 12: time_ratio (0-1)
             # Index 13: stress_level (0-1)
+            # Index 14: voltage_ratio (voltage / voltage_failure_threshold) - >1 = safe, <1 = danger
+            # Index 15: temp_ratio (temp / temp_failure_threshold) - <1 = safe, >1 = danger
+            # Index 16: freq_ratio (freq / freq_failure_threshold) - >1 = safe, <1 = danger
+            # Index 17: loading_ratio (loading / loading_failure_threshold) - <1 = safe, >1 = danger
             'scada_data': np.column_stack([
                 voltages,                                    # 0
                 angles,                                      # 1
@@ -624,6 +628,11 @@ class PhysicsBasedGridSimulator:
                 self.node_types,                             # 11
                 np.full(self.num_nodes, t / sequence_length), # 12
                 np.full(self.num_nodes, current_stress),     # 13
+                # FAILURE PROXIMITY RATIOS (CRITICAL for prediction!)
+                voltages / self.voltage_failure_threshold,   # 14: >1 = safe, <1 = danger
+                equipment_temps / self.temperature_failure_threshold,  # 15: <1 = safe, >1 = danger
+                np.full(self.num_nodes, current_frequency) / self.frequency_failure_threshold,  # 16: >1 = safe, <1 = danger
+                load_values / self.loading_failure_threshold,  # 17: <1 = safe, >1 = danger
             ]).astype(np.float32),
 
             'pmu_sequence': np.column_stack([

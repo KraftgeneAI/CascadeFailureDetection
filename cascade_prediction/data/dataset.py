@@ -245,24 +245,27 @@ class CascadeDataset(Dataset):
 
         # Process each timestep
         for i, ts in enumerate(sequence):
-            # SCADA data with normalization
-            scada_data_raw = ts.get('scada_data', np.zeros((num_nodes, 14))).astype(np.float32)
+            # SCADA data with normalization (now 18 features with failure proximity ratios)
+            scada_data_raw = ts.get('scada_data', np.zeros((num_nodes, 18))).astype(np.float32)
             
             if scada_data_raw.shape[1] >= 6:
                 scada_data_raw[:, 2] = normalize_power(scada_data_raw[:, 2], self.base_mva)
                 scada_data_raw[:, 3] = normalize_power(scada_data_raw[:, 3], self.base_mva)
                 scada_data_raw[:, 4] = normalize_power(scada_data_raw[:, 4], self.base_mva)
             
-            # Keep all 14 features, but make the time relative to the window
+            # Keep all 18 features, update time_ratio to be relative to window
             scada_data = scada_data_raw.copy()
             if scada_data.shape[1] > 12:
                 # Feature 12 is time_ratio. Change it to delta_t (progress within this specific window)
                 # i is the current step in the truncated sequence, len(sequence) is total steps
-                scada_data = scada_data_raw[:, :13]
                 scada_data[:, 12] = i / max(1, len(sequence)) 
                 
-                # Feature 13 is global stress. We leave it so the model understands baseline intensity,
-                # but because we truncated early, it can't be used as a guaranteed failure trigger.
+                # Features 13-17 are preserved:
+                # 13: stress_level - CRITICAL for prediction!
+                # 14: voltage_ratio (voltage / voltage_failure_threshold)
+                # 15: temp_ratio (temp / temp_failure_threshold)
+                # 16: freq_ratio (freq / freq_failure_threshold)
+                # 17: loading_ratio (loading / loading_failure_threshold)
                 
             data_arrays['scada_data'].append(to_tensor(scada_data))
             
