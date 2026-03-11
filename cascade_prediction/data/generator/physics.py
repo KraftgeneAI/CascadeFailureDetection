@@ -142,7 +142,7 @@ class PowerFlowSimulator:
         failed_nodes: Optional[List[int]] = None
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool]:
         """
-        Compute AC power flow using PyPSA.
+        Compute AC power flow using PyPSA with proper bus isolation.
         
         Args:
             generation: Generation at each node [num_nodes]
@@ -162,33 +162,102 @@ class PowerFlowSimulator:
         # Calculate reactive load (0.95 power factor)
         q_load = load * 0.33
         
-        # Update generator setpoints
+        # Store original states for restoration
+        original_bus_states = {}
+        original_gen_states = {}
+        original_load_states = {}
+        original_line_states = {}
+        
+        # Handle failed nodes - PROPERLY ISOLATE BUSES
+        if failed_nodes:
+            failed_node_set = set(failed_nodes)
+            
+            # 1. Disable failed buses
+            for node_idx in failed_nodes:
+                bus_name = f"bus_{node_idx}"
+                if 'in_service' in self.network.buses.columns:
+                    original_bus_states[bus_name] = self.network.buses.loc[bus_name, "in_service"]
+                    self.network.buses.loc[bus_name, "in_service"] = False
+                
+                # 2. Disable generators at failed buses
+                gen_name = f"gen_{node_idx}"
+                if gen_name in self.network.generators.index:
+                    original_gen_states[gen_name] = {
+                        'p_set': self.network.generators.loc[gen_name, "p_set"]
+                    }
+                    if 'in_service' in self.network.generators.columns:
+                        original_gen_states[gen_name]['in_service'] = self.network.generators.loc[gen_name, "in_service"]
+                        self.network.generators.loc[gen_name, "in_service"] = False
+                    else:
+                        # Fallback: set p_set to 0
+                        self.network.generators.loc[gen_name, "p_set"] = 0.0
+                
+                # 3. Disable loads at failed buses
+                load_name = f"load_{node_idx}"
+                if 'in_service' in self.network.loads.columns:
+                    original_load_states[load_name] = self.network.loads.loc[load_name, "in_service"]
+                    self.network.loads.loc[load_name, "in_service"] = False
+                else:
+                    # Fallback: set p_set and q_set to 0
+                    original_load_states[load_name] = {
+                        'p_set': self.network.loads.loc[load_name, "p_set"],
+                        'q_set': self.network.loads.loc[load_name, "q_set"]
+                    }
+                    self.network.loads.loc[load_name, "p_set"] = 0.0
+                    self.network.loads.loc[load_name, "q_set"] = 0.0
+            
+            # 4. Disable lines connected to failed buses
+            for line_idx in range(self.num_edges):
+                line_name = f"line_{line_idx}"
+                src, dst = int(self.network.lines.loc[line_name, "bus0"].split("_")[1]), \
+                           int(self.network.lines.loc[line_name, "bus1"].split("_")[1])
+                
+                if src in failed_node_set or dst in failed_node_set:
+                    if line_name not in original_line_states:
+                        if 'in_service' in self.network.lines.columns:
+                            original_line_states[line_name] = self.network.lines.loc[line_name, "in_service"]
+                            self.network.lines.loc[line_name, "in_service"] = False
+        
+        # Update generator setpoints for active nodes
         gen_indices = np.where(self.node_types == 1)[0]
         for idx in gen_indices:
-            gen_name = f"gen_{idx}"
             if failed_nodes and idx in failed_nodes:
-                self.network.generators.loc[gen_name, "p_set"] = 0.0
-            else:
-                self.network.generators.loc[gen_name, "p_set"] = generation[idx]
+                continue  # Already disabled above
+            
+            gen_name = f"gen_{idx}"
+            if gen_name not in original_gen_states:
+                original_gen_states[gen_name] = {
+                    'p_set': self.network.generators.loc[gen_name, "p_set"]
+                }
+                if 'in_service' in self.network.generators.columns:
+                    original_gen_states[gen_name]['in_service'] = self.network.generators.loc[gen_name, "in_service"]
+            self.network.generators.loc[gen_name, "p_set"] = generation[idx]
         
-        # Update load setpoints
+        # Update load setpoints for active nodes
         for i in range(self.num_nodes):
-            load_name = f"load_{i}"
             if failed_nodes and i in failed_nodes:
-                self.network.loads.loc[load_name, "in_service"] = False
-            else:
-                self.network.loads.loc[load_name, "p_set"] = load[i]
-                self.network.loads.loc[load_name, "q_set"] = q_load[i]
+                continue  # Already disabled above
+            
+            load_name = f"load_{i}"
+            if load_name not in original_load_states:
+                if 'in_service' in self.network.loads.columns:
+                    original_load_states[load_name] = self.network.loads.loc[load_name, "in_service"]
+                else:
+                    original_load_states[load_name] = {
+                        'p_set': self.network.loads.loc[load_name, "p_set"],
+                        'q_set': self.network.loads.loc[load_name, "q_set"]
+                    }
+            self.network.loads.loc[load_name, "p_set"] = load[i]
+            self.network.loads.loc[load_name, "q_set"] = q_load[i]
         
-        # Handle failed lines (high impedance)
-        original_x = {}
-        original_r = {}
+        # Handle explicitly failed lines (in addition to those connected to failed buses)
         if failed_lines:
             for line_idx in failed_lines:
                 line_name = f"line_{line_idx}"
-                original_x[line_name] = self.network.lines.loc[line_name, "x"]
-                original_r[line_name] = self.network.lines.loc[line_name, "r"]
-                self.network.lines.loc[line_name, "in_service"] = False
+                if line_name not in original_line_states:
+                    if 'in_service' in self.network.lines.columns:
+                        original_line_states[line_name] = self.network.lines.loc[line_name, "in_service"]
+                        self.network.lines.loc[line_name, "in_service"] = False
         
         try:
             # Run power flow
@@ -196,60 +265,152 @@ class PowerFlowSimulator:
             is_stable = status.get("converged", {}).get("0", {}).get("now", False)
             
             if not is_stable:
-                self._restore_lines(original_x, original_r)
+                self._restore_network_state(original_bus_states, original_gen_states, 
+                                           original_load_states, original_line_states)
                 return self._get_default_results()
             
             # Extract results
-            voltages, angles, node_reactive = self._extract_bus_results()
-            line_flows_p, line_flows_q = self._extract_line_results(failed_lines)
+            voltages, angles, node_reactive = self._extract_bus_results(failed_nodes)
+            line_flows_p, line_flows_q = self._extract_line_results(failed_lines, failed_nodes)
             
-            self._restore_lines(original_x, original_r)
+            # Restore network state
+            self._restore_network_state(original_bus_states, original_gen_states, 
+                                       original_load_states, original_line_states)
+            
             return voltages, angles, line_flows_p, node_reactive, line_flows_q, True
             
         except Exception as e:
             print(f"  [WARNING] Power flow exception: {e}")
-            self._restore_lines(original_x, original_r)
+            self._restore_network_state(original_bus_states, original_gen_states, 
+                                       original_load_states, original_line_states)
             return self._get_default_results()
     
-    def _extract_bus_results(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Extract voltage, angle, and reactive power from buses."""
+    def _extract_bus_results(self, failed_nodes: Optional[List[int]] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Extract voltage, angle, and reactive power from buses.
+        
+        Args:
+            failed_nodes: List of failed node indices (will have default values)
+        
+        Returns:
+            Tuple of (voltages, angles, node_reactive)
+        """
         voltages = np.zeros(self.num_nodes)
         angles = np.zeros(self.num_nodes)
         node_reactive = np.zeros(self.num_nodes)
         
+        failed_node_set = set(failed_nodes) if failed_nodes else set()
+        
         for i in range(self.num_nodes):
             bus_name = f"bus_{i}"
-            voltages[i] = self.network.buses_t.v_mag_pu.loc["now", bus_name]
-            angles[i] = np.radians(self.network.buses_t.v_ang.loc["now", bus_name])
-            node_reactive[i] = self.network.buses_t.q.loc["now", bus_name]
+            
+            if i in failed_node_set:
+                # Failed nodes: use default low voltage
+                voltages[i] = 0.0  # Zero voltage for failed buses
+                angles[i] = 0.0
+                node_reactive[i] = 0.0
+            else:
+                # Active nodes: extract from power flow results
+                try:
+                    voltages[i] = self.network.buses_t.v_mag_pu.loc["now", bus_name]
+                    angles[i] = np.radians(self.network.buses_t.v_ang.loc["now", bus_name])
+                    node_reactive[i] = self.network.buses_t.q.loc["now", bus_name]
+                except (KeyError, AttributeError):
+                    # Bus might be in isolated island - use default
+                    voltages[i] = 0.95
+                    angles[i] = 0.0
+                    node_reactive[i] = 0.0
         
         return voltages, angles, node_reactive
     
     def _extract_line_results(
         self,
-        failed_lines: Optional[List[int]]
+        failed_lines: Optional[List[int]],
+        failed_nodes: Optional[List[int]] = None
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Extract active and reactive power flows from lines."""
+        """
+        Extract active and reactive power flows from lines.
+        
+        Args:
+            failed_lines: List of explicitly failed line indices
+            failed_nodes: List of failed node indices (lines connected to these are also failed)
+        
+        Returns:
+            Tuple of (line_flows_p, line_flows_q)
+        """
         line_flows_p = np.zeros(self.num_edges)
         line_flows_q = np.zeros(self.num_edges)
         
+        failed_line_set = set(failed_lines) if failed_lines else set()
+        failed_node_set = set(failed_nodes) if failed_nodes else set()
+        
         for i in range(self.num_edges):
             line_name = f"line_{i}"
-            if failed_lines and i in failed_lines:
+            
+            # Check if line is connected to failed nodes
+            src = int(self.network.lines.loc[line_name, "bus0"].split("_")[1])
+            dst = int(self.network.lines.loc[line_name, "bus1"].split("_")[1])
+            
+            if i in failed_line_set or src in failed_node_set or dst in failed_node_set:
+                # Failed lines have zero flow
                 line_flows_p[i] = 0.0
                 line_flows_q[i] = 0.0
             else:
-                line_flows_p[i] = self.network.lines_t.p0.loc["now", line_name]
-                line_flows_q[i] = self.network.lines_t.q0.loc["now", line_name]
+                # Active lines: extract from power flow results
+                try:
+                    line_flows_p[i] = self.network.lines_t.p0.loc["now", line_name]
+                    line_flows_q[i] = self.network.lines_t.q0.loc["now", line_name]
+                except (KeyError, AttributeError):
+                    # Line might be in isolated island - use zero flow
+                    line_flows_p[i] = 0.0
+                    line_flows_q[i] = 0.0
         
         return line_flows_p, line_flows_q
     
-    def _restore_lines(self, original_x: Dict, original_r: Dict):
-        """Restore line impedances after failure simulation."""
-        for line_name, x_val in original_x.items():
-            self.network.lines.loc[line_name, "x"] = x_val
-        for line_name, r_val in original_r.items():
-            self.network.lines.loc[line_name, "r"] = r_val
+    def _restore_network_state(
+        self,
+        original_bus_states: Dict,
+        original_gen_states: Dict,
+        original_load_states: Dict,
+        original_line_states: Dict
+    ):
+        """
+        Restore network to original state after power flow simulation.
+        
+        Args:
+            original_bus_states: Original bus in_service states
+            original_gen_states: Original generator states (in_service, p_set)
+            original_load_states: Original load in_service states or {p_set, q_set}
+            original_line_states: Original line in_service states
+        """
+        # Restore buses
+        for bus_name, state in original_bus_states.items():
+            if 'in_service' in self.network.buses.columns:
+                self.network.buses.loc[bus_name, "in_service"] = state
+        
+        # Restore generators
+        for gen_name, states in original_gen_states.items():
+            if gen_name in self.network.generators.index:
+                if 'in_service' in states:
+                    if 'in_service' in self.network.generators.columns:
+                        self.network.generators.loc[gen_name, "in_service"] = states['in_service']
+                self.network.generators.loc[gen_name, "p_set"] = states['p_set']
+        
+        # Restore loads
+        for load_name, state in original_load_states.items():
+            if isinstance(state, dict):
+                # Fallback mode: restore p_set and q_set
+                self.network.loads.loc[load_name, "p_set"] = state['p_set']
+                self.network.loads.loc[load_name, "q_set"] = state['q_set']
+            else:
+                # Normal mode: restore in_service
+                if 'in_service' in self.network.loads.columns:
+                    self.network.loads.loc[load_name, "in_service"] = state
+        
+        # Restore lines
+        for line_name, state in original_line_states.items():
+            if 'in_service' in self.network.lines.columns:
+                self.network.lines.loc[line_name, "in_service"] = state
     
     def _get_default_results(self) -> Tuple:
         """Return default results when power flow fails."""
