@@ -296,18 +296,10 @@ class UnifiedCascadePredictionModel(nn.Module):
         for i, (gnn_layer, layer_norm) in enumerate(zip(self.gnn_layers, self.layer_norms)):
             h_new = gnn_layer(h, batch['edge_index'], edge_embedded, edge_mask=final_mask)
             h = layer_norm(h + h_new)
-        
-        # ====================================================================
-        # THE OVERSMOOTHING FIX (Skip Connection)
-        # ====================================================================
-        # 'h' is heavily smoothed by 4 GNN layers (smeared across neighbors).
-        # 'fused' contains the raw, purely local multi-modal sensor data.
-        # We concatenate them so the model can see BOTH the neighborhood and the exact node.
-        h_combined = torch.cat([h, fused], dim=-1)
 
         # Multi-task predictions
-        failure_prob = self.failure_prob_head(h_combined)
-        temperature = self.temperature_head(h_combined)
+        failure_prob = self.failure_prob_head(h)
+        temperature = self.temperature_head(h)
         failure_timing = self.failure_time_head(h)
         voltages = self.voltage_head(h)
         angles = self.angle_head(h)
