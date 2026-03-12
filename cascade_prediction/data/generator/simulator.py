@@ -497,7 +497,7 @@ class PhysicsBasedGridSimulator:
             
             ambient_temp = ambient_temp_base + 8 * np.sin(2 * np.pi * ((t / 60.0) - 6) / 24)
             self.thermal_sim.ambient_temperature = ambient_temp
-            equipment_temps = self.thermal_sim.update_temperatures(heat_generation, 1.0)
+            equipment_temps = self.thermal_sim.update_temperatures(heat_generation, 1.0/60)
             
             # Generate multi-modal data
             sat_data, weather_seq, threat_ind = self.env_gen.generate_correlated_environmental_data(
@@ -632,7 +632,7 @@ class PhysicsBasedGridSimulator:
                 voltages / self.voltage_failure_threshold,   # 14: >1 = safe, <1 = danger
                 equipment_temps / self.temperature_failure_threshold,  # 15: <1 = safe, >1 = danger
                 np.full(self.num_nodes, current_frequency) / self.frequency_failure_threshold,  # 16: >1 = safe, <1 = danger
-                load_values / self.loading_failure_threshold,  # 17: <1 = safe, >1 = danger
+                load_values / self.base_load / self.loading_failure_threshold,  # 17: <1 = safe, >1 = danger
             ]).astype(np.float32),
 
             'pmu_sequence': np.column_stack([
