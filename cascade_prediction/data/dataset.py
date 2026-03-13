@@ -259,7 +259,7 @@ class CascadeDataset(Dataset):
                 # Feature 12 is time_ratio. Change it to delta_t (progress within this specific window)
                 # i is the current step in the truncated sequence, len(sequence) is total steps
                 scada_data[:, 12] = i / max(1, len(sequence)) 
-                
+                scada_data[:, 13] = 0
                 # Features 13-17 are preserved:
                 # 13: stress_level - CRITICAL for prediction!
                 # 14: voltage_ratio (voltage / voltage_failure_threshold)
