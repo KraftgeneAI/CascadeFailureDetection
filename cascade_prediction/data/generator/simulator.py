@@ -176,8 +176,7 @@ class PhysicsBasedGridSimulator:
         )
         
         self.thermal_sim = ThermalDynamicsSimulator(
-            self.num_nodes, self.thermal_capacity, self.cooling_effectiveness,
-            self.thermal_time_constant
+            self.num_nodes, self.thermal_time_constant, self.thermal_capacity, self.cooling_effectiveness
         )
         
         # Initialize cascade simulator
