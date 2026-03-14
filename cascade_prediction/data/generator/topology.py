@@ -470,6 +470,7 @@ class NodePropertyInitializer:
             'equipment_age': equipment_age,
             'equipment_condition': equipment_condition,
             'thermal_time_constant': np.random.uniform(10, 30, self.num_nodes),
+            #In reality, thermal capacity should represent how much energy is needed to raise temperature by 1°C, which would be a much larger number (e.g., 50–500 for real equipment). But since your entire thermal model is scaled/normalized anyway, the 0.8–1.2 range
             'thermal_capacity': np.random.uniform(0.8, 1.2, self.num_nodes),
             'cooling_effectiveness': np.random.uniform(0.7, 1.0, self.num_nodes),
             'equipment_temperatures': np.full(self.num_nodes, 25.0)
