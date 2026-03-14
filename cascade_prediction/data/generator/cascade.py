@@ -245,6 +245,8 @@ class CascadeSimulator:
         
         if not is_stable:
             print(f"    [WARNING] Power flow unstable after initial failures")
+            ## Diverge at initial, do not need to continue the propagete
+            return failure_sequence
         
         # Calculate loading ratios from power flow
         apparent_power = np.sqrt(line_flows**2 + line_flows_q**2)
@@ -312,6 +314,8 @@ class CascadeSimulator:
                     
                     if not is_stable:
                         print(f"    [WARNING] Power flow unstable after {len(failed_nodes)} failures")
+                        ## Diverge at initial, do not need to continue the propagete
+                        return failure_sequence
                     
                     # Update loading ratios
                     apparent_power = np.sqrt(line_flows**2 + line_flows_q**2)
@@ -322,13 +326,15 @@ class CascadeSimulator:
                           f"Max loading: {loading_ratios.max():.3f}")
                     
                     if len(failed_nodes) >= target_num_failures:
+                        print(f"Maximum number of failed nodes({len(failed_nodes)}) is reached, stopping...")
                         break
                 
                 elif failure_state == 1:  # Partial failure
                     print(f"    [PARTIAL] Node {current_node} -> {neighbor} DAMAGED: "
-                          f"{reason} - Cascade stops")
+                          f"{reason}")
             
             if len(failed_nodes) >= target_num_failures:
+                print(f"Maximum number of failed nodes({len(failed_nodes)}) is reached, stopping...")
                 break
         
         return failure_sequence
