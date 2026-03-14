@@ -524,16 +524,17 @@ class FrequencyDynamicsSimulator:
         """
         Update system frequency based on power imbalance.
 
-        Uses the swing equation:
-            df/dt = (f0 / (2 * H_total * S_base)) * delta_P  [Hz/s]
+        Uses a steady-state droop model rather than integrating the raw swing
+        equation over a full minute. The swing equation describes sub-second
+        transients; over a 1-minute timestep, governor and AGC have already
+        acted, so the appropriate model is:
 
-        where:
-            f0        = nominal frequency (60 Hz)
-            H_total   = sum of inertia constants weighted by generator MVA [MW·s]
-            S_base    = system base (MW)
-            delta_P   = generation - load imbalance (MW)
+            Δf_ss = -f0 * ΔP / (D_total * S_base)   [Hz]
 
-        dt is in minutes, so we convert to seconds internally (dt_s = dt * 60).
+        where D_total is the combined governor droop + load damping coefficient.
+
+        We then apply a first-order lag so frequency doesn't jump instantly:
+            f[t] = f[t-1] + (f_target - f[t-1]) * (1 - exp(-dt / tau_gov))
 
         Args:
             generation: Generation at each node (MW)
@@ -546,40 +547,30 @@ class FrequencyDynamicsSimulator:
         """
         total_gen = generation.sum()
         total_load = load.sum()
-        imbalance = total_gen - total_load  # MW
+        imbalance = total_gen - total_load  # MW, positive = over-generation
 
         if total_gen == 0:
             return 0.0, load  # System collapsed
 
-        # Convert dt from minutes to seconds
-        dt_s = dt * 60.0
+        # Steady-state frequency deviation from droop model
+        # Governor droop R = 5% (standard) → D_gov = S_base / (R * f0)
+        # Combined droop + load damping coefficient (% of load per % freq change)
+        # Typical value: D_total ≈ 0.02-0.05 per unit (2-5% load change per 1% freq)
+        D_total = 0.04  # 4% load response per 1% frequency deviation
+        system_base = max(total_load, 1.0)
 
-        # Total system inertia: sum of H * S_gen for each generator [MW·s]
-        # H is in seconds, gen_capacity in MW → H * MW = MW·s
-        gen_indices = np.where(self.node_types == 1)[0]
-        total_inertia_mws = np.sum(
-            self.inertia[gen_indices] * generation[gen_indices]
-        )
-        # Fallback: if generators are offline, use a small inertia floor
-        if total_inertia_mws < 1.0:
-            total_inertia_mws = max(total_load * 0.01, 1.0)
+        # Δf_ss = f0 * ΔP / (D_total * S_base)
+        # e.g. 100 MW imbalance on 10,000 MW system → Δf = 60*100/(0.04*10000) = 1.5 Hz
+        delta_f_ss = self.base_frequency * imbalance / (D_total * system_base)
 
-        # System base = total generation capacity (MW)
-        system_base = max(total_gen, 1.0)
+        # Clamp steady-state target to ±3 Hz (physical limit before collapse)
+        delta_f_ss = np.clip(delta_f_ss, -3.0, 3.0)
+        f_target = self.base_frequency + delta_f_ss
 
-        # Swing equation: df/dt = f0 * delta_P / (2 * H_total)  [Hz/s]
-        # H_total is already in MW·s, delta_P in MW → ratio is dimensionless
-        df_dt = self.base_frequency * imbalance / (2.0 * total_inertia_mws)  # Hz/s
-
-        # Load-frequency damping: D * (f - f0) / f0
-        # D is the load damping coefficient (fraction of load shed per Hz deviation)
-        D = 0.02  # 2% load change per Hz (typical for mixed load)
-        freq_deviation = current_frequency - self.base_frequency
-        damping_df_dt = -D * freq_deviation * total_load / (2.0 * total_inertia_mws)
-        df_dt += damping_df_dt
-
-        # Update frequency: delta_f = df/dt * dt_s
-        new_frequency = current_frequency + df_dt * dt_s
+        # First-order lag: governor response time constant ~30 seconds
+        tau_gov = 0.5  # minutes (30 seconds)
+        alpha = 1.0 - np.exp(-dt / tau_gov)
+        new_frequency = current_frequency + alpha * (f_target - current_frequency)
         new_frequency = np.clip(new_frequency, 55.0, 65.0)
 
         # Under-frequency load shedding (one-shot per stage)
@@ -587,6 +578,9 @@ class FrequencyDynamicsSimulator:
             if new_frequency < stage['frequency'] and not self.ufls_activated[i]:
                 self.ufls_shed_factor *= (1.0 - stage['load_shed'])
                 self.ufls_activated[i] = True
+
+        adjusted_load = load * self.ufls_shed_factor
+        return new_frequency, adjusted_load
 
         adjusted_load = load * self.ufls_shed_factor
         return new_frequency, adjusted_load

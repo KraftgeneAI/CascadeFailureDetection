@@ -287,9 +287,11 @@ class PhysicsBasedGridSimulator:
         # Calculate node loading ratio
         node_loading = load_values / (self.base_load + 1e-6)
         
-        # Calculate frequency
-        current_frequency = 60.0 - (node_loading.mean() - 0.9) * 5
-        current_frequency = np.clip(current_frequency, 58.0, 60.5)
+        # Calculate initial frequency using the same droop model as the time series
+        # Start at nominal 60 Hz and let the droop model compute the initial deviation
+        current_frequency, _ = self.frequency_sim.update_frequency(
+            generation, load_values, 60.0, dt=1.0
+        )
         
         # Check for initial failures
         initial_failed_nodes = []
