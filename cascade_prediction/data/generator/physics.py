@@ -55,6 +55,25 @@ class PowerFlowSimulator:
         self.num_edges = edge_index.shape[1]
         self.node_types = node_types
         
+        # Per-node power factors based on node type (tan(phi) = Q/P)
+        # Load buses (0): mixed residential/commercial/industrial
+        #   - residential: pf ~0.95 → tan(phi) ~0.33
+        #   - industrial:  pf ~0.85 → tan(phi) ~0.62
+        #   - commercial:  pf ~0.90 → tan(phi) ~0.48
+        # Generator buses (1): generators supply/absorb Q via AVR, not load-driven
+        # Substation buses (2): large transformer loads, pf ~0.90
+        pf = np.where(
+            node_types == 1,  # Generator bus: minimal reactive load
+            np.random.uniform(0.95, 0.99, num_nodes),
+            np.where(
+                node_types == 2,  # Substation: transformer magnetizing current
+                np.random.uniform(0.88, 0.92, num_nodes),
+                np.random.uniform(0.82, 0.96, num_nodes)  # Load bus: mixed load types
+            )
+        )
+        # tan(phi) = sqrt(1 - pf²) / pf  → Q = P * tan(phi)
+        self.tan_phi = np.sqrt(1.0 - pf**2) / pf  # per-node Q/P ratio
+        
         # Initialize PyPSA network
         self.network = self._create_pypsa_network(
             edge_index, positions, gen_capacity,
@@ -159,8 +178,8 @@ class PowerFlowSimulator:
             - line_flows_q: Reactive power flows [num_edges]
             - is_stable: Whether power flow converged
         """
-        # Calculate reactive load (0.95 power factor)
-        q_load = load * 0.33
+        # Calculate reactive load using per-node power factors (Q = P * tan(phi))
+        q_load = load * self.tan_phi
         
         # Store original states for restoration
         original_bus_states = {}
