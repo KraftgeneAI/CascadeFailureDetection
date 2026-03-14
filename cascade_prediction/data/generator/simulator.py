@@ -382,18 +382,21 @@ class PhysicsBasedGridSimulator:
         
         return scenario_data
     
-    ## Helper function to get heat generation from loading ratios of lines
     def _get_heat_generation(self, loading_ratios: np.ndarray) -> np.ndarray:
         src, dst = self.edge_index
-        
-        # Calculate heat generation per node
+
         heat_generation = np.zeros(self.num_nodes)
-        
+
         for i in range(self.num_edges):
             s, d = src[i].item(), dst[i].item()
-            heat = (loading_ratios[i] ** 2) * self.line_resistance[i] * 100
+            # Heat is proportional to I²R, but resistance is now in Ohms (4-38 Ω).
+            # We use loading_ratio² as the relative current² proxy, normalized by
+            # a fixed reference resistance (1 Ω) so heat stays in a consistent
+            # dimensionless scale that the thermal model was tuned for.
+            heat = loading_ratios[i] ** 2  # dimensionless, ~0-1 range
             heat_generation[s] += heat / 2
             heat_generation[d] += heat / 2
+
         return heat_generation
 
     def _generate_time_series(

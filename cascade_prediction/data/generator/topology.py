@@ -431,12 +431,19 @@ class NodePropertyInitializer:
         loading_damage_threshold = loading_failure_threshold - np.random.uniform(0.05, 0.1)
         
         # Voltage threshold: node fails if voltage < threshold
-        voltage_failure_threshold = np.random.uniform(0.88, 0.92, self.num_nodes)
-        voltage_damage_threshold = voltage_failure_threshold + np.random.uniform(0.03, 0.05)
+        # NERC standards: normal operation 0.95-1.05 pu
+        # Under-voltage protection relays typically trip at 0.85-0.88 pu
+        # Damage (sustained low voltage) starts around 0.88-0.92 pu
+        voltage_failure_threshold = np.random.uniform(0.82, 0.87, self.num_nodes)
+        voltage_damage_threshold = voltage_failure_threshold + np.random.uniform(0.04, 0.07)
         
         # Temperature threshold: node fails if temperature > threshold
-        temperature_failure_threshold = np.random.uniform(85, 95, self.num_nodes)
-        temperature_damage_threshold = temperature_failure_threshold - np.random.uniform(10, 15)
+        # Real transmission equipment ratings:
+        #   - Transformers (top-oil): damage ~110°C, failure ~130°C
+        #   - Overhead lines (conductor): damage ~90°C, failure ~110°C
+        # Mixed range reflecting variety of equipment types.
+        temperature_failure_threshold = np.random.uniform(105, 130, self.num_nodes)
+        temperature_damage_threshold = temperature_failure_threshold - np.random.uniform(15, 25)
         
         # Frequency threshold: node fails if frequency < threshold
         frequency_failure_threshold = np.random.uniform(58.5, 59.2, self.num_nodes)

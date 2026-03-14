@@ -64,11 +64,11 @@ class PowerFlowSimulator:
         # Substation buses (2): large transformer loads, pf ~0.90
         pf = np.where(
             node_types == 1,  # Generator bus: minimal reactive load
-            np.random.uniform(0.95, 0.99, num_nodes),
+            np.random.uniform(0.97, 0.99, num_nodes),
             np.where(
                 node_types == 2,  # Substation: transformer magnetizing current
-                np.random.uniform(0.88, 0.92, num_nodes),
-                np.random.uniform(0.82, 0.96, num_nodes)  # Load bus: mixed load types
+                np.random.uniform(0.92, 0.96, num_nodes),
+                np.random.uniform(0.90, 0.97, num_nodes)  # Load bus: mixed load types
             )
         )
         # tan(phi) = sqrt(1 - pf²) / pf  → Q = P * tan(phi)
@@ -308,8 +308,11 @@ class PowerFlowSimulator:
                 return self._get_default_results()
 
         try:
-            # Run power flow
-            status = self.network.pf()
+            # Flat start (use_seed=False) is more robust than warm start when
+            # network state changes significantly between calls.
+            # distribute_slack spreads imbalance across all PV generators,
+            # reducing voltage stress on the single slack bus at high load.
+            status = self.network.pf(use_seed=False, distribute_slack=True)
             is_stable = status.get("converged", {}).get("0", {}).get("now", False)
 
             if not is_stable:
@@ -613,9 +616,6 @@ class FrequencyDynamicsSimulator:
             if new_frequency < stage['frequency'] and not self.ufls_activated[i]:
                 self.ufls_shed_factor *= (1.0 - stage['load_shed'])
                 self.ufls_activated[i] = True
-
-        adjusted_load = load * self.ufls_shed_factor
-        return new_frequency, adjusted_load
 
         adjusted_load = load * self.ufls_shed_factor
         return new_frequency, adjusted_load
