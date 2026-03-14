@@ -419,6 +419,7 @@ class PhysicsBasedGridSimulator:
         current_frequency = 60.0
         self.thermal_sim.ambient_temperature = ambient_temp_base
         self.thermal_sim.reset_temperatures()
+        self.frequency_sim.reset_ufls()  # reset one-shot UFLS relays for this scenario
         
         generation = np.zeros(self.num_nodes)
         load_values = np.zeros(self.num_nodes)
@@ -446,6 +447,8 @@ class PhysicsBasedGridSimulator:
             load_values = self.base_load * load_multiplier * (
                 1 + np.random.normal(0, load_noise, self.num_nodes)
             )
+            # Re-apply cumulative UFLS shed so the effect persists across recalculations
+            load_values *= self.frequency_sim.ufls_shed_factor
             
             # Size generation
             total_load = load_values.sum()

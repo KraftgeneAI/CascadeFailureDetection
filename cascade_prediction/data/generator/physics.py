@@ -461,6 +461,14 @@ class FrequencyDynamicsSimulator:
             {'frequency': 59.0, 'load_shed': 0.15},  # Shed 15% at 59.0 Hz
             {'frequency': 58.7, 'load_shed': 0.20},  # Shed 20% at 58.7 Hz
         ]
+        # UFLS state: each stage is a one-shot relay; cumulative shed tracked here
+        self.ufls_activated = [False] * len(self.ufls_stages)
+        self.ufls_shed_factor = 1.0  # multiplier applied to load after UFLS
+
+    def reset_ufls(self):
+        """Reset UFLS relay state at the start of each scenario."""
+        self.ufls_activated = [False] * len(self.ufls_stages)
+        self.ufls_shed_factor = 1.0
     
     def _initialize_inertia(self, gen_capacity: np.ndarray) -> np.ndarray:
         """
@@ -492,52 +500,76 @@ class FrequencyDynamicsSimulator:
         generation: np.ndarray,
         load: np.ndarray,
         current_frequency: float,
-        dt: float = 2.0 # timestep in seconds
+        dt: float = 1.0  # timestep in minutes
     ) -> Tuple[float, np.ndarray]:
         """
         Update system frequency based on power imbalance.
-        
+
+        Uses the swing equation:
+            df/dt = (f0 / (2 * H_total * S_base)) * delta_P  [Hz/s]
+
+        where:
+            f0        = nominal frequency (60 Hz)
+            H_total   = sum of inertia constants weighted by generator MVA [MW·s]
+            S_base    = system base (MW)
+            delta_P   = generation - load imbalance (MW)
+
+        dt is in minutes, so we convert to seconds internally (dt_s = dt * 60).
+
         Args:
-            generation: Generation at each node
-            load: Load at each node
+            generation: Generation at each node (MW)
+            load: Load at each node (MW)
             current_frequency: Current frequency (Hz)
-            dt: Time step (minutes)
-            
+            dt: Time step in minutes (default 1.0 min)
+
         Returns:
             Tuple of (new_frequency, adjusted_load)
         """
-        # Calculate power imbalance
         total_gen = generation.sum()
         total_load = load.sum()
-        imbalance = total_gen - total_load
-        
+        imbalance = total_gen - total_load  # MW
+
         if total_gen == 0:
             return 0.0, load  # System collapsed
-        # Calculate total system inertia
-        total_inertia = self.inertia.sum()
-        if total_inertia == 0:
-            total_inertia = 1.0
-        
-        # Frequency rate of change
-        system_base = 10000  # 10 GW base
-        df_dt = imbalance / (2 * total_inertia * system_base) * 60
-        
-        # Load damping effect
-        load_damping_effect = np.sum(self.damping * load) * (current_frequency - 60) / 60
-        df_dt += load_damping_effect / (2 * total_inertia * system_base) * 60
-        
-        # Update frequency
-        new_frequency = current_frequency + df_dt * dt
+
+        # Convert dt from minutes to seconds
+        dt_s = dt * 60.0
+
+        # Total system inertia: sum of H * S_gen for each generator [MW·s]
+        # H is in seconds, gen_capacity in MW → H * MW = MW·s
+        gen_indices = np.where(self.node_types == 1)[0]
+        total_inertia_mws = np.sum(
+            self.inertia[gen_indices] * generation[gen_indices]
+        )
+        # Fallback: if generators are offline, use a small inertia floor
+        if total_inertia_mws < 1.0:
+            total_inertia_mws = max(total_load * 0.01, 1.0)
+
+        # System base = total generation capacity (MW)
+        system_base = max(total_gen, 1.0)
+
+        # Swing equation: df/dt = f0 * delta_P / (2 * H_total)  [Hz/s]
+        # H_total is already in MW·s, delta_P in MW → ratio is dimensionless
+        df_dt = self.base_frequency * imbalance / (2.0 * total_inertia_mws)  # Hz/s
+
+        # Load-frequency damping: D * (f - f0) / f0
+        # D is the load damping coefficient (fraction of load shed per Hz deviation)
+        D = 0.02  # 2% load change per Hz (typical for mixed load)
+        freq_deviation = current_frequency - self.base_frequency
+        damping_df_dt = -D * freq_deviation * total_load / (2.0 * total_inertia_mws)
+        df_dt += damping_df_dt
+
+        # Update frequency: delta_f = df/dt * dt_s
+        new_frequency = current_frequency + df_dt * dt_s
         new_frequency = np.clip(new_frequency, 55.0, 65.0)
-        
-        # Under-frequency load shedding
-        adjusted_load = load.copy()
-        for stage in self.ufls_stages:
-            if new_frequency < stage['frequency']:
-                shed_amount = stage['load_shed']
-                adjusted_load *= (1 - shed_amount)
-                break
-        
+
+        # Under-frequency load shedding (one-shot per stage)
+        for i, stage in enumerate(self.ufls_stages):
+            if new_frequency < stage['frequency'] and not self.ufls_activated[i]:
+                self.ufls_shed_factor *= (1.0 - stage['load_shed'])
+                self.ufls_activated[i] = True
+
+        adjusted_load = load * self.ufls_shed_factor
         return new_frequency, adjusted_load
 
 
