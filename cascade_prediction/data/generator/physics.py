@@ -598,11 +598,11 @@ class ThermalDynamicsSimulator:
         )
         
         # Temperature change
-        dT = (heat_generation - heat_dissipation) * dt / self.thermal_capacity
+        dT = (heat_generation / self.thermal_capacity - heat_dissipation) * dt
         
         # Update temperatures
         self.temperatures += dT
-        self.temperatures += np.random.normal(0,0.5)
+        self.temperatures += np.random.normal(0,0.5,self.num_nodes)
         
         # Clip to reasonable range
         self.temperatures = np.clip(self.temperatures, self.ambient_temperature - 5, 150.0)

@@ -129,8 +129,10 @@ class PhysicsBasedGridSimulator:
         distances = np.linalg.norm(
             self.positions[src] - self.positions[dst], axis=1
         )
+        # Reactance (X): Use realistic per-unit values
         self.line_reactance = np.random.uniform(0.0003, 0.0005, self.num_edges) * distances
         self.line_reactance = np.maximum(self.line_reactance, 1e-6)  # Minimum value
+        # Resistance (R): R/X ratio ~0.1 for transmission lines
         self.line_resistance = self.line_reactance * 0.1
         self.line_resistance = np.maximum(self.line_resistance, 1e-7)  # Minimum value
         self.line_susceptance = np.random.uniform(1e-6, 3e-6, self.num_edges) * distances
@@ -496,7 +498,7 @@ class PhysicsBasedGridSimulator:
             
             ambient_temp = ambient_temp_base + 8 * np.sin(2 * np.pi * ((t / 60.0) - 6) / 24)
             self.thermal_sim.ambient_temperature = ambient_temp
-            equipment_temps = self.thermal_sim.update_temperatures(heat_generation, 1.0/60)
+            equipment_temps = self.thermal_sim.update_temperatures(heat_generation, 1.0)
             
             # Generate multi-modal data
             sat_data, weather_seq, threat_ind = self.env_gen.generate_correlated_environmental_data(
