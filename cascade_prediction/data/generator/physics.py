@@ -100,6 +100,10 @@ class PowerFlowSimulator:
             Initialized PyPSA Network
         """
         network = pypsa.Network()
+        network.set_snapshots(["now"])
+        # Set system base to 100 MVA so that MW-scale loads/generators are ~1 pu.
+        # PyPSA uses sn_mva as the system MVA base for per-unit conversion.
+        network.sn_mva = 100.0
         
         # Add buses (nodes)
         for i in range(self.num_nodes):
@@ -112,16 +116,25 @@ class PowerFlowSimulator:
             )
         
         # Add generators
+        # Slack bus (node 0): sets voltage angle reference and absorbs P imbalance
+        # PV buses (other generators): regulate voltage magnitude at their bus
+        # PQ buses: fixed P/Q injection — NOT used for generators (causes divergence)
         gen_indices = np.where(self.node_types == 1)[0]
         for idx in gen_indices:
-            control = "Slack" if idx == 0 else "PQ"
+            if idx == 0:
+                control = "Slack"
+                v_set = 1.0
+            else:
+                control = "PV"   # Voltage-regulating generator
+                v_set = np.random.uniform(0.98, 1.02)  # Slight voltage schedule variation
             network.add(
                 "Generator",
                 f"gen_{idx}",
                 bus=f"bus_{idx}",
                 p_nom=gen_capacity[idx],
                 control=control,
-                p_set=0.0
+                p_set=0.0,
+                v_set=v_set
             )
         
         # Add loads
@@ -278,30 +291,52 @@ class PowerFlowSimulator:
                         original_line_states[line_name] = self.network.lines.loc[line_name, "in_service"]
                         self.network.lines.loc[line_name, "in_service"] = False
         
+        # If the slack bus (node 0) is failed, reassign slack to the next active generator.
+        # Without a slack bus PyPSA has no angle reference and will crash.
+        slack_reassigned = None
+        if failed_nodes and 0 in failed_nodes:
+            gen_indices = np.where(self.node_types == 1)[0]
+            for candidate in gen_indices:
+                if candidate not in failed_nodes:
+                    self.network.generators.loc[f"gen_{candidate}", "control"] = "Slack"
+                    slack_reassigned = candidate
+                    break
+            if slack_reassigned is None:
+                # No generators left — full collapse
+                self._restore_network_state(original_bus_states, original_gen_states,
+                                            original_load_states, original_line_states)
+                return self._get_default_results()
+
         try:
             # Run power flow
             status = self.network.pf()
             is_stable = status.get("converged", {}).get("0", {}).get("now", False)
-            
+
             if not is_stable:
-                self._restore_network_state(original_bus_states, original_gen_states, 
-                                           original_load_states, original_line_states)
+                self._restore_network_state(original_bus_states, original_gen_states,
+                                            original_load_states, original_line_states)
+                if slack_reassigned is not None:
+                    self.network.generators.loc[f"gen_{slack_reassigned}", "control"] = "PV"
                 return self._get_default_results()
-            
+
             # Extract results
             voltages, angles, node_reactive = self._extract_bus_results(failed_nodes)
             line_flows_p, line_flows_q = self._extract_line_results(failed_lines, failed_nodes)
-            
+
             # Restore network state
-            self._restore_network_state(original_bus_states, original_gen_states, 
-                                       original_load_states, original_line_states)
-            
+            self._restore_network_state(original_bus_states, original_gen_states,
+                                        original_load_states, original_line_states)
+            if slack_reassigned is not None:
+                self.network.generators.loc[f"gen_{slack_reassigned}", "control"] = "PV"
+
             return voltages, angles, line_flows_p, node_reactive, line_flows_q, True
-            
+
         except Exception as e:
             print(f"  [WARNING] Power flow exception: {e}")
-            self._restore_network_state(original_bus_states, original_gen_states, 
-                                       original_load_states, original_line_states)
+            self._restore_network_state(original_bus_states, original_gen_states,
+                                        original_load_states, original_line_states)
+            if slack_reassigned is not None:
+                self.network.generators.loc[f"gen_{slack_reassigned}", "control"] = "PV"
             return self._get_default_results()
     
     def _extract_bus_results(self, failed_nodes: Optional[List[int]] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:

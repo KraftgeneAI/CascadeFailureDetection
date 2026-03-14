@@ -129,13 +129,24 @@ class PhysicsBasedGridSimulator:
         distances = np.linalg.norm(
             self.positions[src] - self.positions[dst], axis=1
         )
-        # Reactance (X): Use realistic per-unit values
-        self.line_reactance = np.random.uniform(0.0003, 0.0005, self.num_edges) * distances
-        self.line_reactance = np.maximum(self.line_reactance, 1e-6)  # Minimum value
-        # Resistance (R): R/X ratio ~0.1 for transmission lines
-        self.line_resistance = self.line_reactance * 0.1
-        self.line_resistance = np.maximum(self.line_resistance, 1e-7)  # Minimum value
-        self.line_susceptance = np.random.uniform(1e-6, 3e-6, self.num_edges) * distances
+        
+        # PyPSA uses sn_mva=100 MVA as system base.
+        # z_base = v_nom^2 / sn_mva = 138^2 / 100 = 190.44 Ω
+        # Target x_pu in 0.05–0.20 range for well-conditioned Newton-Raphson.
+        # Normalize distances to [0,1] so shorter lines get lower reactance.
+        dist_norm = distances / (distances.max() + 1e-6)  # 0..1
+
+        # x_pu: short lines ~0.03, long lines ~0.15 (realistic transmission range)
+        x_pu = np.random.uniform(0.03, 0.08, self.num_edges) + dist_norm * np.random.uniform(0.05, 0.10, self.num_edges)
+        x_pu = np.clip(x_pu, 0.02, 0.20)
+
+        z_base = 138.0 ** 2 / 100.0  # 190.44 Ω  (sn_mva = 100 MVA)
+        self.line_reactance = x_pu * z_base          # Ω, ~4–38 Ω range
+        self.line_resistance = self.line_reactance * np.random.uniform(0.05, 0.15, self.num_edges)
+
+        # Shunt susceptance: b_pu ~ 1e-4 per unit  →  b_siemens = b_pu / z_base
+        b_pu = np.random.uniform(0.5e-4, 2e-4, self.num_edges)
+        self.line_susceptance = b_pu / z_base        # Siemens
         self.line_conductance = np.zeros(self.num_edges)
         total_load = self.base_load.sum()
         avg_flow_per_line = total_load / self.num_edges  # Average flow
