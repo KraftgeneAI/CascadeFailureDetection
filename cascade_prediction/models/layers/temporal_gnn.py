@@ -9,6 +9,7 @@ import torch.nn as nn
 from typing import Optional, Tuple
 
 from .graph_attention import GraphAttentionLayer
+from cascade_prediction.data.generator.config import Settings
 
 
 class TemporalGNNCell(nn.Module):
@@ -37,11 +38,11 @@ class TemporalGNNCell(nn.Module):
             self.projection = None
         
         self.lstm = nn.LSTM(
-            input_size=hidden_dim, 
+            input_size=hidden_dim,
             hidden_size=hidden_dim,
-            num_layers=3,
+            num_layers=Settings.Model.LSTM_NUM_LAYERS,
             batch_first=True,
-            dropout=0.3
+            dropout=Settings.Model.LSTM_DROPOUT
         )
         self.layer_norm = nn.LayerNorm(hidden_dim)
     
@@ -59,8 +60,8 @@ class TemporalGNNCell(nn.Module):
         
         if h_prev is None:
             h_prev = (
-                torch.zeros(3, B * N, self.hidden_dim, device=x.device),
-                torch.zeros(3, B * N, self.hidden_dim, device=x.device)
+                torch.zeros(Settings.Model.LSTM_NUM_LAYERS, B * N, self.hidden_dim, device=x.device),
+                torch.zeros(Settings.Model.LSTM_NUM_LAYERS, B * N, self.hidden_dim, device=x.device)
             )
         
         spatial_flat = spatial_features.reshape(B * N, 1, self.hidden_dim)

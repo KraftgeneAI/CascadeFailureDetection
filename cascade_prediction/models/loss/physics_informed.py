@@ -19,6 +19,8 @@ import torch.nn.functional as F
 from typing import Dict, Tuple, Optional
 import numpy as np
 
+from cascade_prediction.data.generator.config import Settings
+
 
 class PhysicsInformedLoss(nn.Module):
     """
@@ -38,23 +40,23 @@ class PhysicsInformedLoss(nn.Module):
     
     def __init__(
         self,
-        lambda_prediction: float = 10.0,
-        lambda_powerflow: float = 0.1,
-        lambda_risk: float = 0.1,
-        lambda_timing: float = 0.1,
-        lambda_active_flow: float = 0.1,
-        lambda_temperature: float = 0.05,
-        lambda_frequency: float = 0.08,
-        lambda_reactive: float = 0.1,
-        lambda_voltage: float = 1.0,
-        lambda_capacity: float = 0.05,
+        lambda_prediction: float = Settings.Loss.LAMBDA_PREDICTION,
+        lambda_powerflow: float = Settings.Loss.LAMBDA_POWERFLOW,
+        lambda_risk: float = Settings.Loss.LAMBDA_RISK,
+        lambda_timing: float = Settings.Loss.LAMBDA_TIMING,
+        lambda_active_flow: float = Settings.Loss.LAMBDA_ACTIVE_FLOW,
+        lambda_temperature: float = Settings.Loss.LAMBDA_TEMPERATURE,
+        lambda_frequency: float = Settings.Loss.LAMBDA_FREQUENCY,
+        lambda_reactive: float = Settings.Loss.LAMBDA_REACTIVE,
+        lambda_voltage: float = Settings.Loss.LAMBDA_VOLTAGE,
+        lambda_capacity: float = Settings.Loss.LAMBDA_CAPACITY,
         pos_weight: float = 1.0,
-        focal_alpha: float = 0.85,
-        focal_gamma: float = 2.0,
+        focal_alpha: float = Settings.Loss.FOCAL_ALPHA,
+        focal_gamma: float = Settings.Loss.FOCAL_GAMMA,
         label_smoothing: float = 0.0,
         use_logits: bool = False,
-        base_mva: float = 100.0,
-        base_freq: float = 60.0,
+        base_mva: float = Settings.Dataset.BASE_MVA,
+        base_freq: float = Settings.Dataset.BASE_FREQUENCY,
         **kwargs
     ):
         """
@@ -155,10 +157,10 @@ class PhysicsInformedLoss(nn.Module):
         Returns:
             Scaled MSE loss for temperature
         """
-        # Scale down for numerical stability (100.0 is approx max temp)
+        # Scale down for numerical stability (approx max temp in deg C)
         return F.mse_loss(
-            predicted_temp.squeeze(-1) / 100.0,
-            ground_truth_temp / 100.0
+            predicted_temp.squeeze(-1) / Settings.Loss.TEMPERATURE_SCALE,
+            ground_truth_temp / Settings.Loss.TEMPERATURE_SCALE
         )
     
     def frequency_loss(
@@ -177,7 +179,7 @@ class PhysicsInformedLoss(nn.Module):
             MSE loss for frequency prediction
         """
         imbalance = torch.sum(power_injection, dim=1)  # [B, 1] or [B]
-        target_freq_dev = imbalance / 10.0
+        target_freq_dev = imbalance / Settings.Loss.POWER_TO_FREQ
         target_freq = 1.0 + target_freq_dev.view(-1, 1, 1)
         
         # Normalize predicted frequency (assuming it outputs Hz)

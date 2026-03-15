@@ -289,6 +289,110 @@ class DatasetConfig:
 
 
 # ---------------------------------------------------------------------------
+# Training Hyperparameters
+# ---------------------------------------------------------------------------
+class TrainingConfig:
+    LEARNING_RATE           = 0.0001    # Adam initial learning rate
+    GRAD_CLIP               = 20.0      # Default CLI gradient clipping max norm
+    TRAINER_MAX_GRAD_NORM   = 5.0       # Trainer class default max grad norm
+    EPOCHS                  = 100       # Default number of training epochs
+    BATCH_SIZE              = 8         # Default batch size
+    PATIENCE                = 25        # Early-stopping patience (epochs)
+    WEIGHT_DECAY            = 1e-3      # Adam weight decay (L2 regularisation)
+    SCHEDULER_PATIENCE      = 5         # ReduceLROnPlateau patience
+    CASCADE_THRESHOLD       = 0.25      # Decision threshold for cascade prediction
+    NODE_THRESHOLD          = 0.25      # Decision threshold for node failure
+    FBETA                   = 0.5       # Beta for F-beta score (precision-focused)
+
+
+# ---------------------------------------------------------------------------
+# Model Architecture
+# ---------------------------------------------------------------------------
+class ModelConfig:
+    EMBEDDING_DIM       = 128           # Embedding vector dimension
+    HIDDEN_DIM          = 128           # Hidden representation dimension
+    NUM_GNN_LAYERS      = 3             # Number of stacked GNN layers
+    HEADS               = 4             # Multi-head attention heads
+    DROPOUT             = 0.3           # Default model dropout rate
+    DROPOUT_TRAIN       = 0.5           # Default CLI training dropout rate
+    HEAD_DROPOUT_HIGH   = 0.4           # Dropout for failure_prob / freq / risk / timing heads
+    HEAD_DROPOUT_LOW    = 0.3           # Dropout for voltage / angle / flow / temperature heads
+    LSTM_NUM_LAYERS     = 3             # LSTM layer count in TemporalGNNCell
+    LSTM_DROPOUT        = 0.3           # LSTM internal dropout
+    EDGE_FEATURES       = 7             # Edge feature vector length
+    RISK_DIM            = 7             # Output dimension of risk assessment head
+    GAT_DROPOUT         = 0.1           # Graph attention dropout
+    LEAKY_RELU_SLOPE    = 0.2           # LeakyReLU negative slope in GAT
+
+
+# ---------------------------------------------------------------------------
+# Loss Function
+# ---------------------------------------------------------------------------
+class LossConfig:
+    # Default lambda weights (PhysicsInformedLoss constructor defaults)
+    LAMBDA_PREDICTION   = 10.0
+    LAMBDA_POWERFLOW    = 0.1
+    LAMBDA_RISK         = 0.1
+    LAMBDA_TIMING       = 0.1
+    LAMBDA_ACTIVE_FLOW  = 0.1
+    LAMBDA_TEMPERATURE  = 0.05
+    LAMBDA_FREQUENCY    = 0.08
+    LAMBDA_REACTIVE     = 0.1
+    LAMBDA_VOLTAGE      = 1.0
+    LAMBDA_CAPACITY     = 0.05
+
+    # Focal loss parameters
+    FOCAL_ALPHA         = 0.85          # PhysicsInformedLoss default
+    FOCAL_GAMMA         = 2.0
+    FOCAL_ALPHA_TRAIN   = 0.25          # train_model.py (calibrated path)
+    FOCAL_ALPHA_FALLBACK = 0.15         # train_model.py (uncalibrated fallback)
+
+    # Dynamic calibration
+    CALIB_NUM_BATCHES       = 20        # Batches used for loss-weight calibration
+    CALIB_LAMBDA_PREDICTION = 50.0      # Prediction weight used during calibration
+    CALIB_MIN_MAGNITUDE     = 1e-9      # Floor for target_magnitude to avoid div-by-zero
+
+    # Physics scaling constants
+    TEMPERATURE_SCALE   = 100.0         # Temperature normalisation divisor (deg C)
+    POWER_TO_FREQ       = 10.0          # Power-imbalance to frequency-deviation factor
+
+
+# ---------------------------------------------------------------------------
+# Embedding Networks
+# ---------------------------------------------------------------------------
+class EmbeddingConfig:
+    # -- Environmental -------------------------------------------------------
+    ENV_SATELLITE_CHANNELS  = 12        # Satellite image input channels
+    ENV_WEATHER_FEATURES    = 80        # Weather sequence feature width
+    ENV_THREAT_FEATURES     = 6         # Threat indicator vector length
+    ENV_SAT_HIDDEN          = 32        # Satellite CNN output channels
+    ENV_WEATHER_HIDDEN      = 32        # Weather LSTM hidden size
+    ENV_THREAT_HIDDEN       = 32        # Threat encoder hidden size
+    ENV_WEATHER_LSTM_LAYERS = 2         # Weather LSTM layer count
+
+    # -- Infrastructure ------------------------------------------------------
+    INFRA_SCADA_FEATURES    = 18        # SCADA measurement feature width
+    INFRA_PMU_FEATURES      = 8         # PMU measurement feature width
+    INFRA_EQUIPMENT_FEATURES = 10       # Equipment status feature width
+    INFRA_SCADA_HIDDEN      = 64        # SCADA encoder hidden size
+    INFRA_PMU_HIDDEN        = 32        # PMU projection hidden size
+    INFRA_EQUIP_HIDDEN      = 32        # Equipment encoder hidden size
+
+    # -- Robotic -------------------------------------------------------------
+    ROBOT_VISUAL_CHANNELS   = 3         # Visual camera input channels (RGB)
+    ROBOT_THERMAL_CHANNELS  = 1         # Thermal camera input channels
+    ROBOT_SENSOR_FEATURES   = 12        # Robotic sensor vector length
+    ROBOT_VIS_HIDDEN        = 32        # Visual CNN output channels
+    ROBOT_THERM_HIDDEN      = 16        # Thermal CNN output channels
+    ROBOT_SENSOR_HIDDEN     = 32        # Sensor encoder hidden size
+    ROBOT_FUSION_INPUT      = 80        # Fusion input = VIS + THERM + SENSOR
+
+    # -- Shared --------------------------------------------------------------
+    DROPOUT_CNN             = 0.2       # Spatial (2-D) dropout in CNN blocks
+    DROPOUT_FC              = 0.3       # Dropout in fully-connected blocks
+
+
+# ---------------------------------------------------------------------------
 # Single entry-point: import only Settings everywhere
 # ---------------------------------------------------------------------------
 class Settings:
@@ -311,3 +415,7 @@ class Settings:
     Simulation    = SimulationConfig
     Scenario      = ScenarioConfig
     Dataset       = DatasetConfig
+    Training      = TrainingConfig
+    Model         = ModelConfig
+    Loss          = LossConfig
+    Embedding     = EmbeddingConfig

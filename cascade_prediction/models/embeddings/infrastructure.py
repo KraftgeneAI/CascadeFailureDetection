@@ -7,42 +7,54 @@ Processes SCADA data, PMU measurements, and equipment status.
 import torch
 import torch.nn as nn
 
+from cascade_prediction.data.generator.config import Settings
+
 
 class InfrastructureEmbedding(nn.Module):
     """Embedding network for infrastructure data (φ_infra)."""
     
-    def __init__(self, scada_features: int = 18, pmu_features: int = 8, 
-                 equipment_features: int = 10, embedding_dim: int = 128):
+    def __init__(
+        self,
+        scada_features: int = Settings.Embedding.INFRA_SCADA_FEATURES,
+        pmu_features: int = Settings.Embedding.INFRA_PMU_FEATURES,
+        equipment_features: int = Settings.Embedding.INFRA_EQUIPMENT_FEATURES,
+        embedding_dim: int = Settings.Model.EMBEDDING_DIM
+    ):
         super(InfrastructureEmbedding, self).__init__()
-        
-        # Output: 64
+
+        # SCADA encoder — output: INFRA_SCADA_HIDDEN
         self.scada_encoder = nn.Sequential(
-            nn.Linear(scada_features, 64), 
+            nn.Linear(scada_features, Settings.Embedding.INFRA_SCADA_HIDDEN),
             nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(64, 64)
+            nn.Dropout(Settings.Embedding.DROPOUT_FC),
+            nn.Linear(Settings.Embedding.INFRA_SCADA_HIDDEN, Settings.Embedding.INFRA_SCADA_HIDDEN)
         )
-        
-        # Output: 32
+
+        # PMU projection — output: INFRA_PMU_HIDDEN
         self.pmu_projection = nn.Sequential(
-            nn.Linear(pmu_features, 32),
+            nn.Linear(pmu_features, Settings.Embedding.INFRA_PMU_HIDDEN),
             nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(32, 32)
+            nn.Dropout(Settings.Embedding.DROPOUT_FC),
+            nn.Linear(Settings.Embedding.INFRA_PMU_HIDDEN, Settings.Embedding.INFRA_PMU_HIDDEN)
         )
-        
-        # Output: 32
+
+        # Equipment encoder — output: INFRA_EQUIP_HIDDEN
         self.equipment_encoder = nn.Sequential(
-            nn.Linear(equipment_features, 32),
+            nn.Linear(equipment_features, Settings.Embedding.INFRA_EQUIP_HIDDEN),
             nn.ReLU(),
-            nn.Dropout(0.3)
+            nn.Dropout(Settings.Embedding.DROPOUT_FC)
         )
-        
-        # Input: 64 + 32 + 32 = 128 -> Output: 128
+
+        # Fusion: SCADA + PMU + EQUIP -> embedding_dim
+        fusion_input = (
+            Settings.Embedding.INFRA_SCADA_HIDDEN
+            + Settings.Embedding.INFRA_PMU_HIDDEN
+            + Settings.Embedding.INFRA_EQUIP_HIDDEN
+        )
         self.fusion = nn.Sequential(
-            nn.Linear(64 + 32 + 32, embedding_dim),
+            nn.Linear(fusion_input, embedding_dim),
             nn.ReLU(),
-            nn.Dropout(0.3),
+            nn.Dropout(Settings.Embedding.DROPOUT_FC),
             nn.LayerNorm(embedding_dim)
         )
     
@@ -63,9 +75,9 @@ class InfrastructureEmbedding(nn.Module):
                 else:
                     scada_flat = scada_flat[:, :target_dim]
             
-            scada_features = self.scada_encoder(scada_flat).reshape(B, T, N, 64)
+            scada_features = self.scada_encoder(scada_flat).reshape(B, T, N, Settings.Embedding.INFRA_SCADA_HIDDEN)
         else:
-            scada_features = torch.zeros(B, T, N, 64, device=scada_data.device)
+            scada_features = torch.zeros(B, T, N, Settings.Embedding.INFRA_SCADA_HIDDEN, device=scada_data.device)
 
         # --- 2. PMU PROCESSING ---
         pmu_flat = pmu_data.reshape(B * T * N, -1)
@@ -81,9 +93,9 @@ class InfrastructureEmbedding(nn.Module):
                 else:
                     pmu_flat = pmu_flat[:, :target_dim]
 
-            pmu_features = self.pmu_projection(pmu_flat).reshape(B, T, N, 32)
+            pmu_features = self.pmu_projection(pmu_flat).reshape(B, T, N, Settings.Embedding.INFRA_PMU_HIDDEN)
         else:
-            pmu_features = torch.zeros(B, T, N, 32, device=scada_data.device)
+            pmu_features = torch.zeros(B, T, N, Settings.Embedding.INFRA_PMU_HIDDEN, device=scada_data.device)
             
         # --- 3. EQUIPMENT PROCESSING ---
         if equipment_data is not None:
@@ -100,11 +112,11 @@ class InfrastructureEmbedding(nn.Module):
                     else:
                         equip_flat = equip_flat[:, :target_dim]
                 
-                equip_features = self.equipment_encoder(equip_flat).reshape(B, T, N, 32)
+                equip_features = self.equipment_encoder(equip_flat).reshape(B, T, N, Settings.Embedding.INFRA_EQUIP_HIDDEN)
             else:
-                 equip_features = torch.zeros(B, T, N, 32, device=scada_data.device)
+                equip_features = torch.zeros(B, T, N, Settings.Embedding.INFRA_EQUIP_HIDDEN, device=scada_data.device)
         else:
-            equip_features = torch.zeros(B, T, N, 32, device=scada_data.device)
+            equip_features = torch.zeros(B, T, N, Settings.Embedding.INFRA_EQUIP_HIDDEN, device=scada_data.device)
 
         # --- 4. FUSION ---
         combined = torch.cat([scada_features, pmu_features, equip_features], dim=-1)

@@ -16,6 +16,8 @@ import torch.nn as nn
 from typing import Dict, Tuple, Optional
 import logging
 
+from cascade_prediction.data.generator.config import Settings
+
 # Import embeddings
 from .embeddings import (
     EnvironmentalEmbedding,
@@ -62,11 +64,11 @@ class UnifiedCascadePredictionModel(nn.Module):
     
     def __init__(
         self,
-        embedding_dim: int = 128,
-        hidden_dim: int = 128,
-        num_gnn_layers: int = 3,
-        heads: int = 4,
-        dropout: float = 0.3
+        embedding_dim: int = Settings.Model.EMBEDDING_DIM,
+        hidden_dim: int = Settings.Model.HIDDEN_DIM,
+        num_gnn_layers: int = Settings.Model.NUM_GNN_LAYERS,
+        heads: int = Settings.Model.HEADS,
+        dropout: float = Settings.Model.DROPOUT
     ):
         """
         Initialize unified cascade prediction model.
@@ -120,25 +122,25 @@ class UnifiedCascadePredictionModel(nn.Module):
             nn.LayerNorm(hidden_dim) for _ in range(num_gnn_layers)
         ])
         
-        # Edge embedding - accepts 7 features:
+        # Edge embedding - accepts Settings.Model.EDGE_FEATURES features:
         # [reactance, thermal_limits, resistance, susceptance, conductance, line_flows_p, line_flows_q]
         self.edge_embedding = nn.Sequential(
-            nn.Linear(7, hidden_dim),
+            nn.Linear(Settings.Model.EDGE_FEATURES, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout)
         )
         
         # Multi-task prediction heads
-        self.failure_prob_head = FailureProbabilityHead(hidden_dim, dropout=0.4)
-        self.failure_time_head = TimingHead(hidden_dim, dropout=0.4)
-        self.voltage_head = VoltageHead(hidden_dim, dropout=0.3)
-        self.angle_head = AngleHead(hidden_dim, dropout=0.3)
-        self.line_flow_head = LineFlowHead(hidden_dim, dropout=0.3)
-        self.reactive_nodes_head = ReactiveFlowHead(hidden_dim, dropout=0.3)
-        self.frequency_head = FrequencyHead(hidden_dim, dropout=0.4)
-        self.temperature_head = TemperatureHead(hidden_dim, dropout=0.3)
-        self.active_power_line_flow_head = ActivePowerLineFlowHead(hidden_dim, dropout=0.3)
-        self.risk_head = RiskHead(hidden_dim, dropout=0.4)
+        self.failure_prob_head = FailureProbabilityHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
+        self.failure_time_head = TimingHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
+        self.voltage_head = VoltageHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
+        self.angle_head = AngleHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
+        self.line_flow_head = LineFlowHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
+        self.reactive_nodes_head = ReactiveFlowHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
+        self.frequency_head = FrequencyHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
+        self.temperature_head = TemperatureHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
+        self.active_power_line_flow_head = ActivePowerLineFlowHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
+        self.risk_head = RiskHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
         
         # Physics-informed loss
         self.physics_loss = PhysicsInformedLoss()
@@ -184,7 +186,7 @@ class UnifiedCascadePredictionModel(nn.Module):
         if edge_attr_input is None:
             E = batch['edge_index'].shape[1]
             edge_attr_input = torch.zeros(
-                env_emb.shape[0], E, 7,
+                env_emb.shape[0], E, Settings.Model.EDGE_FEATURES,
                 device=env_emb.device
             )
         

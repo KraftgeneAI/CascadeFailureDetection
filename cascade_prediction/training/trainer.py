@@ -19,6 +19,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import numpy as np
 
+from cascade_prediction.data.generator.config import Settings
+
 
 class Trainer:
     """
@@ -38,14 +40,14 @@ class Trainer:
         val_loader: DataLoader,
         criterion: nn.Module,
         device: torch.device,
-        learning_rate: float = 0.0001,
+        learning_rate: float = Settings.Training.LEARNING_RATE,
         output_dir: str = "checkpoints",
-        max_grad_norm: float = 5.0,
-        patience: int = 25,
+        max_grad_norm: float = Settings.Training.TRAINER_MAX_GRAD_NORM,
+        patience: int = Settings.Training.PATIENCE,
         use_amp: bool = False,
         model_outputs_logits: bool = False,
-        base_mva: float = 100.0,
-        base_freq: float = 60.0
+        base_mva: float = Settings.Dataset.BASE_MVA,
+        base_freq: float = Settings.Dataset.BASE_FREQUENCY
     ):
         """
         Initialize trainer.
@@ -99,11 +101,13 @@ class Trainer:
         self.optimizer = torch.optim.Adam(
             model.parameters(),
             lr=learning_rate,
-            weight_decay=1e-3
+            weight_decay=Settings.Training.WEIGHT_DECAY
         )
-        
+
         # Initialize learning rate scheduler
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, 'min', patience=5)
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, 'min', patience=Settings.Training.SCHEDULER_PATIENCE
+        )
         
         # Initialize AMP scaler if using mixed precision
         self.scaler = torch.amp.GradScaler('cuda') if use_amp and device.type == 'cuda' else None
@@ -133,8 +137,8 @@ class Trainer:
         self.epochs_without_improvement = 0
         
         # Thresholds for metrics calculation
-        self.cascade_threshold = 0.25
-        self.node_threshold = 0.25
+        self.cascade_threshold = Settings.Training.CASCADE_THRESHOLD
+        self.node_threshold = Settings.Training.NODE_THRESHOLD
         
         # Model validation flag
         self._model_validated = False
@@ -628,8 +632,10 @@ class Trainer:
         # --- 1. Find Thresholds ---
         best_c_f1, best_c_thresh = find_best_f1(global_cascade_probs, global_cascade_labels)
         
-        # Use the F-beta finder for Nodes, with beta=0.5 (Precision focus)
-        best_n_score, best_n_thresh = find_best_fbeta(global_node_probs, global_node_labels, beta=0.5)
+        # Use the F-beta finder for Nodes, with beta (Precision focus)
+        best_n_score, best_n_thresh = find_best_fbeta(
+            global_node_probs, global_node_labels, beta=Settings.Training.FBETA
+        )
         
         # --- 2. Recalculate Metrics ---
         
@@ -744,8 +750,8 @@ class Trainer:
         self.best_val_mae = checkpoint.get('best_val_mae', float('inf'))
         
         # Load thresholds if available
-        self.cascade_threshold = checkpoint.get('cascade_threshold', 0.25)
-        self.node_threshold = checkpoint.get('node_threshold', 0.25)
+        self.cascade_threshold = checkpoint.get('cascade_threshold', Settings.Training.CASCADE_THRESHOLD)
+        self.node_threshold = checkpoint.get('node_threshold', Settings.Training.NODE_THRESHOLD)
         
         return checkpoint['epoch']
     

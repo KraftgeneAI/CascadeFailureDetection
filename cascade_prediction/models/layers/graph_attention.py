@@ -11,6 +11,8 @@ from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import add_self_loops, softmax
 from typing import Optional
 
+from cascade_prediction.data.generator.config import Settings
+
 
 class GraphAttentionLayer(MessagePassing):
     """
@@ -19,7 +21,7 @@ class GraphAttentionLayer(MessagePassing):
     """
     
     def __init__(self, in_channels: int, out_channels: int, heads: int = 4,
-                 concat: bool = True, dropout: float = 0.1, edge_dim: Optional[int] = None):
+                 concat: bool = True, dropout: float = Settings.Model.GAT_DROPOUT, edge_dim: Optional[int] = None):
         super(GraphAttentionLayer, self).__init__(aggr='add', node_dim=0)
         
         self.in_channels = in_channels
@@ -144,7 +146,7 @@ class GraphAttentionLayer(MessagePassing):
             alpha_edge = (edge_attr * self.att_edge).sum(dim=-1)
             alpha = alpha + alpha_edge
         
-        alpha = F.leaky_relu(alpha, 0.2)
+        alpha = F.leaky_relu(alpha, Settings.Model.LEAKY_RELU_SLOPE)
         alpha = softmax(alpha, edge_index_i, num_nodes=size_i)
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
         

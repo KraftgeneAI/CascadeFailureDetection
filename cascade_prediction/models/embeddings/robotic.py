@@ -7,47 +7,54 @@ Processes visual data, thermal imagery, and sensor readings from robotic inspect
 import torch
 import torch.nn as nn
 
+from cascade_prediction.data.generator.config import Settings
+
 
 class RoboticEmbedding(nn.Module):
     """Embedding network for robotic sensor data (φ_robot)."""
     
-    def __init__(self, visual_channels: int = 3, thermal_channels: int = 1,
-                 sensor_features: int = 12, embedding_dim: int = 128):
+    def __init__(
+        self,
+        visual_channels: int = Settings.Embedding.ROBOT_VISUAL_CHANNELS,
+        thermal_channels: int = Settings.Embedding.ROBOT_THERMAL_CHANNELS,
+        sensor_features: int = Settings.Embedding.ROBOT_SENSOR_FEATURES,
+        embedding_dim: int = Settings.Model.EMBEDDING_DIM
+    ):
         super(RoboticEmbedding, self).__init__()
-        
+
         self.visual_channels = visual_channels
         self.visual_cnn = nn.Sequential(
             nn.Conv2d(visual_channels, 16, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Dropout2d(0.2),
+            nn.Dropout2d(Settings.Embedding.DROPOUT_CNN),
             nn.MaxPool2d(2),
-            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.Conv2d(16, Settings.Embedding.ROBOT_VIS_HIDDEN, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Dropout2d(0.2),
+            nn.Dropout2d(Settings.Embedding.DROPOUT_CNN),
             nn.AdaptiveAvgPool2d((1, 1))
         )
-        
+
         self.thermal_cnn = nn.Sequential(
             nn.Conv2d(thermal_channels, 8, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Dropout2d(0.2),
+            nn.Dropout2d(Settings.Embedding.DROPOUT_CNN),
             nn.MaxPool2d(2),
-            nn.Conv2d(8, 16, kernel_size=3, padding=1),
+            nn.Conv2d(8, Settings.Embedding.ROBOT_THERM_HIDDEN, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Dropout2d(0.2),
+            nn.Dropout2d(Settings.Embedding.DROPOUT_CNN),
             nn.AdaptiveAvgPool2d((1, 1))
         )
-        
+
         self.sensor_encoder = nn.Sequential(
-            nn.Linear(sensor_features, 32),
+            nn.Linear(sensor_features, Settings.Embedding.ROBOT_SENSOR_HIDDEN),
             nn.ReLU(),
-            nn.Dropout(0.3)
+            nn.Dropout(Settings.Embedding.DROPOUT_FC)
         )
-        
+
         self.fusion = nn.Sequential(
-            nn.Linear(80, embedding_dim),
+            nn.Linear(Settings.Embedding.ROBOT_FUSION_INPUT, embedding_dim),
             nn.ReLU(),
-            nn.Dropout(0.3),
+            nn.Dropout(Settings.Embedding.DROPOUT_FC),
             nn.LayerNorm(embedding_dim)
         )
     
@@ -89,24 +96,24 @@ class RoboticEmbedding(nn.Module):
             for t in range(T):
                 vis_t = visual_data[:, t, :, :, :, :]
                 vis_flat = vis_t.reshape(B * N, *vis_t.shape[2:])
-                vis_feat = self.visual_cnn(vis_flat).reshape(B, N, 32)
+                vis_feat = self.visual_cnn(vis_flat).reshape(B, N, Settings.Embedding.ROBOT_VIS_HIDDEN)
                 vis_features_list.append(vis_feat)
-                
+
                 if thermal_data.dim() == 6:
-                     therm_t = thermal_data[:, t, :, :, :, :]
-                     therm_flat = therm_t.reshape(B * N, *therm_t.shape[2:])
-                     therm_feat = self.thermal_cnn(therm_flat).reshape(B, N, 16)
-                     therm_features_list.append(therm_feat)
+                    therm_t = thermal_data[:, t, :, :, :, :]
+                    therm_flat = therm_t.reshape(B * N, *therm_t.shape[2:])
+                    therm_feat = self.thermal_cnn(therm_flat).reshape(B, N, Settings.Embedding.ROBOT_THERM_HIDDEN)
+                    therm_features_list.append(therm_feat)
             
             vis_features = torch.stack(vis_features_list, dim=1)
             
             if len(therm_features_list) > 0:
                 therm_features = torch.stack(therm_features_list, dim=1)
             else:
-                therm_features = torch.zeros(B, T, N, 16, device=visual_data.device)
+                therm_features = torch.zeros(B, T, N, Settings.Embedding.ROBOT_THERM_HIDDEN, device=visual_data.device)
             
             sensor_flat = sensor_data.reshape(B * T * N, -1)
-            sensor_features = self.sensor_encoder(sensor_flat).reshape(B, T, N, 32)
+            sensor_features = self.sensor_encoder(sensor_flat).reshape(B, T, N, Settings.Embedding.ROBOT_SENSOR_HIDDEN)
             
             combined = torch.cat([vis_features, therm_features, sensor_features], dim=-1)
             combined_flat = combined.reshape(B * T * N, -1)
@@ -117,7 +124,7 @@ class RoboticEmbedding(nn.Module):
             B, N = visual_data.size(0), visual_data.size(1)
             
             vis_flat = visual_data.reshape(B * N, *visual_data.shape[2:])
-            vis_features = self.visual_cnn(vis_flat).reshape(B, N, 32)
+            vis_features = self.visual_cnn(vis_flat).reshape(B, N, Settings.Embedding.ROBOT_VIS_HIDDEN)
             
             if thermal_data.dim() == 4:
                 thermal_data = thermal_data.permute(0, 2, 1, 3)

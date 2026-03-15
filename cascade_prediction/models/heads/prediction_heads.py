@@ -17,15 +17,17 @@ This module contains all specialized prediction heads:
 import torch
 import torch.nn as nn
 
+from cascade_prediction.data.generator.config import Settings
+
 
 class FailureProbabilityHead(nn.Module):
     """
     Predicts node failure probability.
-    
+
     Output: [batch_size, num_nodes, 1] with sigmoid activation (0-1 range)
     """
-    
-    def __init__(self, hidden_dim: int, dropout: float = 0.4):
+
+    def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_HIGH):
         super(FailureProbabilityHead, self).__init__()
         
         self.head = nn.Sequential(
@@ -50,14 +52,14 @@ class FailureProbabilityHead(nn.Module):
 class VoltageHead(nn.Module):
     """
     Predicts node voltages (per-unit).
-    
+
     Physics-informed: Must predict any positive voltage value.
     No hard-coded scaling - learns from data.
-    
+
     Output: [batch_size, num_nodes, 1] with ReLU activation (positive values)
     """
-    
-    def __init__(self, hidden_dim: int, dropout: float = 0.3):
+
+    def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_LOW):
         super(VoltageHead, self).__init__()
         
         self.head = nn.Sequential(
@@ -82,14 +84,14 @@ class VoltageHead(nn.Module):
 class AngleHead(nn.Module):
     """
     Predicts node voltage angles (radians).
-    
+
     Physics-informed: Predicts small radian values.
     Tanh activation provides good range [-1, 1] for typical angles.
-    
+
     Output: [batch_size, num_nodes, 1] with tanh activation
     """
-    
-    def __init__(self, hidden_dim: int, dropout: float = 0.3):
+
+    def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_LOW):
         super(AngleHead, self).__init__()
         
         self.head = nn.Sequential(
@@ -114,14 +116,14 @@ class AngleHead(nn.Module):
 class FrequencyHead(nn.Module):
     """
     Predicts system frequency (Hz).
-    
+
     Physics-informed: Must predict any positive frequency value.
     No hard-coded scaling - learns from data.
-    
+
     Output: [batch_size, 1, 1] with ReLU activation (positive values)
     """
-    
-    def __init__(self, hidden_dim: int, dropout: float = 0.4):
+
+    def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_HIGH):
         super(FrequencyHead, self).__init__()
         
         self.head = nn.Sequential(
@@ -146,13 +148,13 @@ class FrequencyHead(nn.Module):
 class TemperatureHead(nn.Module):
     """
     Predicts node/line temperatures.
-    
+
     Physics-informed: Temperature must be positive.
-    
+
     Output: [batch_size, num_nodes, 1] with ReLU activation (positive values)
     """
-    
-    def __init__(self, hidden_dim: int, dropout: float = 0.3):
+
+    def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_LOW):
         super(TemperatureHead, self).__init__()
         
         self.head = nn.Sequential(
@@ -177,14 +179,14 @@ class TemperatureHead(nn.Module):
 class LineFlowHead(nn.Module):
     """
     Predicts reactive power flow on transmission lines.
-    
+
     Physics-informed: Can be positive or negative (bidirectional flow).
     No activation - linear output.
-    
+
     Output: [batch_size, num_edges, 1]
     """
-    
-    def __init__(self, hidden_dim: int, dropout: float = 0.3):
+
+    def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_LOW):
         super(LineFlowHead, self).__init__()
         
         self.head = nn.Sequential(
@@ -210,14 +212,14 @@ class LineFlowHead(nn.Module):
 class ReactiveFlowHead(nn.Module):
     """
     Predicts reactive power at nodes.
-    
+
     Physics-informed: Can be positive or negative.
     No activation - linear output.
-    
+
     Output: [batch_size, num_nodes, 1]
     """
-    
-    def __init__(self, hidden_dim: int, dropout: float = 0.3):
+
+    def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_LOW):
         super(ReactiveFlowHead, self).__init__()
         
         self.head = nn.Sequential(
@@ -242,14 +244,14 @@ class ReactiveFlowHead(nn.Module):
 class ActivePowerLineFlowHead(nn.Module):
     """
     Predicts active power flow on transmission lines.
-    
+
     Physics-informed: Can be positive or negative (bidirectional flow).
     No activation - linear output.
-    
+
     Output: [batch_size, num_edges, 1]
     """
-    
-    def __init__(self, hidden_dim: int, dropout: float = 0.3):
+
+    def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_LOW):
         super(ActivePowerLineFlowHead, self).__init__()
         
         self.head = nn.Sequential(
@@ -275,7 +277,7 @@ class ActivePowerLineFlowHead(nn.Module):
 class RiskHead(nn.Module):
     """
     Predicts seven-dimensional risk assessment.
-    
+
     Dimensions:
     1. Threat level
     2. Vulnerability
@@ -284,18 +286,18 @@ class RiskHead(nn.Module):
     5. Response capability
     6. Safety margin
     7. Urgency
-    
-    Output: [batch_size, num_nodes, 7] with sigmoid activation (0-1 range)
+
+    Output: [batch_size, num_nodes, Settings.Model.RISK_DIM] with sigmoid activation (0-1 range)
     """
-    
-    def __init__(self, hidden_dim: int, dropout: float = 0.4):
+
+    def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_HIGH):
         super(RiskHead, self).__init__()
-        
+
         self.head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 7),
+            nn.Linear(hidden_dim // 2, Settings.Model.RISK_DIM),
             nn.Sigmoid()
         )
     
@@ -313,14 +315,14 @@ class RiskHead(nn.Module):
 class TimingHead(nn.Module):
     """
     Predicts cascade failure timing (time-to-failure for each node).
-    
+
     Direct node-based timing prediction using Softplus activation
     to ensure positive time values.
-    
+
     Output: [batch_size, num_nodes, 1] with softplus activation (positive values)
     """
-    
-    def __init__(self, hidden_dim: int, dropout: float = 0.4):
+
+    def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_HIGH):
         super(TimingHead, self).__init__()
         
         self.head = nn.Sequential(

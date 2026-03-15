@@ -28,6 +28,7 @@ from pathlib import Path
 from cascade_prediction.models import UnifiedCascadePredictionModel, PhysicsInformedLoss
 from cascade_prediction.data import CascadeDataset, collate_cascade_batch
 from cascade_prediction.training import Trainer
+from cascade_prediction.data.generator.config import Settings
 
 
 def main():
@@ -50,45 +51,45 @@ def main():
     
     # Training parameters
     parser.add_argument(
-        '--epochs', type=int, default=100,
+        '--epochs', type=int, default=Settings.Training.EPOCHS,
         help="Number of epochs to train"
     )
     parser.add_argument(
-        '--batch_size', type=int, default=8,
+        '--batch_size', type=int, default=Settings.Training.BATCH_SIZE,
         help="Training and validation batch size"
     )
     parser.add_argument(
-        '--lr', type=float, default=0.0001,
+        '--lr', type=float, default=Settings.Training.LEARNING_RATE,
         help="Initial learning rate"
     )
     parser.add_argument(
-        '--grad_clip', type=float, default=20.0,
+        '--grad_clip', type=float, default=Settings.Training.GRAD_CLIP,
         help="Max gradient norm for clipping"
     )
     parser.add_argument(
-        '--patience', type=int, default=25,
+        '--patience', type=int, default=Settings.Training.PATIENCE,
         help="Epochs for early stopping patience"
     )
-    
+
     # Model parameters
     parser.add_argument(
-        '--embedding_dim', type=int, default=128,
+        '--embedding_dim', type=int, default=Settings.Model.EMBEDDING_DIM,
         help="Embedding dimension"
     )
     parser.add_argument(
-        '--hidden_dim', type=int, default=128,
+        '--hidden_dim', type=int, default=Settings.Model.HIDDEN_DIM,
         help="Hidden dimension"
     )
     parser.add_argument(
-        '--num_gnn_layers', type=int, default=3,
+        '--num_gnn_layers', type=int, default=Settings.Model.NUM_GNN_LAYERS,
         help="Number of GNN layers"
     )
     parser.add_argument(
-        '--heads', type=int, default=4,
+        '--heads', type=int, default=Settings.Model.HEADS,
         help="Number of attention heads"
     )
     parser.add_argument(
-        '--dropout', type=float, default=0.5,
+        '--dropout', type=float, default=Settings.Model.DROPOUT_TRAIN,
         help="Dropout rate"
     )
     
@@ -100,11 +101,11 @@ def main():
     
     # Physics parameters
     parser.add_argument(
-        '--base_mva', type=float, default=100.0,
+        '--base_mva', type=float, default=Settings.Dataset.BASE_MVA,
         help="Base MVA for physics normalization"
     )
     parser.add_argument(
-        '--base_freq', type=float, default=60.0,
+        '--base_freq', type=float, default=Settings.Dataset.BASE_FREQUENCY,
         help="Base frequency (Hz) for physics normalization"
     )
     
@@ -255,7 +256,7 @@ def main():
         train_loader=train_loader,
         criterion=None,  # Will create dummy criterion internally
         device=DEVICE,
-        num_batches=20,  # Use 20 batches for calibration
+        num_batches=Settings.Loss.CALIB_NUM_BATCHES,
         model_outputs_logits=False,
         base_mva=args.base_mva,
         base_freq=args.base_freq
@@ -264,19 +265,19 @@ def main():
     # Create loss function with calibrated weights
     if calibrated_lambdas:
         criterion = PhysicsInformedLoss(
-            lambda_prediction=calibrated_lambdas.get('lambda_prediction', 1.0),
-            lambda_powerflow=calibrated_lambdas.get('lambda_powerflow', 0.1),
-            lambda_temperature=calibrated_lambdas.get('lambda_temperature', 0.05),
-            lambda_frequency=calibrated_lambdas.get('lambda_frequency', 0.08) ,
-            lambda_reactive=calibrated_lambdas.get('lambda_reactive', 0.1) ,
-            lambda_risk=calibrated_lambdas.get('lambda_risk', 0.1) ,
-            lambda_timing=calibrated_lambdas.get('lambda_timing', 0.1) ,
-            lambda_active_flow=calibrated_lambdas.get('lambda_active_flow', 0.1) ,
-            lambda_voltage=calibrated_lambdas.get('lambda_voltage', 1.0),
-            lambda_capacity=calibrated_lambdas.get('lambda_capacity', 0.05) ,
+            lambda_prediction=calibrated_lambdas.get('lambda_prediction', Settings.Loss.LAMBDA_PREDICTION),
+            lambda_powerflow=calibrated_lambdas.get('lambda_powerflow', Settings.Loss.LAMBDA_POWERFLOW),
+            lambda_temperature=calibrated_lambdas.get('lambda_temperature', Settings.Loss.LAMBDA_TEMPERATURE),
+            lambda_frequency=calibrated_lambdas.get('lambda_frequency', Settings.Loss.LAMBDA_FREQUENCY),
+            lambda_reactive=calibrated_lambdas.get('lambda_reactive', Settings.Loss.LAMBDA_REACTIVE),
+            lambda_risk=calibrated_lambdas.get('lambda_risk', Settings.Loss.LAMBDA_RISK),
+            lambda_timing=calibrated_lambdas.get('lambda_timing', Settings.Loss.LAMBDA_TIMING),
+            lambda_active_flow=calibrated_lambdas.get('lambda_active_flow', Settings.Loss.LAMBDA_ACTIVE_FLOW),
+            lambda_voltage=calibrated_lambdas.get('lambda_voltage', Settings.Loss.LAMBDA_VOLTAGE),
+            lambda_capacity=calibrated_lambdas.get('lambda_capacity', Settings.Loss.LAMBDA_CAPACITY),
             pos_weight=1.0,
-            focal_alpha=0.25,
-            focal_gamma=2.0,
+            focal_alpha=Settings.Loss.FOCAL_ALPHA_TRAIN,
+            focal_gamma=Settings.Loss.FOCAL_GAMMA,
             label_smoothing=0.0,
             use_logits=False,
             base_mva=args.base_mva,
@@ -296,19 +297,19 @@ def main():
     else:
         print("[WARNING] Calibration failed, using default lambda values")
         criterion = PhysicsInformedLoss(
-            lambda_prediction=1.0,
-            lambda_powerflow=0.1,
-            lambda_temperature=0.05,
-            lambda_frequency=0.08,
-            lambda_reactive=0.1,
-            lambda_risk=0.1,
-            lambda_timing=0.1 ,
-            lambda_active_flow=0.1 ,
-            lambda_voltage=1.0 ,
-            lambda_capacity=0.05 ,
+            lambda_prediction=Settings.Loss.LAMBDA_PREDICTION,
+            lambda_powerflow=Settings.Loss.LAMBDA_POWERFLOW,
+            lambda_temperature=Settings.Loss.LAMBDA_TEMPERATURE,
+            lambda_frequency=Settings.Loss.LAMBDA_FREQUENCY,
+            lambda_reactive=Settings.Loss.LAMBDA_REACTIVE,
+            lambda_risk=Settings.Loss.LAMBDA_RISK,
+            lambda_timing=Settings.Loss.LAMBDA_TIMING,
+            lambda_active_flow=Settings.Loss.LAMBDA_ACTIVE_FLOW,
+            lambda_voltage=Settings.Loss.LAMBDA_VOLTAGE,
+            lambda_capacity=Settings.Loss.LAMBDA_CAPACITY,
             pos_weight=1.0,
-            focal_alpha=0.15,
-            focal_gamma=2.0,
+            focal_alpha=Settings.Loss.FOCAL_ALPHA_FALLBACK,
+            focal_gamma=Settings.Loss.FOCAL_GAMMA,
             label_smoothing=0.0,
             use_logits=False,
             base_mva=args.base_mva,
@@ -359,7 +360,7 @@ def main():
             
             # OPTIONAL: Reset Scheduler to forget "patience" history
             trainer.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                trainer.optimizer, 'min', patience=5
+                trainer.optimizer, 'min', patience=Settings.Training.SCHEDULER_PATIENCE
             )
             print("[PHASE 2 RESET] Scheduler reset.")
             # ---------------------------------------

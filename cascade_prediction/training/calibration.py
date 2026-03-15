@@ -14,16 +14,17 @@ from tqdm import tqdm
 
 # Import the loss function
 from cascade_prediction.models import PhysicsInformedLoss
+from cascade_prediction.data.generator.config import Settings
 
 def calibrate_loss_weights(
     model: nn.Module,
     train_loader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
-    num_batches: int = 20,
+    num_batches: int = Settings.Loss.CALIB_NUM_BATCHES,
     model_outputs_logits: bool = False,
-    base_mva: float = 100.0,
-    base_freq: float = 60.0
+    base_mva: float = Settings.Dataset.BASE_MVA,
+    base_freq: float = Settings.Dataset.BASE_FREQUENCY
 ) -> Dict[str, float]:
     """
     Run a few batches to find the average raw loss for each component.
@@ -66,9 +67,9 @@ def calibrate_loss_weights(
     # Set model to eval mode for calibration
     model.eval()
     
-    # Create dummy criterion with all weights = 1.0 (matching original train_model.py)
+    # Create dummy criterion with calibration weights (matching original train_model.py)
     dummy_criterion = PhysicsInformedLoss(
-        lambda_prediction=50.0,
+        lambda_prediction=Settings.Loss.CALIB_LAMBDA_PREDICTION,
         lambda_powerflow=1.0,
         lambda_temperature=1.0,
         lambda_frequency=1.0,
@@ -175,13 +176,13 @@ def calibrate_loss_weights(
     
     # Use prediction loss as target magnitude
     target_magnitude = avg_losses.get('prediction', 0.1)
-    if target_magnitude < 1e-9:
-        target_magnitude = 1e-9
-    
+    if target_magnitude < Settings.Loss.CALIB_MIN_MAGNITUDE:
+        target_magnitude = Settings.Loss.CALIB_MIN_MAGNITUDE
+
     calibrated_lambdas = {}
-    
-    # Add prediction lambda (typically 1.0, but can be adjusted)
-    calibrated_lambdas['lambda_prediction'] = 50.0
+
+    # Add prediction lambda (boosted weight for calibration)
+    calibrated_lambdas['lambda_prediction'] = Settings.Loss.CALIB_LAMBDA_PREDICTION
     
     # Define which loss components to calibrate (matching original train_model.py)
     physics_loss_keys = [

@@ -7,42 +7,60 @@ Processes satellite imagery, weather sequences, and threat indicators.
 import torch
 import torch.nn as nn
 
+from cascade_prediction.data.generator.config import Settings
+
 
 class EnvironmentalEmbedding(nn.Module):
     """Embedding network for environmental data (φ_env)."""
     
-    def __init__(self, satellite_channels: int = 12, weather_features: int = 80,
-                 threat_features: int = 6, embedding_dim: int = 128):
+    def __init__(
+        self,
+        satellite_channels: int = Settings.Embedding.ENV_SATELLITE_CHANNELS,
+        weather_features: int = Settings.Embedding.ENV_WEATHER_FEATURES,
+        threat_features: int = Settings.Embedding.ENV_THREAT_FEATURES,
+        embedding_dim: int = Settings.Model.EMBEDDING_DIM
+    ):
         super(EnvironmentalEmbedding, self).__init__()
-        
+
         # Satellite imagery CNN
         self.satellite_cnn = nn.Sequential(
             nn.Conv2d(satellite_channels, 16, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Dropout2d(0.2),
+            nn.Dropout2d(Settings.Embedding.DROPOUT_CNN),
             nn.MaxPool2d(2),
-            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.Conv2d(16, Settings.Embedding.ENV_SAT_HIDDEN, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Dropout2d(0.2),
+            nn.Dropout2d(Settings.Embedding.DROPOUT_CNN),
             nn.AdaptiveAvgPool2d((1, 1))
         )
-        
+
         # Weather temporal processing
-        self.weather_lstm = nn.LSTM(weather_features, 32, num_layers=2, batch_first=True, dropout=0.3)
-        
+        self.weather_lstm = nn.LSTM(
+            weather_features,
+            Settings.Embedding.ENV_WEATHER_HIDDEN,
+            num_layers=Settings.Embedding.ENV_WEATHER_LSTM_LAYERS,
+            batch_first=True,
+            dropout=Settings.Embedding.DROPOUT_FC
+        )
+
         # Threat encoder
         self.threat_encoder = nn.Sequential(
-            nn.Linear(threat_features, 32),
+            nn.Linear(threat_features, Settings.Embedding.ENV_THREAT_HIDDEN),
             nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(32, 32)
+            nn.Dropout(Settings.Embedding.DROPOUT_FC),
+            nn.Linear(Settings.Embedding.ENV_THREAT_HIDDEN, Settings.Embedding.ENV_THREAT_HIDDEN)
         )
-        
+
         # Fusion layer
+        fusion_input = (
+            Settings.Embedding.ENV_SAT_HIDDEN
+            + Settings.Embedding.ENV_WEATHER_HIDDEN
+            + Settings.Embedding.ENV_THREAT_HIDDEN
+        )
         self.fusion = nn.Sequential(
-            nn.Linear(32 + 32 + 32, embedding_dim),
+            nn.Linear(fusion_input, embedding_dim),
             nn.ReLU(),
-            nn.Dropout(0.3),
+            nn.Dropout(Settings.Embedding.DROPOUT_FC),
             nn.LayerNorm(embedding_dim)
         )
     
