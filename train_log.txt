@@ -1,0 +1,603 @@
+  Calculated weights -> Pos: 3.00, Neg: 1.50
+
+Initializing model...
+  Total parameters: 823,680
+  Trainable parameters: 823,680
+
+Initializing loss function...
+
+================================================================================
+STARTING DYNAMIC LOSS WEIGHT CALIBRATION
+================================================================================
+Running loss calibration for 20 batches...
+C:\Users\toron\AppData\Roaming\Python\Python313\site-packages\transformers\utils\hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+  Average raw loss components (unweighted):
+    active_flow         :   0.849732
+    capacity            :   0.000000
+    frequency           :   1.481137
+    powerflow           :   0.222687
+    prediction          :   0.107698
+    reactive            :   1.018667
+    risk                :   0.155569
+    temperature         :   0.082393
+    timing              :   8.412486
+    voltage             :   0.179936
+================================================================================
+CALIBRATION COMPLETE
+================================================================================
+
+Balancing loss weights dynamically...
+  Target Magnitude (from prediction loss): 0.1077
+
+  Final Loss Weights (Fully Dynamic):
+  Component            | Raw Loss     | Final Lambda | Weighted Loss
+  -------------------- | ------------ | ------------ | --------------------
+  prediction           | 0.1077       | 50.0000      |       5.3849
+  powerflow            | 0.2227       | 0.4836       |       0.1077
+  temperature          | 0.0824       | 1.3071       |       0.1077
+  voltage              | 0.1799       | 0.5985       |       0.1077
+  frequency            | 1.4811       | 0.0727       |       0.1077
+  reactive             | 1.0187       | 0.1057       |       0.1077
+  risk                 | 0.1556       | 0.6923       |       0.1077
+  timing               | 8.4125       | 0.0128       |       0.1077
+  active_flow          | 0.8497       | 0.1267       |       0.1077
+  capacity             | 0.0000       | 1.0000       |       0.0000
+
+✓ Loss weights calibrated successfully.
+  Calibrated loss weights :
+    Prediction:      50.000000
+    Powerflow:       0.483629
+    Temperature:     1.307124
+    Frequency:       0.072713
+    Reactive:        0.105724
+    Risk:            0.692281
+    Timing:          0.012802
+    Active flow:     0.126743
+    Voltage:         0.598534
+    Capacity:        1.000000
+
+Initializing trainer...
+
+================================================================================
+STARTING TRAINING
+================================================================================
+
+
+Epoch 1/100
+--------------------------------------------------------------------------------
+Training:   0%|                                                                                                                            | 0/14 [00:00<?, ?it/s] 
+================================================================================
+MODEL OUTPUT VALIDATION (First Batch)
+================================================================================
+Checking required outputs for loss calculation...
+  ✓ failure_probability: shape (8, 118, 1) (Matches expected)
+  ✓ voltages: shape (8, 118, 1) (Matches expected)
+  ✓ angles: shape (8, 118, 1) (Matches expected)
+  ✓ line_flows: shape (8, 686, 1) (Matches expected)
+  ✓ frequency: shape (8, 1, 1) (Matches expected)
+  ✓ risk_scores: shape (8, 118, 7) (Matches expected)
+  ✓ cascade_timing: shape (8, 118, 1) (Matches expected)
+  ✓ temperature: shape (8, 118, 1) (Matches expected)
+  ✓ reactive_nodes: shape (8, 118, 1) (Matches expected)
+
+Temporal sequence detected: B=8, T=18, N=118
+  ✓ 3-layer LSTM IS BEING UTILIZED.
+================================================================================
+
+Training (Loss: 6.0499, Grad: 9.94): 100%|█████████████████████████████████| 14/14 [00:11<00:00,  1.22it/s, cF1=0.636, nF1=0.491, rMSE=0.142, pL=0.077, tL=11.146]
+
+  Average gradient norm: inf
+  Average loss components:
+    prediction: 0.075487
+    voltage: 0.483201
+    reactive: 4.722811
+    powerflow: 0.198766
+    active_flow: 0.863051
+    temperature: 0.081466
+    frequency: 1.428691
+    risk: 0.141971
+    timing: 8.009365
+    capacity: 0.000000
+Validation:   0%|                                                                                                                           | 0/3 [00:00<?, ?it/s]C:\Users\toron\AppData\Roaming\Python\Python313\site-packages\transformers\utils\hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+Validation: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:05<00:00,  1.77s/it, loss=3.6085]
+
+Epoch 1 Results:
+  Train Loss: 5.1796 | Val Loss: 3.5615
+
+  VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 0.5000 (Thresh: 0.05)
+    Node F1:    0.3441 (Thresh: 0.05)
+    Node Prec:  0.2078 | Node Rec: 1.0000
+  ★ SAVED BEST F1 MODEL (Avg F1: 0.3441 | cF1: 0.500, nF1: 0.344)
+  ✓ Saved best model (New best Val Loss: 3.5615)
+
+Epoch 2/100
+--------------------------------------------------------------------------------
+Training (Loss: 2.0972, Grad: inf): 100%|███████████████████████████████████| 14/14 [00:08<00:00,  1.70it/s, cF1=0.654, nF1=0.515, rMSE=0.123, pL=0.027, tL=0.000] 
+
+  Average gradient norm: inf
+  Average loss components:
+    prediction: 0.063428
+    voltage: 0.170416
+    reactive: 4.225700
+    powerflow: 0.177727
+    active_flow: 0.858137
+    temperature: 0.081233
+    frequency: 1.499132
+    risk: 0.122879
+    timing: 6.906297
+    capacity: 0.000000
+Validation: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:02<00:00,  1.41it/s, loss=3.3478] 
+
+Epoch 2 Results:
+  Train Loss: 4.3035 | Val Loss: 3.3364
+
+  VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 0.5600 (Thresh: 0.30)
+    Node F1:    0.1702 (Thresh: 0.35)
+    Node Prec:  0.9796 | Node Rec: 0.0932
+  ✓ Saved best model (New best Val Loss: 3.3364)
+
+Epoch 3/100
+--------------------------------------------------------------------------------
+Training (Loss: 9.1867, Grad: inf): 100%|███████████████████████████████████| 14/14 [00:09<00:00,  1.53it/s, cF1=0.679, nF1=0.557, rMSE=0.124, pL=0.144, tL=0.000] 
+
+  Average gradient norm: inf
+  Average loss components:
+    prediction: 0.070773
+    voltage: 0.116010
+    reactive: 4.666182
+    powerflow: 0.197237
+    active_flow: 0.859177
+    temperature: 0.076852
+    frequency: 1.500717
+    risk: 0.123546
+    timing: 6.876028
+    capacity: 0.000000
+Validation: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:02<00:00,  1.50it/s, loss=3.4159] 
+
+Epoch 3 Results:
+  Train Loss: 4.6888 | Val Loss: 3.4017
+
+  VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 0.5600 (Thresh: 0.25)
+    Node F1:    0.4066 (Thresh: 0.35)
+    Node Prec:  0.2569 | Node Rec: 0.9748
+  ★ SAVED BEST F1 MODEL (Avg F1: 0.4066 | cF1: 0.560, nF1: 0.407)
+
+Epoch 4/100
+--------------------------------------------------------------------------------
+Training (Loss: 1.2267, Grad: 8.07): 100%|██████████████████████████████████| 14/14 [00:08<00:00,  1.66it/s, cF1=0.671, nF1=0.566, rMSE=0.105, pL=0.012, tL=0.000] 
+
+  Average gradient norm: 9.3387
+  Average loss components:
+    prediction: 0.057301
+    voltage: 0.104772
+    reactive: 3.602765
+    powerflow: 0.158716
+    active_flow: 0.789747
+    temperature: 0.078156
+    frequency: 1.367097
+    risk: 0.104864
+    timing: 6.944657
+    capacity: 0.000000
+Validation: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:02<00:00,  1.45it/s, loss=3.0670] 
+
+Epoch 4 Results:
+  Train Loss: 3.8486 | Val Loss: 3.0908
+
+  VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 0.7778 (Thresh: 0.30)
+    Node F1:    0.6019 (Thresh: 0.30)
+    Node Prec:  0.5752 | Node Rec: 0.6311
+  ★ SAVED BEST F1 MODEL (Avg F1: 0.6019 | cF1: 0.778, nF1: 0.602)
+  ✓ Saved best model (New best Val Loss: 3.0908)
+
+Epoch 5/100
+--------------------------------------------------------------------------------
+Training (Loss: 1.1129, Grad: 6.67): 100%|██████████████████████████████████| 14/14 [00:08<00:00,  1.57it/s, cF1=0.627, nF1=0.547, rMSE=0.096, pL=0.010, tL=0.000] 
+
+  Average gradient norm: 9.3145
+  Average loss components:
+    prediction: 0.055098
+    voltage: 0.083162
+    reactive: 3.502682
+    powerflow: 0.147008
+    active_flow: 0.778001
+    temperature: 0.074127
+    frequency: 1.495081
+    risk: 0.095647
+    timing: 5.248892
+    capacity: 0.000000
+Validation: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:02<00:00,  1.09it/s, loss=3.0020]
+
+Epoch 5 Results:
+  Train Loss: 3.6837 | Val Loss: 2.9985
+
+  VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 1.0000 (Thresh: 0.35)
+    Node F1:    0.2089 (Thresh: 0.35)
+    Node Prec:  0.8841 | Node Rec: 0.1184
+  ✓ Saved best model (New best Val Loss: 2.9985)
+
+Epoch 6/100
+--------------------------------------------------------------------------------
+Training (Loss: 0.9046, Grad: 4.19): 100%|██████████████████████████████████| 14/14 [00:10<00:00,  1.36it/s, cF1=0.707, nF1=0.614, rMSE=0.095, pL=0.005, tL=0.000] 
+
+  Average gradient norm: 10.1218
+  Average loss components:
+    prediction: 0.055128
+    voltage: 0.085633
+    reactive: 3.847704
+    powerflow: 0.156413
+    active_flow: 0.786837
+    temperature: 0.071891
+    frequency: 1.476973
+    risk: 0.095431
+    timing: 6.053435
+    capacity: 0.000000
+Validation: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:02<00:00,  1.36it/s, loss=2.9648] 
+
+Epoch 6 Results:
+  Train Loss: 3.7348 | Val Loss: 2.8015
+
+  VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 0.9231 (Thresh: 0.40)
+    Node F1:    0.6714 (Thresh: 0.35)
+    Node Prec:  0.6173 | Node Rec: 0.7359
+  ★ SAVED BEST F1 MODEL (Avg F1: 0.6714 | cF1: 0.923, nF1: 0.671)
+  ✓ Saved best model (New best Val Loss: 2.8015)
+
+Epoch 7/100
+--------------------------------------------------------------------------------
+Training (Loss: 11.7869, Grad: 52.96): 100%|████████████████████████████████| 14/14 [00:10<00:00,  1.38it/s, cF1=0.729, nF1=0.604, rMSE=0.091, pL=0.205, tL=0.000] 
+
+  Average gradient norm: 15.5440
+  Average loss components:
+    prediction: 0.067711
+    voltage: 0.087448
+    reactive: 3.730253
+    powerflow: 0.151713
+    active_flow: 0.770982
+    temperature: 0.066051
+    frequency: 1.400512
+    risk: 0.091405
+    timing: 3.767966
+    capacity: 0.000000
+Validation: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:01<00:00,  1.55it/s, loss=3.1148] 
+
+Epoch 7 Results:
+  Train Loss: 4.3030 | Val Loss: 3.2417
+
+  VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 1.0000 (Thresh: 0.25)
+    Node F1:    0.3672 (Thresh: 0.25)
+    Node Prec:  0.8403 | Node Rec: 0.2350
+
+Epoch 8/100
+--------------------------------------------------------------------------------
+Training (Loss: 12.5653, Grad: 71.80): 100%|████████████████████████████████| 14/14 [00:10<00:00,  1.33it/s, cF1=0.654, nF1=0.622, rMSE=0.094, pL=0.216, tL=0.000] 
+
+  Average gradient norm: 16.7459
+  Average loss components:
+    prediction: 0.069327
+    voltage: 0.089904
+    reactive: 3.886227
+    powerflow: 0.158078
+    active_flow: 0.761574
+    temperature: 0.066513
+    frequency: 1.470343
+    risk: 0.094170
+    timing: 3.987701
+    capacity: 0.000000
+Validation: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:02<00:00,  1.30it/s, loss=2.9628] 
+
+Epoch 8 Results:
+  Train Loss: 4.4141 | Val Loss: 2.7894
+
+  VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 1.0000 (Thresh: 0.40)
+    Node F1:    0.7274 (Thresh: 0.35)
+    Node Prec:  0.5823 | Node Rec: 0.9689
+  ★ SAVED BEST F1 MODEL (Avg F1: 0.7274 | cF1: 1.000, nF1: 0.727)
+  ✓ Saved best model (New best Val Loss: 2.7894)
+
+Epoch 9/100
+--------------------------------------------------------------------------------
+Training (Loss: 6.0009, Grad: 55.88): 100%|█████████████████████████████████| 14/14 [00:11<00:00,  1.24it/s, cF1=0.662, nF1=0.613, rMSE=0.084, pL=0.109, tL=1.037] 
+
+  Average gradient norm: 18.4301
+  Average loss components:
+    prediction: 0.055490
+    voltage: 0.098157
+    reactive: 2.990875
+    powerflow: 0.119319
+    active_flow: 0.677374
+    temperature: 0.060535
+    frequency: 1.256601
+    risk: 0.084094
+    timing: 5.369109
+    capacity: 0.000000
+Validation: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:02<00:00,  1.34it/s, loss=2.6336] 
+
+Epoch 9 Results:
+  Train Loss: 3.5905 | Val Loss: 2.5460
+
+  VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 1.0000 (Thresh: 0.35)
+    Node F1:    0.6971 (Thresh: 0.30)
+    Node Prec:  0.6014 | Node Rec: 0.8291
+  ✓ Saved best model (New best Val Loss: 2.5460)
+
+Epoch 10/100
+--------------------------------------------------------------------------------
+Training (Loss: 7.5273, Grad: 70.65): 100%|█████████████████████████████████| 14/14 [00:10<00:00,  1.38it/s, cF1=0.780, nF1=0.701, rMSE=0.092, pL=0.121, tL=0.000] 
+
+  Average gradient norm: 24.4491
+  Average loss components:
+    prediction: 0.062255
+    voltage: 0.089615
+    reactive: 4.540785
+    powerflow: 0.181853
+    active_flow: 0.844963
+    temperature: 0.060705
+    frequency: 1.490311
+    risk: 0.091709
+    timing: 4.140070
+    capacity: 0.000000
+Validation: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:02<00:00,  1.35it/s, loss=2.9248] 
+
+Epoch 10 Results:
+  Train Loss: 4.1457 | Val Loss: 2.4216
+
+  VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 1.0000 (Thresh: 0.45)
+    Node F1:    0.7397 (Thresh: 0.35)
+    Node Prec:  0.6083 | Node Rec: 0.9437
+  ★ SAVED BEST F1 MODEL (Avg F1: 0.7397 | cF1: 1.000, nF1: 0.740)
+  ✓ Saved best model (New best Val Loss: 2.4216)
+
+Epoch 11/100
+--------------------------------------------------------------------------------
+Training (Loss: 0.9022, Grad: 10.85): 100%|█████████████████████████████████| 14/14 [00:10<00:00,  1.33it/s, cF1=0.785, nF1=0.775, rMSE=0.077, pL=0.008, tL=0.000] 
+
+  Average gradient norm: 17.7381
+  Average loss components:
+    prediction: 0.044932
+    voltage: 0.092670
+    reactive: 3.592893
+    powerflow: 0.146146
+    active_flow: 0.756633
+    temperature: 0.057463
+    frequency: 1.372000
+    risk: 0.077081
+    timing: 3.844909
+    capacity: 0.000000
+Validation: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:02<00:00,  1.35it/s, loss=2.8557] 
+
+Epoch 11 Results:
+  Train Loss: 3.1260 | Val Loss: 2.5454
+
+  VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 1.0000 (Thresh: 0.30)
+    Node F1:    0.7509 (Thresh: 0.20)
+    Node Prec:  0.6154 | Node Rec: 0.9631
+  ★ SAVED BEST F1 MODEL (Avg F1: 0.7509 | cF1: 1.000, nF1: 0.751)
+
+Epoch 12/100
+--------------------------------------------------------------------------------
+Training (Loss: 0.6990, Grad: 4.32): 100%|██████████████████████████████████| 14/14 [00:09<00:00,  1.55it/s, cF1=0.675, nF1=0.693, rMSE=0.069, pL=0.004, tL=0.000] 
+
+  Average gradient norm: 26.9876
+  Average loss components:
+    prediction: 0.041586
+    voltage: 0.081063
+    reactive: 3.802112
+    powerflow: 0.153353
+    active_flow: 0.791880
+    temperature: 0.056580
+    frequency: 1.428029
+    risk: 0.069268
+    timing: 3.455268
+    capacity: 0.000000
+Validation: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:02<00:00,  1.38it/s, loss=2.6653] 
+
+Epoch 12 Results:
+  Train Loss: 2.9743 | Val Loss: 2.4836
+
+  VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 1.0000 (Thresh: 0.20)
+    Node F1:    0.7669 (Thresh: 0.15)
+    Node Prec:  0.6220 | Node Rec: 1.0000
+  ★ SAVED BEST F1 MODEL (Avg F1: 0.7669 | cF1: 1.000, nF1: 0.767)
+
+Epoch 13/100
+--------------------------------------------------------------------------------
+Training (Loss: 5.5764, Grad: 78.22): 100%|█████████████████████████████████| 14/14 [00:09<00:00,  1.45it/s, cF1=0.636, nF1=0.610, rMSE=0.073, pL=0.080, tL=0.000] 
+
+  Average gradient norm: 20.5422
+  Average loss components:
+    prediction: 0.039988
+    voltage: 0.082628
+    reactive: 4.177855
+    powerflow: 0.171098
+    active_flow: 0.813571
+    temperature: 0.054354
+    frequency: 1.388574
+    risk: 0.072621
+    timing: 3.152341
+    capacity: 0.000000
+Validation: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:01<00:00,  1.64it/s, loss=2.5840] 
+
+Epoch 13 Results:
+  Train Loss: 2.9391 | Val Loss: 2.1077
+
+  VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 1.0000 (Thresh: 0.15)
+    Node F1:    0.7669 (Thresh: 0.30)
+    Node Prec:  0.6258 | Node Rec: 0.9903
+  ✓ Saved best model (New best Val Loss: 2.1077)
+
+Epoch 14/100
+--------------------------------------------------------------------------------
+Training (Loss: 3.7829, Grad: 119.81): 100%|████████████████████████████████| 14/14 [00:08<00:00,  1.65it/s, cF1=0.712, nF1=0.784, rMSE=0.067, pL=0.069, tL=0.000] 
+
+  Average gradient norm: 34.2820
+  Average loss components:
+    prediction: 0.045375
+    voltage: 0.078658
+    reactive: 4.012062
+    powerflow: 0.162668
+    active_flow: 0.782317
+    temperature: 0.053127
+    frequency: 1.393207
+    risk: 0.067329
+    timing: 4.434892
+    capacity: 0.000000
+Validation: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:01<00:00,  1.73it/s, loss=2.4280] 
+
+Epoch 14 Results:
+  Train Loss: 3.1919 | Val Loss: 2.0530
+
+  VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 1.0000 (Thresh: 0.15)
+    Node F1:    0.7683 (Thresh: 0.30)
+    Node Prec:  0.6284 | Node Rec: 0.9883
+  ★ SAVED BEST F1 MODEL (Avg F1: 0.7683 | cF1: 1.000, nF1: 0.768)
+  ✓ Saved best model (New best Val Loss: 2.0530)
+
+Epoch 15/100
+--------------------------------------------------------------------------------
+Training (Loss: 4.7823, Grad: 34.95): 100%|█████████████████████████████████| 14/14 [00:08<00:00,  1.61it/s, cF1=0.720, nF1=0.827, rMSE=0.062, pL=0.063, tL=0.000] 
+
+  Average gradient norm: 20.4427
+  Average loss components:
+    prediction: 0.041633
+    voltage: 0.076284
+    reactive: 4.531893
+    powerflow: 0.184843
+    active_flow: 0.855879
+    temperature: 0.050721
+    frequency: 1.278545
+    risk: 0.062029
+    timing: 3.701276
+    capacity: 0.000000
+Validation: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:01<00:00,  1.58it/s, loss=2.6909] 
+
+Epoch 15 Results:
+  Train Loss: 3.0539 | Val Loss: 2.0951
+
+  VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 1.0000 (Thresh: 0.15)
+    Node F1:    0.7621 (Thresh: 0.45)
+    Node Prec:  0.6288 | Node Rec: 0.9670
+
+Epoch 16/100
+--------------------------------------------------------------------------------
+Training (Loss: 0.6149, Grad: 7.41): 100%|██████████████████████████████████| 14/14 [00:08<00:00,  1.56it/s, cF1=0.662, nF1=0.719, rMSE=0.050, pL=0.002, tL=0.000] 
+
+  Average gradient norm: 25.7639
+  Average loss components:
+    prediction: 0.037195
+    voltage: 0.073326
+    reactive: 3.785795
+    powerflow: 0.154721
+    active_flow: 0.805747
+    temperature: 0.048988
+    frequency: 1.424203
+    risk: 0.050021
+    timing: 2.229620
+    capacity: 0.000000
+Validation: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:01<00:00,  1.54it/s, loss=2.3996] 
+
+Epoch 16 Results:
+  Train Loss: 2.7116 | Val Loss: 1.9899
+
+  VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 1.0000 (Thresh: 0.15)
+    Node F1:    0.7649 (Thresh: 0.40)
+    Node Prec:  0.6370 | Node Rec: 0.9573
+  ✓ Saved best model (New best Val Loss: 1.9899)
+
+Epoch 17/100
+--------------------------------------------------------------------------------
+Training (Loss: 5.2730, Grad: 95.03): 100%|████████████████████████████████| 14/14 [00:10<00:00,  1.38it/s, cF1=0.600, nF1=0.855, rMSE=0.063, pL=0.074, tL=10.732] 
+
+  Average gradient norm: 18.2606
+  Average loss components:
+    prediction: 0.033074
+    voltage: 0.080304
+    reactive: 3.364047
+    powerflow: 0.136073
+    active_flow: 0.744331
+    temperature: 0.047176
+    frequency: 1.287092
+    risk: 0.062868
+    timing: 3.052969
+    capacity: 0.000000
+Validation: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:01<00:00,  1.54it/s, loss=2.4088] 
+
+Epoch 17 Results:
+  Train Loss: 2.4555 | Val Loss: 2.0232
+
+  VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 1.0000 (Thresh: 0.10)
+    Node F1:    0.7053 (Thresh: 0.40)
+    Node Prec:  0.6616 | Node Rec: 0.7553
+
+Epoch 18/100
+--------------------------------------------------------------------------------
+Training (Loss: 0.5880, Grad: 1.15): 100%|██████████████████████████████████| 14/14 [00:09<00:00,  1.49it/s, cF1=0.609, nF1=0.789, rMSE=0.050, pL=0.001, tL=0.000] 
+
+  Average gradient norm: 37.9906
+  Average loss components:
+    prediction: 0.033445
+    voltage: 0.069036
+    reactive: 3.289767
+    powerflow: 0.135951
+    active_flow: 0.750203
+    temperature: 0.044083
+    frequency: 1.248772
+    risk: 0.049945
+    timing: 3.545036
+    capacity: 0.000000
+Validation: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:01<00:00,  1.51it/s, loss=3.0407] 
+
+Epoch 18 Results:
+  Train Loss: 2.4506 | Val Loss: 2.7667
+
+  VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 1.0000 (Thresh: 0.10)
+    Node F1:    0.7068 (Thresh: 0.20)
+    Node Prec:  0.6672 | Node Rec: 0.7515
+
+Epoch 19/100
+--------------------------------------------------------------------------------
+Training (Loss: 4.9390, Grad: 99.07): 100%|█████████████████████████████████| 14/14 [00:09<00:00,  1.43it/s, cF1=0.712, nF1=0.795, rMSE=0.062, pL=0.069, tL=0.000] 
+
+  Average gradient norm: 33.0256
+  Average loss components:
+    prediction: 0.041647
+    voltage: 0.070610
+    reactive: 4.167349
+    powerflow: 0.170671
+    active_flow: 0.822684
+    temperature: 0.043452
+    frequency: 1.333817
+    risk: 0.062333
+    timing: 4.018973
+    capacity: 0.000000
+Validation: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [00:02<00:00,  1.40it/s, loss=2.9088] 
+
+Epoch 19 Results:
+  Train Loss: 3.0004 | Val Loss: 2.6817
+
+  VALIDATION METRICS (Dynamic Thresholds):
+    Cascade F1: 1.0000 (Thresh: 0.10)
+    Node F1:    0.6777 (Thresh: 0.25)
+    Node Prec:  0.6777 | Node Rec: 0.6777
+
+Epoch 20/100
+--------------------------------------------------------------------------------
