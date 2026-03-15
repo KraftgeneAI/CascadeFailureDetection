@@ -431,10 +431,10 @@ class NodePropertyInitializer:
         loading_damage_threshold = loading_failure_threshold - np.random.uniform(0.05, 0.1)
         
         # Voltage threshold: node fails if voltage < threshold
-        # NERC standards: normal operation 0.95-1.05 pu
-        # Under-voltage protection relays typically trip at 0.85-0.88 pu
-        # Damage (sustained low voltage) starts around 0.88-0.92 pu
-        voltage_failure_threshold = np.random.uniform(0.82, 0.87, self.num_nodes)
+        # From power flow analysis: v_min at stress=0.6 is ~0.872 pu, at stress=0.8 non-convergent.
+        # Failure thresholds must sit below normal operating voltages to avoid false triggers.
+        # NERC under-voltage protection: trip at 0.85-0.88 pu (sustained), damage at 0.88-0.92 pu.
+        voltage_failure_threshold = np.random.uniform(0.80, 0.85, self.num_nodes)
         voltage_damage_threshold = voltage_failure_threshold + np.random.uniform(0.04, 0.07)
         
         # Temperature threshold: node fails if temperature > threshold

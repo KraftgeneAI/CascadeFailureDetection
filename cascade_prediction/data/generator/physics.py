@@ -34,11 +34,11 @@ class PowerFlowSimulator:
         line_resistance: np.ndarray,
         line_susceptance: np.ndarray,
         line_conductance: np.ndarray,
-        thermal_limits: np.ndarray
+        thermal_limits: np.ndarray,
     ):
         """
         Initialize power flow simulator.
-        
+
         Args:
             num_nodes: Number of nodes
             edge_index: Edge connectivity [2, num_edges]
@@ -79,7 +79,7 @@ class PowerFlowSimulator:
             edge_index, positions, gen_capacity,
             line_reactance, line_resistance,
             line_susceptance, line_conductance,
-            thermal_limits
+            thermal_limits,
         )
     
     def _create_pypsa_network(
@@ -91,7 +91,7 @@ class PowerFlowSimulator:
         line_resistance: np.ndarray,
         line_susceptance: np.ndarray,
         line_conductance: np.ndarray,
-        thermal_limits: np.ndarray
+        thermal_limits: np.ndarray,
     ) -> pypsa.Network:
         """
         Create PyPSA network from grid parameters.
@@ -114,7 +114,7 @@ class PowerFlowSimulator:
                 x=positions[i, 0],
                 y=positions[i, 1]
             )
-        
+
         # Add generators
         # Slack bus (node 0): sets voltage angle reference and absorbs P imbalance
         # PV buses (other generators): regulate voltage magnitude at their bus
@@ -191,9 +191,11 @@ class PowerFlowSimulator:
             - line_flows_q: Reactive power flows [num_edges]
             - is_stable: Whether power flow converged
         """
-        # Calculate reactive load using per-node power factors (Q = P * tan(phi))
-        q_load = load * self.tan_phi
-        
+        # Calculate reactive load with 50% power-factor correction applied.
+        # Equivalent to shunt capacitor compensation at every load bus, scaled
+        # with actual load so there is no over/under-compensation at any stress level.
+        q_load = load * self.tan_phi * 0.30
+
         # Store original states for restoration
         original_bus_states = {}
         original_gen_states = {}

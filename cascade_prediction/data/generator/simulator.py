@@ -181,7 +181,7 @@ class PhysicsBasedGridSimulator:
         self.power_flow_sim = PowerFlowSimulator(
             self.num_nodes, self.edge_index.numpy(), self.positions, self.node_types, self.gen_capacity,
             self.line_reactance, self.line_resistance,
-            self.line_susceptance, self.line_conductance, self.thermal_limits
+            self.line_susceptance, self.line_conductance, self.thermal_limits,
         )
         
         self.frequency_sim = FrequencyDynamicsSimulator(
@@ -252,121 +252,42 @@ class PhysicsBasedGridSimulator:
             Complete scenario data if successful, None if generation failed
         """
         print(f"  [INPUT] Generating scenario with stress_level: {stress_level:.3f}")
-        
-        # Determine cascade start time
-        cascade_start_time = int(sequence_length * np.random.uniform(0.65, 0.85))
-        
-        # Initialize generation and load
-        generation = np.zeros(self.num_nodes)
-        load_values = np.zeros(self.num_nodes)
-        
-        # Set load based on stress level
-        load_multiplier = 0.7 + stress_level * 0.4
-        load_noise = 0.05
-        load_values = self.base_load * load_multiplier * (
-            1 + np.random.normal(0, load_noise, self.num_nodes)
-        )
-        
-        # Size generation to match load
-        total_load = load_values.sum()
-        gen_indices = np.where(self.node_types == 1)[0]
-        total_capacity = self.gen_capacity.sum()
-        for idx in gen_indices:
-            if total_capacity > 0:
-                generation[idx] = (self.gen_capacity[idx] / total_capacity) * total_load * 1.02
-        
-        # Run initial power flow (no failures yet)
-        voltages, angles, line_flows, node_reactive, line_flows_q, is_stable = (
-            self.power_flow_sim.compute_power_flow(generation, load_values, [], [])
-        )
-        
-        # Calculate loading ratios
-        loading_ratios = np.abs(line_flows) / (self.thermal_limits + 1e-6)
-        
-        # Initialize thermal state
+
+        # Pick a random ambient temperature base for this scenario
         ambient_temp_base = 25 + 10 * np.random.rand()
-        self.thermal_sim.ambient_temperature = ambient_temp_base
-        self.thermal_sim.reset_temperatures()
 
-        src, dst = self.edge_index
-        
-        # Calculate heat generation per node
-        heat_generation = self._get_heat_generation(loading_ratios)
-
-        equipment_temps = self.thermal_sim.update_temperatures(heat_generation, 1.0)
-        
-        # Calculate node loading ratio
-        node_loading = load_values / (self.base_load + 1e-6)
-        
-        # Calculate initial frequency using the same droop model as the time series
-        # Start at nominal 60 Hz and let the droop model compute the initial deviation
-        current_frequency, _ = self.frequency_sim.update_frequency(
-            generation, load_values, 60.0, dt=1.0
+        # Generate time series — failures emerge dynamically from physics
+        scenario_data = self._generate_time_series(
+            stress_level, sequence_length, ambient_temp_base
         )
-        
-        # Check for initial failures
-        initial_failed_nodes = []
-        failed_reasons = []
-        
-        for n in range(self.num_nodes):
-            state, reason = self.cascade_sim.check_node_state(
-                n, node_loading[n], voltages[n], equipment_temps[n], current_frequency
-            )
-            
-            if state == 2:  # Full failure
-                initial_failed_nodes.append(n)
-                failed_reasons.append(reason)
-                generation[n]=0
-                load_values[n]=0
-        
-        # Determine if cascade occurs
-        if len(initial_failed_nodes) > 0:
-            is_cascade = True
-            print(f"  [CASCADE] Nodes {initial_failed_nodes} FAILED. Reasons: {failed_reasons}")
-            
-            # Propagate cascade
-            failure_sequence = self.cascade_sim.propagate_cascade_physics(
-                list(zip(initial_failed_nodes, failed_reasons)),
-                generation, load_values, equipment_temps, current_frequency,
-                int(self.num_nodes * 0.6),
-                self.power_flow_sim, self.edge_index.numpy(), self.thermal_limits
-            )
-            
-            failed_nodes = [node for node, _, _ in failure_sequence]
-            failure_times = [time for _, time, _ in failure_sequence]
-            failure_reasons = [r for _, _, r in failure_sequence]
-            
-            # Compute risk vector
-            risk_vec = self._compute_risk_vector(
-                stress_level, failed_reasons[0] if failed_reasons else "none",
+
+        if scenario_data is None:
+            return None
+
+        # Extract dynamically discovered failures from time series
+        failed_nodes     = scenario_data.pop('failed_nodes')
+        failure_times    = scenario_data.pop('failure_times')
+        failure_reasons  = scenario_data.pop('failure_reasons')
+        cascade_start_time = scenario_data.pop('actual_cascade_start')
+        is_cascade = len(failed_nodes) > 0
+
+        # Compute risk vector
+        if is_cascade:
+            ground_truth_risk = self._compute_risk_vector(
+                stress_level,
+                failure_reasons[0] if failure_reasons else 'none',
                 len(failed_nodes)
             )
-            ground_truth_risk = risk_vec
-            
         else:
-            is_cascade = False
             if stress_level > 0.8:
-                print(f"  [STRESSED] No failures (Voltage: {voltages.min():.3f})")
+                print(f"  [STRESSED] No failures at stress={stress_level:.3f}")
             else:
                 print(f"  [NORMAL] No failures")
-            
-            failed_nodes, failure_times, failure_reasons = [], [], []
-            cascade_start_time = -1
             ground_truth_risk = np.array([
                 stress_level, stress_level*0.7, stress_level*0.5,
                 0.1, 0.1, 0.1, stress_level
             ], dtype=np.float32)
-        
-        # Generate time series
-        scenario_data = self._generate_time_series(
-            stress_level, sequence_length, cascade_start_time,
-            failed_nodes, failure_times, ambient_temp_base
-        )
-        
-        if scenario_data is None:
-            return None
-        
-        # Add metadata in the same format as original multimodal_data_generator.py
+
         scenario_data['metadata'] = {
             'cascade_start_time': cascade_start_time,
             'failed_nodes': failed_nodes,
@@ -379,7 +300,7 @@ class PhysicsBasedGridSimulator:
             'num_edges': len(self.edge_index[0]),
             'base_mva': 100.0,
         }
-        
+
         return scenario_data
     
     def _get_heat_generation(self, loading_ratios: np.ndarray) -> np.ndarray:
@@ -403,137 +324,135 @@ class PhysicsBasedGridSimulator:
         self,
         stress_level: float,
         sequence_length: int,
-        cascade_start_time: int,
-        failed_nodes: List[int],
-        failure_times: List[float],
         ambient_temp_base: float
     ) -> Optional[Dict]:
         """
         Generate time series data for all timesteps.
-        
-        This method simulates the grid evolution over time, applying failures
-        at the correct timesteps and generating all multi-modal data.
+        Failures emerge dynamically from physics — no pre-computed cascade sequence.
         """
-        # Build timestep to failed nodes mapping
-        timestep_to_failed_nodes = {}
-        for i, node in enumerate(failed_nodes):
-            failure_time = failure_times[i]
-            if cascade_start_time >= 0:
-                failure_timestep = cascade_start_time + int(failure_time if failure_time else 0)
-            else:
-                failure_timestep = -1
-            
-            if failure_timestep >= sequence_length:
-                continue
-            
-            if failure_timestep not in timestep_to_failed_nodes:
-                timestep_to_failed_nodes[failure_timestep] = []
-            timestep_to_failed_nodes[failure_timestep].append(node)
-        
-        # Initialize storage
         sequence = []
         current_frequency = 60.0
         self.thermal_sim.ambient_temperature = ambient_temp_base
         self.thermal_sim.reset_temperatures()
-        self.frequency_sim.reset_ufls()  # reset one-shot UFLS relays for this scenario
-        
+        self.frequency_sim.reset_ufls()
+
         generation = np.zeros(self.num_nodes)
         load_values = np.zeros(self.num_nodes)
-        cumulative_failed_nodes = set()
-        
-        is_cascade = len(failed_nodes) > 0
-        
-        # Simulate each timestep
+        cumulative_failed_nodes: set = set()
+        prev_voltages: Optional[np.ndarray] = None
+
+        # failure_record: node → (absolute timestep of failure, reason string)
+        failure_record: Dict[int, Tuple[int, str]] = {}
+        cascade_start_time = -1
+
+        # Stress ramp: rise from 60% to 100% of stress_level over first 2/3 of sequence
+        ramp_end = max(1, int(sequence_length * 0.67))
+
         for t in range(sequence_length):
-            # Determine current stress (ramp up before cascade)
-            if is_cascade and t < cascade_start_time:
-                ramp_factor = 0.6 + 0.4 * (t / max(1, cascade_start_time - 1))
-                current_stress = stress_level * ramp_factor
+            # Current stress level
+            if stress_level > 0.7 and t < ramp_end:
+                current_stress = stress_level * (0.6 + 0.4 * (t / (ramp_end - 1)))
             else:
                 current_stress = stress_level
-            
-            # Set load
-            if is_cascade:
-                load_multiplier = 0.7 + current_stress * 0.4
-                load_noise = 0.05
-            else:
-                load_multiplier = 0.5 + current_stress * 0.4
-                load_noise = 0.02
-            
-            load_values = self.base_load * load_multiplier * (
-                1 + np.random.normal(0, load_noise, self.num_nodes)
-            )
-            # Re-apply cumulative UFLS shed so the effect persists across recalculations
+
+            # Load calculation
+            load_noise = 0.05 if stress_level > 0.7 else 0.02
+            load_multiplier = 0.7 + current_stress * 0.4 if stress_level > 0.7 else 0.5 + current_stress * 0.4
+            noise = np.clip(np.random.normal(0, load_noise, self.num_nodes), -2*load_noise, 2*load_noise)
+            load_values = self.base_load * load_multiplier * (1 + noise)
             load_values *= self.frequency_sim.ufls_shed_factor
-            
-            # Size generation
+
+            # Zero out failed nodes
+            for n in cumulative_failed_nodes:
+                load_values[n] = 0.0
+
+            # Size generation to match load — only from active (non-failed) generators
             total_load = load_values.sum()
             gen_indices = np.where(self.node_types == 1)[0]
-            total_capacity = self.gen_capacity.sum()
-            for idx in gen_indices:
-                if total_capacity > 0:
-                    generation[idx] = (self.gen_capacity[idx] / total_capacity) * total_load * 1.02
-            
-            # Apply failures at this timestep
-            if t in timestep_to_failed_nodes:
-                cumulative_failed_nodes.update(timestep_to_failed_nodes[t])
-            
+            active_gen_indices = [idx for idx in gen_indices if idx not in cumulative_failed_nodes]
+            active_capacity = self.gen_capacity[active_gen_indices].sum() if len(active_gen_indices) > 0 else 0.0
+            generation[:] = 0.0  # reset all first
+            for idx in active_gen_indices:
+                if active_capacity > 0:
+                    generation[idx] = (self.gen_capacity[idx] / active_capacity) * total_load * 1.02
+
             failed_nodes_t = list(cumulative_failed_nodes)
-            
-            # Calculate failed lines from failed nodes
             failed_lines_t = get_failed_lines_from_nodes(
                 self.edge_index.numpy(), cumulative_failed_nodes
             )
-            
             # Run power flow
             voltages, angles, line_flows, node_reactive, line_flows_q, is_stable = (
                 self.power_flow_sim.compute_power_flow(
                     generation, load_values, failed_lines_t, failed_nodes_t
                 )
             )
-            
-            num_failed = len(failed_nodes_t)
-            failure_ratio = num_failed / self.num_nodes
 
-            # Check stability
+            # Track last stable voltages for voltage-collapse fallback
+            if is_stable:
+                prev_voltages = voltages.copy()
+
+            failure_ratio = len(cumulative_failed_nodes) / self.num_nodes
             if not is_stable:
-                if is_cascade:
-                    if failure_ratio >= 0.9:
-                        print(f"  [COMPLETE] Grid collapse complete ({num_failed}/{self.num_nodes} nodes failed = {failure_ratio*100:.1f}%). Generating final timestep.")
-                    else:
-                        print(f"  [UNSTABLE] Power flow unstable at timestep {t} ({num_failed}/{self.num_nodes} nodes failed = {failure_ratio*100:.1f}%). Continuing to capture cascade progression...")
+                if failure_ratio >= 0.9:
+                    print(f"  [COMPLETE] Grid collapse ({len(cumulative_failed_nodes)}/{self.num_nodes} nodes). Generating final timestep.")
+                elif failure_ratio > 0:
+                    print(f"  [UNSTABLE] t={t}, {len(cumulative_failed_nodes)}/{self.num_nodes} failed. Continuing...")
+                elif t > 0 and prev_voltages is not None:
+                    # Voltage collapse at high stress with no prior failures.
+                    # Degrade last stable voltages to trigger voltage-threshold failures
+                    # so the cascade propagates naturally rather than rejecting the scenario.
+                    voltages = prev_voltages * 0.85
+                    print(f"  [VCOLLAPSE] t={t}, stress={current_stress:.4f}: "
+                          f"voltage collapse, proxy min={voltages.min():.3f}")
                 else:
-                    print(f"  [REJECT] Power flow unstable in NORMAL scenario at timestep {t}. This should not happen. Rejecting scenario.")
+                    print(f"  [REJECT] Power flow unstable at t={t} with no prior state. Rejecting.")
                     return None
-            
+
             # Update physics
             loading_ratios = np.abs(line_flows) / (self.thermal_limits + 1e-6)
-            
             heat_generation = self._get_heat_generation(loading_ratios)
 
             current_frequency, load_values = self.frequency_sim.update_frequency(
                 generation, load_values, current_frequency, 1.0
             )
-            
+
             ambient_temp = ambient_temp_base + 8 * np.sin(2 * np.pi * ((t / 60.0) - 6) / 24)
             self.thermal_sim.ambient_temperature = ambient_temp
             equipment_temps = self.thermal_sim.update_temperatures(heat_generation, 1.0)
-            
+
+            # Dynamic failure check: every non-failed node at every timestep
+            # node_line_loading = ratio of actual load to base load (ML feature proxy)
+            node_line_loading = load_values / (self.base_load + 1e-6)
+
+            new_failures: List[Tuple[int, str]] = []
+            for n in range(self.num_nodes):
+                if n in cumulative_failed_nodes:
+                    continue
+                state, reason = self.cascade_sim.check_node_state(
+                    n, node_line_loading[n], voltages[n], equipment_temps[n], current_frequency
+                )
+                if state == 2:
+                    new_failures.append((n, reason))
+
+            for n, reason in new_failures:
+                if cascade_start_time < 0:
+                    cascade_start_time = t
+                failure_record[n] = (t, reason)
+                cumulative_failed_nodes.add(n)
+                generation[n] = 0.0
+                load_values[n] = 0.0
+                print(f"  [FAIL] Node {n} failed at t={t} (reason: {reason})")
+
             # Generate multi-modal data
             sat_data, weather_seq, threat_ind = self.env_gen.generate_correlated_environmental_data(
-                failed_nodes_t, failed_lines_t, t, cascade_start_time, current_stress
+                list(cumulative_failed_nodes), failed_lines_t, t, cascade_start_time, current_stress
             )
-            
             vis_data, thermal_data, sensor_data = self.robot_gen.generate_correlated_robotic_data(
-                failed_nodes_t, failed_lines_t, t, cascade_start_time, equipment_temps
+                list(cumulative_failed_nodes), failed_lines_t, t, cascade_start_time, equipment_temps
             )
-            
-            # Compute cascade timing
-            current_cascade_timing = self._compute_cascade_timing(
-                t, cascade_start_time, failed_nodes, failure_times, cumulative_failed_nodes
-            )
-            
-            # Store timestep data
+
+            current_cascade_timing = self._compute_cascade_timing(t, failure_record)
+
             timestep_data = self._package_timestep_data(
                 t, current_stress, voltages, angles, generation, node_reactive,
                 load_values, equipment_temps, current_frequency, loading_ratios,
@@ -541,11 +460,23 @@ class PhysicsBasedGridSimulator:
                 vis_data, thermal_data, sensor_data, cumulative_failed_nodes,
                 current_cascade_timing, sequence_length
             )
-            
             sequence.append(timestep_data)
-        
-        # Package scenario
-        return self._package_scenario(sequence, failed_nodes)
+
+        # Collect failure info sorted by failure time
+        failed_nodes_out    = sorted(failure_record.keys(), key=lambda n: failure_record[n][0])
+        failure_times_out   = [failure_record[n][0] for n in failed_nodes_out]
+        failure_reasons_out = [failure_record[n][1] for n in failed_nodes_out]
+
+        if failed_nodes_out:
+            print(f"  [CASCADE] {len(failed_nodes_out)} nodes failed. First failure at t={cascade_start_time}.")
+
+        result = self._package_scenario(sequence, failed_nodes_out)
+        if result is not None:
+            result['failed_nodes']        = failed_nodes_out
+            result['failure_times']       = failure_times_out
+            result['failure_reasons']     = failure_reasons_out
+            result['actual_cascade_start'] = cascade_start_time
+        return result
     
     def _compute_risk_vector(
         self,
@@ -573,32 +504,16 @@ class PhysicsBasedGridSimulator:
     def _compute_cascade_timing(
         self,
         t: int,
-        cascade_start_time: int,
-        failed_nodes: List[int],
-        failure_times: List[float],
-        cumulative_failed_nodes: set
+        failure_record: Dict[int, Tuple[int, str]]
     ) -> np.ndarray:
-        """Compute cascade timing for current timestep."""
-        if cascade_start_time >= 0:
-            current_cascade_timing = np.array([
-                (failure_times[failed_nodes.index(node)] - (t - cascade_start_time)
-                 if t >= cascade_start_time else failure_times[failed_nodes.index(node)])
-                if node in failed_nodes else -1.0
-                for node in range(self.num_nodes)
-            ], dtype=np.float32)
-        else:
-            current_cascade_timing = np.full(self.num_nodes, -1.0, dtype=np.float32)
-        
-        # Set timing to 0 for nodes that just failed
-        for node in cumulative_failed_nodes:
-            if node in failed_nodes:
-                idx = failed_nodes.index(node)
-                if cascade_start_time >= 0:
-                    failure_timestep = cascade_start_time + int(failure_times[idx])
-                    if t == failure_timestep:
-                        current_cascade_timing[node] = 0.0
-        
-        return current_cascade_timing
+        """
+        Time since failure for each node.
+        -1.0 = not yet failed; 0.0 = failed this timestep; positive = timesteps since failure.
+        """
+        timing = np.full(self.num_nodes, -1.0, dtype=np.float32)
+        for n, (ft, _) in failure_record.items():
+            timing[n] = float(t - ft)
+        return timing
     
     def _package_timestep_data(
         self, t, current_stress, voltages, angles, generation, node_reactive,
