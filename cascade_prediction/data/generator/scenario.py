@@ -26,6 +26,7 @@ import gc
 
 from .simulator import PhysicsBasedGridSimulator
 from .utils import MemoryMonitor, save_scenarios
+from .config import Settings
 
 
 class ScenarioOrchestrator:
@@ -44,10 +45,10 @@ class ScenarioOrchestrator:
         self,
         simulator: PhysicsBasedGridSimulator,
         output_dir: str = 'data',
-        batch_size: int = 10,
-        train_ratio: float = 0.70,
-        val_ratio: float = 0.15,
-        test_ratio: float = 0.15
+        batch_size: int = Settings.Scenario.DEFAULT_BATCH_SIZE,
+        train_ratio: float = Settings.Dataset.TRAIN_RATIO,
+        val_ratio: float = Settings.Dataset.VAL_RATIO,
+        test_ratio: float = Settings.Dataset.TEST_RATIO
     ):
         """
         Initialize scenario orchestrator.
@@ -75,7 +76,7 @@ class ScenarioOrchestrator:
         self.test_ratio = test_ratio
         
         # Validate ratios
-        assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, \
+        assert abs(train_ratio + val_ratio + test_ratio - 1.0) < Settings.Dataset.RATIO_TOLERANCE, \
             "Train/val/test ratios must sum to 1.0"
         
         # Create output directories
@@ -89,10 +90,10 @@ class ScenarioOrchestrator:
     
     def generate_dataset(
         self,
-        num_normal: int = 100,
-        num_cascade: int = 80,
-        num_stressed: int = 20,
-        sequence_length: int = 30,
+        num_normal: int = Settings.Scenario.DEFAULT_NUM_NORMAL,
+        num_cascade: int = Settings.Scenario.DEFAULT_NUM_CASCADE,
+        num_stressed: int = Settings.Scenario.DEFAULT_NUM_STRESSED,
+        sequence_length: int = Settings.Scenario.DEFAULT_SEQUENCE_LENGTH,
         start_batch: int = 0
     ) -> Dict[str, int]:
         """
@@ -271,7 +272,7 @@ class ScenarioOrchestrator:
         self,
         scenario_type: str,
         sequence_length: int,
-        max_retries: int = 10
+        max_retries: int = Settings.Scenario.MAX_RETRIES
     ) -> Optional[Dict]:
         """
         Generate a scenario with retry logic.
@@ -293,14 +294,11 @@ class ScenarioOrchestrator:
         for retry in range(max_retries):
             # Determine stress level based on type
             if scenario_type == 'cascade':
-                # High stress to trigger failures
-                stress_level = np.random.uniform(0.70, 1.0)
+                stress_level = np.random.uniform(Settings.Scenario.CASCADE_STRESS_MIN, Settings.Scenario.CASCADE_STRESS_MAX)
             elif scenario_type == 'stressed':
-                # High stress but below failure threshold
-                stress_level = np.random.uniform(0.5, 0.62)
+                stress_level = np.random.uniform(Settings.Scenario.STRESSED_STRESS_MIN, Settings.Scenario.STRESSED_STRESS_MAX)
             else:  # normal
-                # Low to medium stress
-                stress_level = np.random.uniform(0.00, 0.50)
+                stress_level = np.random.uniform(Settings.Scenario.NORMAL_STRESS_MIN, Settings.Scenario.NORMAL_STRESS_MAX)
             
             # Generate scenario
             scenario = self.simulator.generate_scenario(
@@ -389,14 +387,14 @@ class ScenarioOrchestrator:
 
 
 def generate_dataset_from_config(
-    num_nodes: int = 118,
-    num_normal: int = 100,
-    num_cascade: int = 80,
-    num_stressed: int = 20,
-    sequence_length: int = 30,
+    num_nodes: int = Settings.Scenario.DEFAULT_NUM_NODES,
+    num_normal: int = Settings.Scenario.DEFAULT_NUM_NORMAL,
+    num_cascade: int = Settings.Scenario.DEFAULT_NUM_CASCADE,
+    num_stressed: int = Settings.Scenario.DEFAULT_NUM_STRESSED,
+    sequence_length: int = Settings.Scenario.DEFAULT_SEQUENCE_LENGTH,
     output_dir: str = 'data',
-    batch_size: int = 10,
-    seed: int = 42,
+    batch_size: int = Settings.Scenario.DEFAULT_BATCH_SIZE,
+    seed: int = Settings.Scenario.DEFAULT_SEED,
     topology_file: Optional[str] = None,
     start_batch: int = 0
 ) -> Dict[str, int]:

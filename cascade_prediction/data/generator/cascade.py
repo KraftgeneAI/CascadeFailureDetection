@@ -13,6 +13,7 @@ This module implements:
 import numpy as np
 from typing import List, Tuple, Set, Dict, Optional
 from .utils import get_failed_lines_from_nodes
+from .config import Settings
 
 
 class CascadeSimulator:
@@ -152,9 +153,9 @@ class CascadeSimulator:
                 stress_multiplier = accumulated_stress * propagation_weight
                 
                 # Apply stress to neighbor conditions
-                neighbor_loading = current_loading[neighbor] * (1.0 + stress_multiplier * 0.4)
-                neighbor_voltage = current_voltage[neighbor] * (1.0 - stress_multiplier * 0.15)
-                neighbor_temperature = current_temperature[neighbor] + stress_multiplier * 25
+                neighbor_loading = current_loading[neighbor] * (1.0 + stress_multiplier * Settings.Cascade.STRESS_TO_LOADING_FACTOR)
+                neighbor_voltage = current_voltage[neighbor] * (1.0 - stress_multiplier * Settings.Cascade.STRESS_TO_VOLTAGE_FACTOR)
+                neighbor_temperature = current_temperature[neighbor] + stress_multiplier * Settings.Cascade.STRESS_TO_TEMP_FACTOR
                 
                 # Check failure state
                 failure_state, reason = self.check_node_state(
@@ -166,13 +167,14 @@ class CascadeSimulator:
                 )
                 
                 if failure_state == 2:  # Full failure
-                    failure_time = current_time + np.random.uniform(0.1, 0.5)
+                    failure_time = current_time + np.random.uniform(
+                        Settings.Cascade.FAILURE_DELAY_MIN, Settings.Cascade.FAILURE_DELAY_MAX)
                     failure_sequence.append((neighbor, failure_time, reason))
                     failed_nodes.add(neighbor)
                     visited.add(neighbor)
-                    
+
                     # Add to queue for further propagation
-                    queue.append((neighbor, failure_time, stress_multiplier * 0.8))
+                    queue.append((neighbor, failure_time, stress_multiplier * Settings.Cascade.STRESS_DECAY))
                     
                     print(f"    [CASCADE] Node {current_node} -> Node {neighbor} "
                           f"(reason: {reason}, time: {failure_time:.2f}min)")
@@ -285,7 +287,7 @@ class CascadeSimulator:
                 )
                 
                 if failure_state == 2:  # Full failure
-                    physical_delay = np.random.uniform(0.1, 0.5)
+                    physical_delay = np.random.uniform(Settings.Cascade.FAILURE_DELAY_MIN, Settings.Cascade.FAILURE_DELAY_MAX)
                     failure_time = current_time + physical_delay
                     
                     failure_sequence.append((neighbor, failure_time, reason))
@@ -404,19 +406,19 @@ def create_adjacency_list(
         else:
             # Generator → Substation: high weight
             if node_types[s] == 1 and node_types[d] == 2:
-                weight = 0.9
+                weight = Settings.Cascade.WEIGHT_GEN_TO_SUB
             # Substation → Load: medium weight
             elif node_types[s] == 2 and node_types[d] == 0:
-                weight = 0.7
+                weight = Settings.Cascade.WEIGHT_SUB_TO_LOAD
             # Generator → Load: medium weight
             elif node_types[s] == 1 and node_types[d] == 0:
-                weight = 0.7
+                weight = Settings.Cascade.WEIGHT_GEN_TO_LOAD
             # Load → Load: low weight
             elif node_types[s] == 0 and node_types[d] == 0:
-                weight = 0.5
+                weight = Settings.Cascade.WEIGHT_LOAD_TO_LOAD
             # Default
             else:
-                weight = 0.6
+                weight = Settings.Cascade.WEIGHT_DEFAULT
         
         # Add directed edge
         adjacency_list[s].append((d, i, weight))

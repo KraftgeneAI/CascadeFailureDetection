@@ -14,6 +14,8 @@ import numpy as np
 import pypsa
 from typing import Tuple, Optional, List, Dict
 
+from .config import Settings
+
 
 class PowerFlowSimulator:
     """
@@ -64,11 +66,11 @@ class PowerFlowSimulator:
         # Substation buses (2): large transformer loads, pf ~0.90
         pf = np.where(
             node_types == 1,  # Generator bus: minimal reactive load
-            np.random.uniform(0.97, 0.99, num_nodes),
+            np.random.uniform(Settings.Node.PF_GENERATOR_MIN, Settings.Node.PF_GENERATOR_MAX, num_nodes),
             np.where(
                 node_types == 2,  # Substation: transformer magnetizing current
-                np.random.uniform(0.92, 0.96, num_nodes),
-                np.random.uniform(0.90, 0.97, num_nodes)  # Load bus: mixed load types
+                np.random.uniform(Settings.Node.PF_SUBSTATION_MIN, Settings.Node.PF_SUBSTATION_MAX, num_nodes),
+                np.random.uniform(Settings.Node.PF_LOAD_MIN, Settings.Node.PF_LOAD_MAX, num_nodes)  # Load bus: mixed load types
             )
         )
         # tan(phi) = sqrt(1 - pf²) / pf  → Q = P * tan(phi)
@@ -103,14 +105,14 @@ class PowerFlowSimulator:
         network.set_snapshots(["now"])
         # Set system base to 100 MVA so that MW-scale loads/generators are ~1 pu.
         # PyPSA uses sn_mva as the system MVA base for per-unit conversion.
-        network.sn_mva = 100.0
-        
+        network.sn_mva = Settings.PowerSystem.SN_MVA
+
         # Add buses (nodes)
         for i in range(self.num_nodes):
             network.add(
                 "Bus",
                 f"bus_{i}",
-                v_nom=138.0,  # 138 kV transmission
+                v_nom=Settings.PowerSystem.V_NOM_KV,  # 138 kV transmission
                 x=positions[i, 0],
                 y=positions[i, 1]
             )
@@ -123,10 +125,10 @@ class PowerFlowSimulator:
         for idx in gen_indices:
             if idx == 0:
                 control = "Slack"
-                v_set = 1.0
+                v_set = Settings.PowerFlow.SLACK_V_SET
             else:
                 control = "PV"   # Voltage-regulating generator
-                v_set = np.random.uniform(0.98, 1.02)  # Slight voltage schedule variation
+                v_set = np.random.uniform(Settings.PowerFlow.PV_V_SET_MIN, Settings.PowerFlow.PV_V_SET_MAX)
             network.add(
                 "Generator",
                 f"gen_{idx}",
@@ -194,7 +196,7 @@ class PowerFlowSimulator:
         # Calculate reactive load with 50% power-factor correction applied.
         # Equivalent to shunt capacitor compensation at every load bus, scaled
         # with actual load so there is no over/under-compensation at any stress level.
-        q_load = load * self.tan_phi * 0.30
+        q_load = load * self.tan_phi * Settings.PowerFlow.Q_LOAD_FACTOR
 
         # Store original states for restoration
         original_bus_states = {}
@@ -496,11 +498,11 @@ class FrequencyDynamicsSimulator:
         num_nodes: int,
         node_types: np.ndarray,
         gen_capacity: np.ndarray,
-        base_frequency: float = 60.0
+        base_frequency: float = Settings.Frequency.BASE_FREQUENCY
     ):
         """
         Initialize frequency dynamics simulator.
-        
+
         Args:
             num_nodes: Number of nodes
             node_types: Node types
@@ -510,16 +512,12 @@ class FrequencyDynamicsSimulator:
         self.num_nodes = num_nodes
         self.node_types = node_types
         self.base_frequency = base_frequency
-        
+
         # Initialize inertia constants
         self.inertia = self._initialize_inertia(gen_capacity)
-        self.damping = np.random.uniform(1.0, 2.0, num_nodes)
+        self.damping = np.random.uniform(Settings.Frequency.DAMPING_MIN, Settings.Frequency.DAMPING_MAX, num_nodes)
         # Under-frequency load shedding (UFLS) settings
-        self.ufls_stages = [
-            {'frequency': 59.3, 'load_shed': 0.10},  # Shed 10% at 59.3 Hz
-            {'frequency': 59.0, 'load_shed': 0.15},  # Shed 15% at 59.0 Hz
-            {'frequency': 58.7, 'load_shed': 0.20},  # Shed 20% at 58.7 Hz
-        ]
+        self.ufls_stages = [dict(s) for s in Settings.UFLS.STAGES]
         # UFLS state: each stage is a one-shot relay; cumulative shed tracked here
         self.ufls_activated = [False] * len(self.ufls_stages)
         self.ufls_shed_factor = 1.0  # multiplier applied to load after UFLS
@@ -545,12 +543,12 @@ class FrequencyDynamicsSimulator:
         for idx in gen_indices:
             # Larger generators have more inertia
             capacity_mw = gen_capacity[idx]
-            if capacity_mw > 400:
-                inertia[idx] = np.random.uniform(4.0, 6.0)  # Large
-            elif capacity_mw > 150:
-                inertia[idx] = np.random.uniform(2.5, 4.0)  # Medium
+            if capacity_mw > Settings.Frequency.INERTIA_LARGE_MW_THRESHOLD:
+                inertia[idx] = np.random.uniform(Settings.Frequency.INERTIA_LARGE_MIN, Settings.Frequency.INERTIA_LARGE_MAX)
+            elif capacity_mw > Settings.Frequency.INERTIA_MEDIUM_MW_THRESHOLD:
+                inertia[idx] = np.random.uniform(Settings.Frequency.INERTIA_MEDIUM_MIN, Settings.Frequency.INERTIA_MEDIUM_MAX)
             else:
-                inertia[idx] = np.random.uniform(1.5, 2.5)  # Small
+                inertia[idx] = np.random.uniform(Settings.Frequency.INERTIA_SMALL_MIN, Settings.Frequency.INERTIA_SMALL_MAX)
         
         return inertia
     
@@ -596,22 +594,22 @@ class FrequencyDynamicsSimulator:
         # Governor droop R = 5% (standard) → D_gov = S_base / (R * f0)
         # Combined droop + load damping coefficient (% of load per % freq change)
         # Typical value: D_total ≈ 0.02-0.05 per unit (2-5% load change per 1% freq)
-        D_total = 0.04  # 4% load response per 1% frequency deviation
+        D_total = Settings.Frequency.D_TOTAL
         system_base = max(total_load, 1.0)
 
         # Δf_ss = f0 * ΔP / (D_total * S_base)
         # e.g. 100 MW imbalance on 10,000 MW system → Δf = 60*100/(0.04*10000) = 1.5 Hz
         delta_f_ss = self.base_frequency * imbalance / (D_total * system_base)
 
-        # Clamp steady-state target to ±3 Hz (physical limit before collapse)
-        delta_f_ss = np.clip(delta_f_ss, -3.0, 3.0)
+        # Clamp steady-state target to ±DELTA_F_MAX_HZ (physical limit before collapse)
+        delta_f_ss = np.clip(delta_f_ss, -Settings.Frequency.DELTA_F_MAX_HZ, Settings.Frequency.DELTA_F_MAX_HZ)
         f_target = self.base_frequency + delta_f_ss
 
-        # First-order lag: governor response time constant ~30 seconds
-        tau_gov = 0.5  # minutes (30 seconds)
+        # First-order lag: governor response time constant
+        tau_gov = Settings.Frequency.TAU_GOV_MIN  # minutes
         alpha = 1.0 - np.exp(-dt / tau_gov)
         new_frequency = current_frequency + alpha * (f_target - current_frequency)
-        new_frequency = np.clip(new_frequency, 55.0, 65.0)
+        new_frequency = np.clip(new_frequency, Settings.Frequency.FREQ_MIN_HZ, Settings.Frequency.FREQ_MAX_HZ)
 
         # Under-frequency load shedding (one-shot per stage)
         for i, stage in enumerate(self.ufls_stages):
@@ -636,11 +634,11 @@ class ThermalDynamicsSimulator:
         thermal_time_constant: np.ndarray,
         thermal_capacity: np.ndarray,
         cooling_effectiveness: np.ndarray,
-        ambient_temperature: float = 25.0
+        ambient_temperature: float = Settings.Thermal.AMBIENT_TEMP_C
     ):
         """
         Initialize thermal dynamics simulator.
-        
+
         Args:
             num_nodes: Number of nodes
             thermal_time_constant: Time constants (minutes)
@@ -660,7 +658,7 @@ class ThermalDynamicsSimulator:
     def update_temperatures(
         self,
         heat_generation: np.ndarray,
-        dt: float = 2.0
+        dt: float = Settings.Thermal.DT_MINUTES
     ) -> np.ndarray:
         """
         Update equipment temperatures based on loading.
@@ -684,10 +682,14 @@ class ThermalDynamicsSimulator:
         
         # Update temperatures
         self.temperatures += dT
-        self.temperatures += np.random.normal(0,0.5,self.num_nodes)
-        
+        self.temperatures += np.random.normal(0, Settings.Thermal.TEMP_NOISE_STD, self.num_nodes)
+
         # Clip to reasonable range
-        self.temperatures = np.clip(self.temperatures, self.ambient_temperature - 5, 150.0)
+        self.temperatures = np.clip(
+            self.temperatures,
+            self.ambient_temperature - Settings.Thermal.AMBIENT_BUFFER_C,
+            Settings.Thermal.TEMP_MAX_C,
+        )
         
         return self.temperatures
     

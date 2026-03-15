@@ -22,6 +22,8 @@ import glob
 from tqdm import tqdm
 import json
 
+from .generator.config import Settings
+
 from .preprocessing import (
     normalize_power,
     normalize_frequency,
@@ -48,8 +50,8 @@ class CascadeDataset(Dataset):
         self,
         data_dir: str,
         mode: str = 'last_timestep',
-        base_mva: float = 100.0,
-        base_frequency: float = 60.0
+        base_mva: float = Settings.Dataset.BASE_MVA,
+        base_frequency: float = Settings.Dataset.BASE_FREQUENCY
     ):
         """
         Initialize dataset from a directory of scenario files.
@@ -113,7 +115,7 @@ class CascadeDataset(Dataset):
                         has_cascade = scenario['metadata']['is_cascade']
                     elif 'sequence' in scenario and len(scenario['sequence']) > 0:
                         last_step = scenario['sequence'][-1]
-                        has_cascade = bool(np.max(last_step.get('node_labels', np.zeros(1))) > 0.5)
+                        has_cascade = bool(np.max(last_step.get('node_labels', np.zeros(1))) > Settings.Dataset.CASCADE_LABEL_THRESHOLD)
                     else:
                         has_cascade = False
                     
@@ -239,7 +241,7 @@ class CascadeDataset(Dataset):
         
         last_step = sequence[-1]
         
-        num_nodes = last_step.get('scada_data', np.zeros((118, 12))).shape[0]
+        num_nodes = last_step.get('scada_data', np.zeros((Settings.Dataset.DEFAULT_NUM_NODES, 12))).shape[0]
         num_edges = edge_index.shape[1]
         timing_shape = last_step.get('cascade_timing', np.zeros(num_nodes)).shape
 
@@ -346,7 +348,7 @@ class CascadeDataset(Dataset):
         scada_tensor = torch.stack(data_arrays['scada_data'])
         
         if is_training:
-            noise = torch.randn_like(scada_tensor) * 0.01
+            noise = torch.randn_like(scada_tensor) * Settings.Dataset.AUGMENTATION_NOISE_STD
             scada_tensor = scada_tensor + noise
         
         return {
@@ -385,7 +387,7 @@ class CascadeDataset(Dataset):
         metadata = scenario['metadata']
         edge_index = scenario['edge_index']
         
-        num_nodes = metadata.get('num_nodes', 118)
+        num_nodes = metadata.get('num_nodes', Settings.Dataset.DEFAULT_NUM_NODES)
         num_edges = metadata.get('num_edges', edge_index.shape[1] if hasattr(edge_index, 'shape') else 186)
         
         # Create node failure labels
@@ -519,7 +521,7 @@ class CascadeDataset(Dataset):
     ) -> Dict[str, torch.Tensor]:
         """Extract graph properties from metadata (synthetic)."""
         graph_props = {}
-        num_nodes = metadata.get('num_nodes', 118)
+        num_nodes = metadata.get('num_nodes', Settings.Dataset.DEFAULT_NUM_NODES)
         
         # Thermal limits
         thermal_limits_raw = torch.rand(num_edges) * 40.0 + 10.0

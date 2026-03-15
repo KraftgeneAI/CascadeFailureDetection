@@ -32,6 +32,7 @@ from .cascade import CascadeSimulator, create_adjacency_list
 from .environmental import EnvironmentalDataGenerator
 from .robotic import RoboticDataGenerator
 from .utils import get_failed_lines_from_nodes
+from .config import Settings
 
 
 class PhysicsBasedGridSimulator:
@@ -57,8 +58,8 @@ class PhysicsBasedGridSimulator:
     
     def __init__(
         self,
-        num_nodes: int = 118,
-        seed: int = 42,
+        num_nodes: int = Settings.Scenario.DEFAULT_NUM_NODES,
+        seed: int = Settings.Scenario.DEFAULT_SEED,
         topology_file: Optional[str] = None
     ):
         """
@@ -137,15 +138,20 @@ class PhysicsBasedGridSimulator:
         dist_norm = distances / (distances.max() + 1e-6)  # 0..1
 
         # x_pu: short lines ~0.03, long lines ~0.15 (realistic transmission range)
-        x_pu = np.random.uniform(0.03, 0.08, self.num_edges) + dist_norm * np.random.uniform(0.05, 0.10, self.num_edges)
-        x_pu = np.clip(x_pu, 0.02, 0.20)
+        x_pu = (
+            np.random.uniform(Settings.LineImpedance.X_PU_BASE_MIN, Settings.LineImpedance.X_PU_BASE_MAX, self.num_edges)
+            + dist_norm * np.random.uniform(Settings.LineImpedance.X_PU_DIST_MIN, Settings.LineImpedance.X_PU_DIST_MAX, self.num_edges)
+        )
+        x_pu = np.clip(x_pu, Settings.LineImpedance.X_PU_CLIP_MIN, Settings.LineImpedance.X_PU_CLIP_MAX)
 
-        z_base = 138.0 ** 2 / 100.0  # 190.44 Ω  (sn_mva = 100 MVA)
+        z_base = Settings.PowerSystem.Z_BASE  # 190.44 Ω  (sn_mva = 100 MVA)
         self.line_reactance = x_pu * z_base          # Ω, ~4–38 Ω range
-        self.line_resistance = self.line_reactance * np.random.uniform(0.05, 0.15, self.num_edges)
+        self.line_resistance = self.line_reactance * np.random.uniform(
+            Settings.LineImpedance.R_X_RATIO_MIN, Settings.LineImpedance.R_X_RATIO_MAX, self.num_edges
+        )
 
         # Shunt susceptance: b_pu ~ 1e-4 per unit  →  b_siemens = b_pu / z_base
-        b_pu = np.random.uniform(0.5e-4, 2e-4, self.num_edges)
+        b_pu = np.random.uniform(Settings.LineImpedance.B_PU_MIN, Settings.LineImpedance.B_PU_MAX, self.num_edges)
         self.line_susceptance = b_pu / z_base        # Siemens
         self.line_conductance = np.zeros(self.num_edges)
         total_load = self.base_load.sum()
@@ -158,22 +164,25 @@ class PhysicsBasedGridSimulator:
             # Estimate flow based on distance and connected nodes
             # Shorter lines carry more power (distribution)
             # Longer lines carry less power (transmission)
-            if distances[i] < 30:
+            if distances[i] < Settings.LineImpedance.THERMAL_SHORT_DIST_KM:
                 # Short lines: high capacity (distribution)
-                base_capacity = avg_flow_per_line * np.random.uniform(1.5, 2.5)
-            elif distances[i] < 60:
+                base_capacity = avg_flow_per_line * np.random.uniform(
+                    Settings.LineImpedance.THERMAL_SHORT_MIN, Settings.LineImpedance.THERMAL_SHORT_MAX)
+            elif distances[i] < Settings.LineImpedance.THERMAL_MEDIUM_DIST_KM:
                 # Medium lines: moderate capacity
-                base_capacity = avg_flow_per_line * np.random.uniform(1.0, 1.8)
+                base_capacity = avg_flow_per_line * np.random.uniform(
+                    Settings.LineImpedance.THERMAL_MEDIUM_MIN, Settings.LineImpedance.THERMAL_MEDIUM_MAX)
             else:
                 # Long lines: lower capacity (but still adequate)
-                base_capacity = avg_flow_per_line * np.random.uniform(0.8, 1.5)
-            
-            # Add margin for convergence (150-200% of expected flow)
-            margin = np.random.uniform(1.5, 2.0)
+                base_capacity = avg_flow_per_line * np.random.uniform(
+                    Settings.LineImpedance.THERMAL_LONG_MIN, Settings.LineImpedance.THERMAL_LONG_MAX)
+
+            # Add margin for convergence
+            margin = np.random.uniform(Settings.LineImpedance.THERMAL_MARGIN_MIN, Settings.LineImpedance.THERMAL_MARGIN_MAX)
             self.thermal_limits[i] = base_capacity * margin
 
         # Ensure minimum thermal limits
-        min_thermal_limit = total_load * 0.05  # At least 5% of total load
+        min_thermal_limit = total_load * Settings.LineImpedance.THERMAL_MIN_FRACTION
         self.thermal_limits = np.maximum(self.thermal_limits, min_thermal_limit)
         
         # Initialize physics simulators
@@ -254,7 +263,11 @@ class PhysicsBasedGridSimulator:
         print(f"  [INPUT] Generating scenario with stress_level: {stress_level:.3f}")
 
         # Pick a random ambient temperature base for this scenario
-        ambient_temp_base = 25 + 10 * np.random.rand()
+        ambient_temp_base = (
+            Settings.Simulation.AMBIENT_BASE_MIN_C
+            + (Settings.Simulation.AMBIENT_BASE_MAX_C - Settings.Simulation.AMBIENT_BASE_MIN_C)
+            * np.random.rand()
+        )
 
         # Generate time series — failures emerge dynamically from physics
         scenario_data = self._generate_time_series(
@@ -279,7 +292,7 @@ class PhysicsBasedGridSimulator:
                 len(failed_nodes)
             )
         else:
-            if stress_level > 0.8:
+            if stress_level > Settings.Scenario.STRESSED_STRESS_MAX:
                 print(f"  [STRESSED] No failures at stress={stress_level:.3f}")
             else:
                 print(f"  [NORMAL] No failures")
@@ -298,7 +311,7 @@ class PhysicsBasedGridSimulator:
             'stress_level': stress_level,
             'num_nodes': self.num_nodes,
             'num_edges': len(self.edge_index[0]),
-            'base_mva': 100.0,
+            'base_mva': Settings.PowerSystem.SN_MVA,
         }
 
         return scenario_data
@@ -331,7 +344,7 @@ class PhysicsBasedGridSimulator:
         Failures emerge dynamically from physics — no pre-computed cascade sequence.
         """
         sequence = []
-        current_frequency = 60.0
+        current_frequency = Settings.Frequency.BASE_FREQUENCY
         self.thermal_sim.ambient_temperature = ambient_temp_base
         self.thermal_sim.reset_temperatures()
         self.frequency_sim.reset_ufls()
@@ -345,20 +358,32 @@ class PhysicsBasedGridSimulator:
         failure_record: Dict[int, Tuple[int, str]] = {}
         cascade_start_time = -1
 
-        # Stress ramp: rise from 60% to 100% of stress_level over first 2/3 of sequence
-        ramp_end = max(1, int(sequence_length * 0.67))
+        # Stress ramp: rise from 60% to 100% of stress_level over first RAMP_FRACTION of sequence
+        ramp_end = max(1, int(sequence_length * Settings.Simulation.RAMP_FRACTION))
 
         for t in range(sequence_length):
             # Current stress level
-            if stress_level > 0.7 and t < ramp_end:
+            if stress_level > Settings.Scenario.CASCADE_STRESS_MIN and t < ramp_end:
                 current_stress = stress_level * (0.6 + 0.4 * (t / (ramp_end - 1)))
             else:
                 current_stress = stress_level
 
             # Load calculation
-            load_noise = 0.05 if stress_level > 0.7 else 0.02
-            load_multiplier = 0.7 + current_stress * 0.4 if stress_level > 0.7 else 0.5 + current_stress * 0.4
-            noise = np.clip(np.random.normal(0, load_noise, self.num_nodes), -2*load_noise, 2*load_noise)
+            load_noise = (
+                Settings.Simulation.LOAD_NOISE_HIGH_STRESS
+                if stress_level > Settings.Scenario.CASCADE_STRESS_MIN
+                else Settings.Simulation.LOAD_NOISE_LOW_STRESS
+            )
+            load_multiplier = (
+                Settings.Simulation.LOAD_MULT_HIGH_BASE + current_stress * Settings.Simulation.LOAD_MULT_HIGH_SLOPE
+                if stress_level > Settings.Scenario.CASCADE_STRESS_MIN
+                else Settings.Simulation.LOAD_MULT_LOW_BASE + current_stress * Settings.Simulation.LOAD_MULT_LOW_SLOPE
+            )
+            noise = np.clip(
+                np.random.normal(0, load_noise, self.num_nodes),
+                -Settings.Simulation.LOAD_NOISE_CLIP_FACTOR * load_noise,
+                Settings.Simulation.LOAD_NOISE_CLIP_FACTOR * load_noise,
+            )
             load_values = self.base_load * load_multiplier * (1 + noise)
             load_values *= self.frequency_sim.ufls_shed_factor
 
@@ -374,7 +399,7 @@ class PhysicsBasedGridSimulator:
             generation[:] = 0.0  # reset all first
             for idx in active_gen_indices:
                 if active_capacity > 0:
-                    generation[idx] = (self.gen_capacity[idx] / active_capacity) * total_load * 1.02
+                    generation[idx] = (self.gen_capacity[idx] / active_capacity) * total_load * Settings.Simulation.GENERATION_MARGIN
 
             failed_nodes_t = list(cumulative_failed_nodes)
             failed_lines_t = get_failed_lines_from_nodes(
@@ -393,7 +418,7 @@ class PhysicsBasedGridSimulator:
 
             failure_ratio = len(cumulative_failed_nodes) / self.num_nodes
             if not is_stable:
-                if failure_ratio >= 0.9:
+                if failure_ratio >= Settings.Simulation.COLLAPSE_FAILURE_RATIO:
                     print(f"  [COMPLETE] Grid collapse ({len(cumulative_failed_nodes)}/{self.num_nodes} nodes). Generating final timestep.")
                 elif failure_ratio > 0:
                     print(f"  [UNSTABLE] t={t}, {len(cumulative_failed_nodes)}/{self.num_nodes} failed. Continuing...")
@@ -401,7 +426,7 @@ class PhysicsBasedGridSimulator:
                     # Voltage collapse at high stress with no prior failures.
                     # Degrade last stable voltages to trigger voltage-threshold failures
                     # so the cascade propagates naturally rather than rejecting the scenario.
-                    voltages = prev_voltages * 0.85
+                    voltages = prev_voltages * Settings.PowerFlow.VOLTAGE_COLLAPSE_PROXY
                     print(f"  [VCOLLAPSE] t={t}, stress={current_stress:.4f}: "
                           f"voltage collapse, proxy min={voltages.min():.3f}")
                 else:
@@ -416,7 +441,7 @@ class PhysicsBasedGridSimulator:
                 generation, load_values, current_frequency, 1.0
             )
 
-            ambient_temp = ambient_temp_base + 8 * np.sin(2 * np.pi * ((t / 60.0) - 6) / 24)
+            ambient_temp = ambient_temp_base + Settings.Thermal.DIURNAL_AMPLITUDE_C * np.sin(2 * np.pi * ((t / 60.0) - 6) / 24)
             self.thermal_sim.ambient_temperature = ambient_temp
             equipment_temps = self.thermal_sim.update_temperatures(heat_generation, 1.0)
 
