@@ -147,7 +147,7 @@ class RoboticEmbedding(nn.Module):
                     else:
                         sensor_flat = sensor_flat[:, :target_dim]
                         
-            sensor_features = self.sensor_encoder(sensor_flat).reshape(B, N, 32)
+            sensor_features = self.sensor_encoder(sensor_flat).reshape(B, N, Settings.Embedding.ROBOT_SENSOR_HIDDEN)
             
             combined = torch.cat([vis_features, therm_features, sensor_features], dim=-1)
             combined_flat = combined.reshape(B * N, -1)
