@@ -33,7 +33,7 @@ class FailureProbabilityHead(nn.Module):
         self.head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Dropout(0.4),  # Increased dropout
+            nn.Dropout(dropout),  # Increased dropout
             nn.Linear(hidden_dim // 2, 1),
             nn.Sigmoid()
         )
