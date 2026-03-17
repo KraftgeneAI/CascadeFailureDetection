@@ -35,7 +35,8 @@ def calculate_truncation_window(
         Tuple of (start_idx, end_idx) for slicing the sequence
     """
     # Define the valid range of sequence lengths
-    min_len = int(sequence_length * min_length_ratio)
+    minimum_model_length = 10
+    min_len = max(minimum_model_length, int(sequence_length * min_length_ratio))
     
     # --- 1. Determine the END point (Truncation) ---
     if is_cascade:
@@ -59,7 +60,6 @@ def calculate_truncation_window(
         end_idx = np.random.randint(min_len, global_max_cascade_len + 1)
     
     # --- 2. Determine the START point (Sliding Window) ---
-    minimum_model_length = 10
     max_start = end_idx - minimum_model_length
     
     if max_start > 0:

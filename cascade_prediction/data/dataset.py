@@ -261,7 +261,7 @@ class CascadeDataset(Dataset):
                 # Feature 12 is time_ratio. Change it to delta_t (progress within this specific window)
                 # i is the current step in the truncated sequence, len(sequence) is total steps
                 scada_data[:, 12] = i / max(1, len(sequence)) 
-                scada_data[:, 13:18] = 0
+                # scada_data[:, 13:18] = 0
                 # 13: stress_level - CRITICAL for prediction!
                 # 14: voltage_ratio (voltage / voltage_failure_threshold)
                 # 15: temp_ratio (temp / temp_failure_threshold)
@@ -322,21 +322,27 @@ class CascadeDataset(Dataset):
         # NOT absolute timesteps. Do NOT subtract start_idx from them!
         original_cascade_start_time = metadata.get('cascade_start_time', -1)
         if is_cascade and 0 <= original_cascade_start_time < len(sequence_original):
-            correct_timing_tensor = to_tensor(sequence_original[original_cascade_start_time].get('cascade_timing', np.zeros(timing_shape)))
+            correct_timing_tensor = torch.full(timing_shape, -1.0, dtype=torch.float32)
             
            # ====================================================================
             # START: TIMING SHIFT FIX (Crucial for Sliding Window)
             # ====================================================================
-            # 1. Filter for nodes that actually fail (target >= 0)
-            mask_failure = correct_timing_tensor >= 0
-            
-            # 2. Shift the timing by start_idx 
-            # If failure is at t=50 and we start at t=10, the model sees failure at t=40.
-            correct_timing_tensor[mask_failure] = correct_timing_tensor[mask_failure] - start_idx + cascade_start_time
-            
-            # 3. Normalize (Optional: if using 0-1 targets, ensure max_time_horizon is set)
+            failed_nodes_list = metadata.get('failed_nodes', [])
+            failure_times_list = metadata.get('failure_times', [])
+
+            # Build boolean mask over nodes
+            mask_failure = torch.zeros(num_nodes, dtype=torch.bool)
+            if failed_nodes_list:
+                mask_failure[failed_nodes_list] = True
+
+            # Assign shifted timing for failing nodes
+            if failed_nodes_list:
+                shifted = torch.tensor(failure_times_list, dtype=torch.float32) - start_idx
+                correct_timing_tensor[mask_failure] = shifted
+
+            # Normalize if max_time_horizon is set
             if hasattr(self, 'max_time_horizon') and self.max_time_horizon > 0:
-                 correct_timing_tensor[mask_failure] = correct_timing_tensor[mask_failure] / self.max_time_horizon
+                correct_timing_tensor[mask_failure] = correct_timing_tensor[mask_failure] / self.max_time_horizon
             # ====================================================================
             # END: TIMING SHIFT FIX
             # ====================================================================

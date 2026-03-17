@@ -161,8 +161,11 @@ class Trainer:
             B = batch_device['scada_data'].shape[0]
             N = batch_device['scada_data'].shape[2]
             
-            # Get the indices of the last valid timesteps (0-based indexing)
-            last_step_indices = batch_device['sequence_length'] - 1  # [B]
+            # Get the indices of the last valid timesteps (0-based indexing).
+            # Clamp to actual T after truncation — sequence_length may exceed the
+            # collated T when the batch was truncated to global_min_len.
+            T = batch_device['scada_data'].shape[1]
+            last_step_indices = (batch_device['sequence_length'] - 1).clamp(0, T - 1)  # [B]
             
             # Create batch indices for advanced indexing
             batch_indices = torch.arange(B, device=last_step_indices.device)  # [B]

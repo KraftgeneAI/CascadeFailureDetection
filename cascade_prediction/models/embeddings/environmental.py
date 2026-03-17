@@ -74,6 +74,10 @@ class EnvironmentalEmbedding(nn.Module):
         
         B, T, N, C, H, W = satellite_data.shape
         
+        # Guard: replace any NaN/Inf before hitting the CNN (CUDA assert is asynchronous
+        # and often surfaces here even when the real error is upstream)
+        satellite_data = torch.nan_to_num(satellite_data, nan=0.0, posinf=1.0, neginf=-1.0)
+        
         # Reshape to [B*T*N, C, H, W] for CNN processing
         sat_input = satellite_data.reshape(B * T * N, C, H, W)
         
