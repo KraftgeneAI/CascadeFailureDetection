@@ -359,12 +359,16 @@ class PhysicsBasedGridSimulator:
         cascade_start_time = -1
 
         # Stress ramp: rise from 60% to 100% of stress_level over first RAMP_FRACTION of sequence
-        ramp_end = max(1, int(sequence_length * Settings.Simulation.RAMP_FRACTION))
-
+        earlest_cascade_time = max(1, int(sequence_length * (np.random.uniform(Settings.Simulation.RAMP_FRACTION_MIN, Settings.Simulation.RAMP_FRACTION_MAX))))
+        alpha = (0.75/stress_level - 0.6) / earlest_cascade_time
+        if alpha * (sequence_length - 1) + 0.6 < 0.75:
+            alpha = 0.16 / (sequence_length - 1)
         for t in range(sequence_length):
             # Current stress level
-            if stress_level > Settings.Scenario.CASCADE_STRESS_MIN and t < ramp_end:
-                current_stress = stress_level * (0.6 + 0.4 * (t / (ramp_end - 1)))
+            if stress_level > Settings.Scenario.CASCADE_STRESS_MIN:
+                current_stress = stress_level * (0.6 + (t * alpha))
+                if current_stress > stress_level >= 0.75:
+                    current_stress = stress_level
             else:
                 current_stress = stress_level
 

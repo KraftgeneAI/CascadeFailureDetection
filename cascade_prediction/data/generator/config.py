@@ -11,7 +11,9 @@ All hardcoded numeric constants live here. Import with:
 # Power System Base
 # ---------------------------------------------------------------------------
 class PowerSystemConfig:
-    SN_MVA        = 100.0    # System base MVA (per-unit base)
+    SN_MVA        = 1000.0   # System base MVA. Load buses are 30–200 MW so 100 MVA
+                             # gives 80+ pu total load — NR diverges from flat start.
+                             # 1000 MVA keeps per-bus loads at 0.03–0.20 pu.
     V_NOM_KV      = 138.0    # Nominal bus voltage (kV)
     BASE_FREQUENCY = 60.0    # Nominal system frequency (Hz)
 
@@ -227,13 +229,15 @@ class CascadeConfig:
 # ---------------------------------------------------------------------------
 class SimulationConfig:
     DEFAULT_SEQUENCE_LENGTH = 30        # Timesteps per scenario
-    RAMP_FRACTION           = 0.67      # Fraction of sequence used for stress ramp
+    RAMP_FRACTION_MIN       = 0.65      # Minimum Fraction of sequence used for stress ramp
+    RAMP_FRACTION_MAX       = 0.85      # Maximum Fraction of sequence used for stress ramp
+
     GENERATION_MARGIN       = 1.02      # Generation oversizing factor vs total load
 
     # Load noise (std dev as fraction of load)
     LOAD_NOISE_HIGH_STRESS  = 0.05
     LOAD_NOISE_LOW_STRESS   = 0.02
-    LOAD_NOISE_CLIP_FACTOR  = 2.0       # Clip at ±N × std dev
+    LOAD_NOISE_CLIP_FACTOR  = 1.0       # Clip at ±N × std dev
 
     # Load multiplier formula: base + current_stress * slope
     LOAD_MULT_HIGH_BASE     = 0.7       # Base multiplier for high-stress scenarios
@@ -297,7 +301,7 @@ class TrainingConfig:
     TRAINER_MAX_GRAD_NORM   = 5.0       # Trainer class default max grad norm
     EPOCHS                  = 100       # Default number of training epochs
     BATCH_SIZE              = 8         # Default batch size
-    PATIENCE                = 25        # Early-stopping patience (epochs)
+    PATIENCE                = 10        # Early-stopping patience (epochs)
     WEIGHT_DECAY            = 1e-3      # Adam weight decay (L2 regularisation)
     SCHEDULER_PATIENCE      = 5         # ReduceLROnPlateau patience
     CASCADE_THRESHOLD       = 0.25      # Decision threshold for cascade prediction

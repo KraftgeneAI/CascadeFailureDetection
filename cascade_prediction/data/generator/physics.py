@@ -317,7 +317,14 @@ class PowerFlowSimulator:
             # distribute_slack spreads imbalance across all PV generators,
             # reducing voltage stress on the single slack bus at high load.
             status = self.network.pf(use_seed=False, distribute_slack=True)
-            is_stable = status.get("converged", {}).get("0", {}).get("now", False)
+            converged = status.get("converged")
+            if hasattr(converged, "iloc"):   # modern PyPSA returns a DataFrame
+                is_stable = bool(converged.iloc[0, 0])
+            elif isinstance(converged, dict):
+                inner = next(iter(converged.values()), {})
+                is_stable = bool(next(iter(inner.values()), False)) if isinstance(inner, dict) else bool(inner)
+            else:
+                is_stable = bool(converged) if converged is not None else False
 
             if not is_stable:
                 self._restore_network_state(original_bus_states, original_gen_states,
