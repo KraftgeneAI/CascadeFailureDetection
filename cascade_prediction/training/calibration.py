@@ -124,8 +124,8 @@ def calibrate_loss_weights(
                 # Extract Voltage (Feature 0) from the LAST timestep (-1) of the SCADA sequence
                 'voltages': batch_device['scada_data'][:, -1, :, 0:1] if 'scada_data' in batch_device else None,
                 'node_reactive_power': batch_device['scada_data'][:, -1, :, 3:4] if 'scada_data' in batch_device else None,
-                'line_reactive_power': batch_device['edge_attr'][:, :, 6:7] if 'edge_attr' in batch_device else None,
-                'active_power_line_flows': batch_device['edge_attr'][:, :, 5:6] if 'edge_attr' in batch_device else None,
+                'line_reactive_power': batch_device['edge_attr'][:, -1, :, 6:7] if 'edge_attr' in batch_device else None,
+                'active_power_line_flows': batch_device['edge_attr'][:, -1, :, 5:6] if 'edge_attr' in batch_device else None,
             }
             
             # Extract edge mask

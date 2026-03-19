@@ -236,7 +236,8 @@ class CascadeDataset(Dataset):
             'sensor_data': [],
             'pmu_sequence': [],
             'equipment_status': [],
-            'edge_mask': []
+            'edge_mask': [],
+            'edge_attr': [],       # per-timestep: cols 5-6 (line flows) change each step
         }
         
         last_step = sequence[-1]
@@ -286,33 +287,30 @@ class CascadeDataset(Dataset):
             data_arrays['thermal_data'].append(to_tensor(ts.get('thermal_data', np.zeros((num_nodes, 1, 32, 32)))))
             data_arrays['sensor_data'].append(to_tensor(ts.get('sensor_data', np.zeros((num_nodes, 12)))))
             data_arrays['equipment_status'].append(to_tensor(ts.get('equipment_status', np.zeros((num_nodes, 10)))))
-            
-            # Create edge mask using t-1 failures
-            global_idx = start_idx + i
-            prev_failed_node_indices = []
-            
-            if global_idx > 0:
-                prev_ts = sequence_original[global_idx - 1]
-                prev_status = prev_ts.get('node_labels', np.zeros(num_nodes))
-                prev_failed_node_indices = np.where(prev_status > 0.5)[0]
-            
-            edge_mask = create_edge_mask_from_failures(
-                edge_index,
-                prev_failed_node_indices,
-                num_edges
-            )
-            # Ensure edge_mask is a tensor
-            if not isinstance(edge_mask, torch.Tensor):
-                edge_mask = to_tensor(edge_mask)
+
+            # Per-timestep edge attributes — cols 5-6 (line_flows, line_flows_q) are dynamic
+            # and must be collected per step, not just from the last timestep.
+            ea = ts.get('edge_attr', np.zeros((num_edges, 7))).astype(np.float32)
+            if ea.shape[1] >= 7:
+                ea[:, 1] = normalize_power(ea[:, 1], self.base_mva)   # thermal_limits
+                ea[:, 5] = normalize_power(ea[:, 5], self.base_mva)   # line_flows_p
+                ea[:, 6] = normalize_power(ea[:, 6], self.base_mva)   # line_flows_q
+            data_arrays['edge_attr'].append(to_tensor(ea))
+
+            # Edge stress mask: encode thermal loading stress (pre-cascade window has no
+            # failed nodes, so a binary failure mask is always all-ones and useless).
+            if ea.shape[1] >= 6:
+                # col 5 after normalisation is line_flows_p / base_mva; thermal_limits
+                # col 1 is also normalised — compute loading ratio as |flow| / limit
+                thermal = np.abs(ea[:, 1]) + 1e-6
+                loading_ratio = np.abs(ea[:, 5]) / thermal
+                edge_mask = to_tensor(np.clip(1.0 - loading_ratio, 0.0, 1.0).astype(np.float32))
+            else:
+                edge_mask = to_tensor(np.ones(num_edges, dtype=np.float32))
             data_arrays['edge_mask'].append(edge_mask)
         
-        # Process edge attributes
-        edge_attr = last_step.get('edge_attr', np.zeros((num_edges, 7))).astype(np.float32)
-        if edge_attr.shape[1] >= 2:
-            edge_attr[:, 1] = normalize_power(edge_attr[:, 1], self.base_mva)
-            edge_attr[:, 5] = normalize_power(edge_attr[:, 5], self.base_mva)
-            edge_attr[:, 6] = normalize_power(edge_attr[:, 6], self.base_mva)
-        edge_attr = to_tensor(edge_attr)
+        # edge_attr is now collected per-timestep inside the loop above → [T, E, 7]
+        edge_attr = torch.stack(data_arrays['edge_attr'])  # [T, E, 7]
         
         # Ground truth labels and timing
         final_labels = to_tensor(sequence_original[-1].get('node_labels', np.zeros(num_nodes)))
@@ -370,12 +368,12 @@ class CascadeDataset(Dataset):
             'pmu_sequence': torch.stack(data_arrays['pmu_sequence']),
             'equipment_status': torch.stack(data_arrays['equipment_status']),
             'edge_index': to_tensor(edge_index).long(),
-            'edge_attr': edge_attr,
+            'edge_attr': edge_attr,           # [T, E, 7] — per-timestep, dynamic flows included
             'edge_mask': torch.stack(data_arrays['edge_mask']),
             'node_failure_labels': final_labels,
             'cascade_timing': correct_timing_tensor,
             'ground_truth_risk': to_tensor(metadata.get('ground_truth_risk', np.zeros(7, dtype=np.float32))),
-            'graph_properties': self._extract_graph_properties(last_step, metadata, edge_attr),
+            'graph_properties': self._extract_graph_properties(last_step, metadata, edge_attr[-1]),
             'temporal_sequence': scada_tensor,
             'sequence_length': len(sequence)
         }

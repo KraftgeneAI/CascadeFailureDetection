@@ -184,8 +184,8 @@ class Trainer:
             'cascade_timing': batch_device.get('cascade_timing'),
             'voltages': voltages,
             'node_reactive_power': node_reactive_power,
-            'line_reactive_power': batch_device['edge_attr'][:, :, 6:7] if 'edge_attr' in batch_device else None,
-            'active_power_line_flows': batch_device['edge_attr'][:, :, 5:6] if 'edge_attr' in batch_device else None,
+            'line_reactive_power': batch_device['edge_attr'][:, -1, :, 6:7] if 'edge_attr' in batch_device else None,
+            'active_power_line_flows': batch_device['edge_attr'][:, -1, :, 5:6] if 'edge_attr' in batch_device else None,
         }
         return targets
     

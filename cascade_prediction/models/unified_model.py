@@ -189,11 +189,14 @@ class UnifiedCascadePredictionModel(nn.Module):
                 env_emb.shape[0], E, Settings.Model.EDGE_FEATURES,
                 device=env_emb.device
             )
-        
-        if edge_attr_input.dim() == 2 and env_emb.dim() > 2:
-            edge_attr_input = edge_attr_input.unsqueeze(0).expand(
-                env_emb.shape[0], -1, -1
-            )
+
+        # Normalise shape:
+        # [E, F]      → [B, E, F]  (static, same for all timesteps — legacy fallback)
+        # [B, E, F]   → [B, E, F]  (static per-batch)
+        # [B, T, E, F]→ kept as-is (per-timestep, the correct case)
+        if edge_attr_input.dim() == 2:
+            edge_attr_input = edge_attr_input.unsqueeze(0).expand(env_emb.shape[0], -1, -1)
+        # dim==3 → [B, E, F]: already handled below per-timestep by repeating
         
         edge_mask_input = batch.get('edge_mask')
         
@@ -223,14 +226,20 @@ class UnifiedCascadePredictionModel(nn.Module):
             fused_sequence = torch.stack(fused_list, dim=1)
             fused = fused_sequence[:, -1, :, :]
             
-            edge_embedded = self.edge_embedding(edge_attr_input)
-            
             h_states = []
             lstm_state = None
             
             for t in range(T):
                 x_t = fused_sequence[:, t, :, :]
                 
+                # Select edge attributes for this timestep.
+                # [B, T, E, F] → use timestep t; [B, E, F] → reuse same for all t.
+                if edge_attr_input.dim() == 4:
+                    edge_attr_t = edge_attr_input[:, t, :, :]   # [B, E, F]
+                else:
+                    edge_attr_t = edge_attr_input               # [B, E, F] static
+                edge_embedded_t = self.edge_embedding(edge_attr_t)  # [B, E, hidden]
+
                 # Handle edge mask dimensions
                 if edge_mask_input is not None and edge_mask_input.dim() == 3:
                     mask_t = edge_mask_input[:, t, :]
@@ -238,11 +247,17 @@ class UnifiedCascadePredictionModel(nn.Module):
                     mask_t = edge_mask_input
                 
                 h_t, lstm_state = self.temporal_gnn(
-                    x_t, batch['edge_index'], edge_embedded,
+                    x_t, batch['edge_index'], edge_embedded_t,
                     edge_mask=mask_t,
                     h_prev=lstm_state
                 )
                 h_states.append(h_t)
+            
+            # Use last timestep's edge embedding for the downstream GNN layers
+            if edge_attr_input.dim() == 4:
+                edge_embedded = self.edge_embedding(edge_attr_input[:, -1, :, :])
+            else:
+                edge_embedded = self.edge_embedding(edge_attr_input)
             
             h_stack = torch.stack(h_states, dim=2)
             
