@@ -48,6 +48,12 @@ class GraphAttentionLayer(MessagePassing):
         else:
             self.bias = nn.Parameter(torch.Tensor(out_channels))
         
+        # Buffers used to pass edge-indexed tensors to message() without
+        # PyG re-indexing them (PyG gathers node-dim tensors by node index,
+        # which corrupts already-edge-indexed data).
+        self._edge_attr_buf: Optional[torch.Tensor] = None
+        self._edge_mask_buf: Optional[torch.Tensor] = None
+        
         self.reset_parameters()
     
     def reset_parameters(self):
@@ -85,42 +91,48 @@ class GraphAttentionLayer(MessagePassing):
             edge_index_batched.append(edge_index + b * N)
         edge_index_batched = torch.cat(edge_index_batched, dim=1)
         
-        # Handle batched edge attributes
-        if edge_attr is not None and edge_attr.dim() == 3 and edge_attr_transformed is not None:
-             edge_attr_propagated = edge_attr_transformed.reshape(B*edge_attr.shape[1], H, C_out)
+        # Build per-edge attribute tensor [B*E, H, C_out]
+        if edge_attr is not None and edge_attr_transformed is not None:
+            if edge_attr.dim() == 3:
+                edge_attr_propagated = edge_attr_transformed.reshape(B * edge_attr.shape[1], H, C_out)
+            else:
+                edge_attr_propagated = edge_attr_transformed.repeat(B, 1, 1)
         else:
-             edge_attr_propagated = edge_attr_transformed
+            edge_attr_propagated = None
 
-        # Process Edge Mask for Batching
+        # Build per-edge mask tensor [B*E, 1]
         edge_mask_propagated = None
         if edge_mask is not None:
-             edge_mask_propagated = edge_mask.reshape(-1, 1)
+            edge_mask_propagated = edge_mask.reshape(-1, 1)
         
-        if True:  # add_self_loops
-            edge_index_batched, _ = add_self_loops(edge_index_batched, num_nodes=B * N)
-            
-            # Handle Self Loop Attributes
-            if edge_attr_propagated is not None:
-                num_self_loops = B * N
-                self_loop_attr = torch.zeros(num_self_loops, H, C_out, device=edge_attr_propagated.device)
-                
-                if edge_attr_propagated.shape[0] == edge_attr.shape[0]:
-                    edge_attr_propagated = edge_attr_propagated.repeat(B, 1, 1)
-
-                edge_attr_propagated = torch.cat([edge_attr_propagated, self_loop_attr], dim=0)
-
-            # Handle Mask for Self Loops
-            if edge_mask_propagated is not None:
-                mask_self_loops = torch.ones(B * N, 1, device=edge_mask.device)
-                edge_mask_propagated = torch.cat([edge_mask_propagated, mask_self_loops], dim=0)
+        # Add self-loops to edge_index and extend edge-indexed buffers accordingly
+        edge_index_batched, _ = add_self_loops(edge_index_batched, num_nodes=B * N)
         
+        if edge_attr_propagated is not None:
+            num_self_loops = B * N
+            self_loop_attr = torch.zeros(num_self_loops, H, C_out, device=edge_attr_propagated.device)
+            edge_attr_propagated = torch.cat([edge_attr_propagated, self_loop_attr], dim=0)
+
+        if edge_mask_propagated is not None:
+            mask_self_loops = torch.ones(B * N, 1, device=edge_mask.device)
+            edge_mask_propagated = torch.cat([edge_mask_propagated, mask_self_loops], dim=0)
+        
+        # Store edge-indexed tensors in instance buffers so message() can
+        # access them directly without PyG re-indexing them by node index.
+        self._edge_attr_buf = edge_attr_propagated   # [B*E + B*N, H, C_out] or None
+        self._edge_mask_buf = edge_mask_propagated   # [B*E + B*N, 1] or None
+        
+        # Only pass node-indexed tensors (x) through propagate so PyG's
+        # gather logic works correctly.
         out = self.propagate(
             edge_index_batched,
             x=x_transformed,
-            edge_attr=edge_attr_propagated,
             size=(B * N, B * N),
-            edge_mask=edge_mask_propagated
         )
+        
+        # Clean up buffers
+        self._edge_attr_buf = None
+        self._edge_mask_buf = None
         
         out = out.reshape(B, N, H, C_out)
         
@@ -134,27 +146,35 @@ class GraphAttentionLayer(MessagePassing):
         return out
     
     def message(self, x_i: torch.Tensor, x_j: torch.Tensor,
-                edge_index_i: torch.Tensor, size_i: Optional[int],
-                edge_attr: Optional[torch.Tensor] = None,
-                edge_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+                edge_index_i: torch.Tensor, size_i: Optional[int]) -> torch.Tensor:
+        """
+        Compute attention-weighted messages.
+
+        x_i, x_j: [num_edges, H, C_out]  — gathered by PyG from node-indexed x
+        edge_index_i: [num_edges]         — destination node indices (for softmax)
         
-        alpha_src = (x_j * self.att_src).sum(dim=-1)
-        alpha_dst = (x_i * self.att_dst).sum(dim=-1)
-        alpha = alpha_src + alpha_dst
+        Edge attributes and mask are read from instance buffers using a running
+        counter so each call gets the correct slice (PyG calls message() once
+        per propagate call, passing all edges at once).
+        """
+        alpha_src = (x_j * self.att_src).sum(dim=-1)   # [num_edges, H]
+        alpha_dst = (x_i * self.att_dst).sum(dim=-1)   # [num_edges, H]
+        alpha = alpha_src + alpha_dst                   # [num_edges, H]
         
-        if edge_attr is not None and self.att_edge is not None:
-            alpha_edge = (edge_attr * self.att_edge).sum(dim=-1)
+        # Edge attribute contribution — buffer is already edge-indexed
+        if self._edge_attr_buf is not None and self.att_edge is not None:
+            alpha_edge = (self._edge_attr_buf * self.att_edge).sum(dim=-1)  # [num_edges, H]
             alpha = alpha + alpha_edge
         
         alpha = F.leaky_relu(alpha, Settings.Model.LEAKY_RELU_SLOPE)
         alpha = softmax(alpha, edge_index_i, num_nodes=size_i)
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
         
-        # Apply Masking
-        msg = x_j * alpha.unsqueeze(-1)
+        # Weighted message
+        msg = x_j * alpha.unsqueeze(-1)   # [num_edges, H, C_out]
         
-        if edge_mask is not None:
-            mask_broadcast = edge_mask.unsqueeze(1) 
-            msg = msg * mask_broadcast
+        # Apply edge mask from buffer
+        if self._edge_mask_buf is not None:
+            msg = msg * self._edge_mask_buf.unsqueeze(1)   # broadcast over H
         
         return msg

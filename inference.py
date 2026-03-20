@@ -34,9 +34,9 @@ try:
     from cascade_prediction.data.preprocessing import (
         normalize_power,
         normalize_frequency,
-        create_edge_mask_from_failures,
         to_tensor
     )
+    from cascade_prediction.data.generator.config import Settings
 except ImportError as e:
     print(f"Error: Could not import from cascade_prediction module: {e}")
     print("Make sure the cascade_prediction package is in your Python path.")
@@ -62,7 +62,9 @@ class ScenarioInferenceDataset(Dataset):
     """
     Inference dataset using refactored preprocessing functions.
     """
-    def __init__(self, scenario: Dict, window_size: int, base_mva: float = 100.0, base_frequency: float = 60.0):
+    def __init__(self, scenario: Dict, window_size: int,
+                 base_mva: float = Settings.Dataset.BASE_MVA,
+                 base_frequency: float = Settings.Dataset.BASE_FREQUENCY):
         self.window_size = window_size
         self.base_mva = base_mva
         self.base_frequency = base_frequency
@@ -80,61 +82,54 @@ class ScenarioInferenceDataset(Dataset):
             return {}
         
         data_dicts = {
-            'scada_data': [], 'pmu_sequence': [], 'satellite_data': [], 
-            'weather_sequence': [], 'threat_indicators': [], 'equipment_status': [], 
+            'scada_data': [], 'pmu_sequence': [], 'satellite_data': [],
+            'weather_sequence': [], 'threat_indicators': [], 'equipment_status': [],
             'visual_data': [], 'thermal_data': [], 'sensor_data': [], 'edge_mask': []
         }
-        
+
+        N = Settings.Topology.DEFAULT_NUM_NODES
+        T_total = self.total_steps
         for i, ts in enumerate(self.sequence_original):
-            # SCADA data with normalization using refactored function
-            scada_raw = ts.get('scada_data', np.zeros((118, 14)))
-            s = to_tensor(scada_raw)
-            
-            # Slice to 13 features (remove data leakage columns)
-            if s.shape[1] >= 13: 
-                s = s[:, :13]
-            
-            # Normalize power values (indices 2, 3, 4)
-            if s.shape[1] >= 6:
-                s[:, 2] = normalize_power(s[:, 2], self.base_mva)
-                s[:, 3] = normalize_power(s[:, 3], self.base_mva)
-                s[:, 4] = normalize_power(s[:, 4], self.base_mva)
-            data_dicts['scada_data'].append(s)
-            
+            # --- Fix #1: keep all 18 SCADA features, matching CascadeDataset ---
+            scada_raw = ts.get('scada_data', np.zeros((N, Settings.Embedding.INFRA_SCADA_FEATURES))).astype(np.float32)
+            if scada_raw.shape[1] >= 6:
+                scada_raw[:, 2] = normalize_power(scada_raw[:, 2], self.base_mva)
+                scada_raw[:, 3] = normalize_power(scada_raw[:, 3], self.base_mva)
+                scada_raw[:, 4] = normalize_power(scada_raw[:, 4], self.base_mva)
+            # Update time_ratio (col 12) to be window-relative progress
+            if scada_raw.shape[1] > 12:
+                scada_raw[:, 12] = i / max(1, T_total)
+            data_dicts['scada_data'].append(to_tensor(scada_raw))
+
             # PMU data with frequency normalization
-            pmu_raw = ts.get('pmu_sequence', np.zeros((118, 8)))
-            p = to_tensor(pmu_raw)
-            if p.shape[1] >= 6: 
-                p[:, 5] = normalize_frequency(p[:, 5], self.base_frequency)
-            data_dicts['pmu_sequence'].append(p)
-            
+            pmu_raw = ts.get('pmu_sequence', np.zeros((N, Settings.Embedding.INFRA_PMU_FEATURES))).astype(np.float32)
+            if pmu_raw.shape[1] >= 6:
+                pmu_raw[:, 5] = normalize_frequency(pmu_raw[:, 5], self.base_frequency)
+            data_dicts['pmu_sequence'].append(to_tensor(pmu_raw))
+
             # Other modalities
-            data_dicts['satellite_data'].append(to_tensor(ts.get('satellite_data', np.zeros((118, 12, 16, 16)))))
-            
-            weather_raw = ts.get('weather_sequence', np.zeros((118, 10, 8)))
-            weather_tensor = to_tensor(weather_raw)
-            data_dicts['weather_sequence'].append(weather_tensor.reshape(s.shape[0], -1))
-            
-            data_dicts['threat_indicators'].append(to_tensor(ts.get('threat_indicators', np.zeros((118, 6)))))
-            data_dicts['equipment_status'].append(to_tensor(ts.get('equipment_status', np.zeros((118, 10)))))
-            data_dicts['visual_data'].append(to_tensor(ts.get('visual_data', np.zeros((118, 3, 32, 32)))))
-            data_dicts['thermal_data'].append(to_tensor(ts.get('thermal_data', np.zeros((118, 1, 32, 32)))))
-            data_dicts['sensor_data'].append(to_tensor(ts.get('sensor_data', np.zeros((118, 12)))))
-            
-            # Edge mask using refactored function (Teacher Forcing)
-            prev_failed_node_indices = []
-            if i > 0:
-                prev = self.sequence_original[i-1]
-                labels = prev.get('node_labels')
-                if labels is not None:
-                    prev_failed_node_indices = np.where(labels > 0.5)[0]
-            
-            mask = create_edge_mask_from_failures(
-                self.edge_index,
-                prev_failed_node_indices,
-                self.num_edges
-            )
-            data_dicts['edge_mask'].append(to_tensor(mask))
+            data_dicts['satellite_data'].append(to_tensor(ts.get('satellite_data', np.zeros((N, Settings.Embedding.ENV_SATELLITE_CHANNELS, 16, 16)))))
+
+            weather_raw = ts.get('weather_sequence', np.zeros((N, 10, 8))).astype(np.float32)
+            data_dicts['weather_sequence'].append(to_tensor(weather_raw.reshape(N, -1)))
+
+            data_dicts['threat_indicators'].append(to_tensor(ts.get('threat_indicators', np.zeros((N, Settings.Embedding.ENV_THREAT_FEATURES)))))
+            data_dicts['equipment_status'].append(to_tensor(ts.get('equipment_status', np.zeros((N, Settings.Embedding.INFRA_EQUIPMENT_FEATURES)))))
+            data_dicts['visual_data'].append(to_tensor(ts.get('visual_data', np.zeros((N, Settings.Embedding.ROBOT_VISUAL_CHANNELS, 32, 32)))))
+            data_dicts['thermal_data'].append(to_tensor(ts.get('thermal_data', np.zeros((N, Settings.Embedding.ROBOT_THERMAL_CHANNELS, 32, 32)))))
+            data_dicts['sensor_data'].append(to_tensor(ts.get('sensor_data', np.zeros((N, Settings.Embedding.ROBOT_SENSOR_FEATURES)))))
+
+            # --- Fix #2: thermal loading stress mask, matching CascadeDataset ---
+            ea = ts.get('edge_attr', np.zeros((self.num_edges, 7))).astype(np.float32)
+            if ea.shape[1] >= 6:
+                ea_norm_flow = normalize_power(ea[:, 5].copy(), self.base_mva)
+                ea_norm_limit = normalize_power(ea[:, 1].copy(), self.base_mva)
+                thermal = np.abs(ea_norm_limit) + 1e-6
+                loading_ratio = np.abs(ea_norm_flow) / thermal
+                edge_mask = np.clip(1.0 - loading_ratio, 0.0, 1.0).astype(np.float32)
+            else:
+                edge_mask = np.ones(self.num_edges, dtype=np.float32)
+            data_dicts['edge_mask'].append(to_tensor(edge_mask))
 
         # Stack all timesteps
         for k, v in data_dicts.items(): 
@@ -153,16 +148,18 @@ class ScenarioInferenceDataset(Dataset):
         # Extract window from preprocessed sequence
         item = {k: v[start_idx:end_idx] for k, v in self.preprocessed_sequence.items()}
         
-        # Edge attributes with normalization
-        last_step = self.sequence_original[idx]
-        edge_attr_raw = last_step.get('edge_attr', np.zeros((self.num_edges, 7)))
-        edge_attr = to_tensor(edge_attr_raw)
-        
-        # Normalize thermal limits (index 1)
-        if edge_attr.shape[1] >= 2: 
-            edge_attr[:, 1] = normalize_power(edge_attr[:, 1], self.base_mva)
-        
-        item['edge_attr'] = edge_attr
+        # Edge attributes — per-timestep [T, E, 7] to match training format.
+        # Cols 5-6 (line_flows) are dynamic; cols 0-4 are static topology.
+        edge_attr_list = []
+        for step_idx in range(start_idx, end_idx):
+            ea_raw = self.sequence_original[step_idx].get('edge_attr', np.zeros((self.num_edges, 7)))
+            ea = to_tensor(ea_raw.astype(np.float32))
+            if ea.shape[1] >= 7:
+                ea[:, 1] = normalize_power(ea[:, 1], self.base_mva)
+                ea[:, 5] = normalize_power(ea[:, 5], self.base_mva)
+                ea[:, 6] = normalize_power(ea[:, 6], self.base_mva)
+            edge_attr_list.append(ea)
+        item['edge_attr'] = torch.stack(edge_attr_list)  # [T, E, 7]
         item['edge_index'] = self.edge_index
         item['sequence_length'] = end_idx - start_idx
         item['temporal_sequence'] = item['scada_data']
@@ -184,17 +181,23 @@ class CascadePredictor:
         # Set weights_only=False since we trust our own checkpoint
         checkpoint = torch.load(model_path, map_location=device, weights_only=False)
         self.model = UnifiedCascadePredictionModel(
-            embedding_dim=128, hidden_dim=128, num_gnn_layers=3, heads=4, dropout=0.1
+            embedding_dim=Settings.Model.EMBEDDING_DIM,
+            hidden_dim=Settings.Model.HIDDEN_DIM,
+            num_gnn_layers=Settings.Model.NUM_GNN_LAYERS,
+            heads=Settings.Model.HEADS,
+            dropout=Settings.Model.GAT_DROPOUT
         )
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         self.model.to(device)
         self.model.eval()
         
-        self.cascade_threshold = checkpoint.get('cascade_threshold', 0.1)
-        self.node_threshold = checkpoint.get('node_threshold', 0.35)
+        self.cascade_threshold = checkpoint.get('cascade_threshold', Settings.Training.CASCADE_THRESHOLD)
+        self.node_threshold = checkpoint.get('node_threshold', Settings.Training.NODE_THRESHOLD)
         print(f"✓ Model loaded. Thresholds: Cascade={self.cascade_threshold:.2f}, Node={self.node_threshold:.2f}")
 
-    def predict_scenario(self, data_path, scenario_idx, window_size=30, batch_size=32):
+    def predict_scenario(self, data_path, scenario_idx,
+                         window_size=Settings.Simulation.DEFAULT_SEQUENCE_LENGTH,
+                         batch_size=Settings.Training.BATCH_SIZE):
         files = sorted(glob.glob(f"{data_path}/scenario_*.pkl"))
         if not files: files = sorted(glob.glob(f"{data_path}/scenarios_batch_*.pkl"))
         target_file = files[scenario_idx]
@@ -219,7 +222,7 @@ class CascadePredictor:
         with torch.no_grad():
             for i, batch in enumerate(tqdm(loader)):
                 batch_dev = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k,v in batch.items()}
-                outputs = self.model(batch_dev, return_sequence=False)
+                outputs = self.model(batch_dev)
                 probs = outputs['failure_probability'].squeeze(-1).cpu().numpy()
                 if len(probs.shape) == 1: probs = probs.reshape(1, -1)
                 
@@ -282,7 +285,7 @@ class CascadePredictor:
             'cascade_probability': ranked_nodes[0]['score'] if ranked_nodes else 0.0,
             'ground_truth': {'is_cascade': meta.get('is_cascade'), 'failed_nodes': meta.get('failed_nodes', []), 'cascade_path': gt_path, 'ground_truth_risk': meta.get('ground_truth_risk', [])},
             'high_risk_nodes': risky_nodes,
-            'risk_assessment': final_risk_scores if final_risk_scores else [0.0]*7,
+            'risk_assessment': final_risk_scores if final_risk_scores else [0.0] * Settings.Model.RISK_DIM,
             'top_nodes': ranked_nodes,
             'cascade_path': cascade_path,
             'system_state': final_sys_state if final_sys_state else {'frequency': 0.0, 'voltages': []}
@@ -421,15 +424,17 @@ def main():
     parser.add_argument("--scenario_idx", type=int, default=0)
     parser.add_argument("--topology_path", default="data/grid_topology.pkl")
     parser.add_argument("--output", default="prediction.json")
-    parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--window_size", type=int, default=30)
+    parser.add_argument("--batch_size", type=int, default=Settings.Training.BATCH_SIZE)
+    parser.add_argument("--window_size", type=int, default=Settings.Simulation.DEFAULT_SEQUENCE_LENGTH)
     parser.add_argument("--device", default=None, help="Device to use (cpu/cuda)")
     args = parser.parse_args()
     
     dev = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"Using device: {dev}")
     
-    predictor = CascadePredictor(args.model_path, args.topology_path, device=dev, base_mva=100.0, base_freq=60.0)
+    predictor = CascadePredictor(args.model_path, args.topology_path, device=dev,
+                                 base_mva=Settings.Dataset.BASE_MVA,
+                                 base_freq=Settings.Dataset.BASE_FREQUENCY)
     
     print("\n" + "="*80)
     print("CASCADE FAILURE PREDICTION - PHYSICS-INFORMED INFERENCE")
