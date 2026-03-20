@@ -148,14 +148,12 @@ class UnifiedCascadePredictionModel(nn.Module):
     def forward(
         self,
         batch: Dict[str, torch.Tensor],
-        return_sequence: bool = False
     ) -> Dict[str, torch.Tensor]:
         """
         Complete forward pass with all modalities.
         
         Args:
             batch: Input batch dictionary containing all modalities
-            return_sequence: Whether to return full sequence (not used currently)
         
         Returns:
             Dictionary of predictions for all tasks

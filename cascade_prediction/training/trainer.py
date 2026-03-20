@@ -415,8 +415,8 @@ class Trainer:
 
             if self.use_amp and self.scaler is not None:
                 with torch.amp.autocast('cuda'):
-                    outputs = self.model(batch_device, return_sequence=True)
-                    
+                    outputs = self.model(batch_device)
+
                     if not self._model_validated:
                         self._validate_model_outputs(outputs, batch_device)
                         self._model_validated = True
@@ -440,7 +440,7 @@ class Trainer:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
-                outputs = self.model(batch_device, return_sequence=True)
+                outputs = self.model(batch_device)
                 
                 if not self._model_validated:
                     self._validate_model_outputs(outputs, batch_device)
@@ -544,9 +544,7 @@ class Trainer:
                     continue
 
                 # 2. Forward
-                outputs = self.model(batch_device, return_sequence=True)
-                
-                # 3. Loss
+                outputs = self.model(batch_device)
                 graph_properties = batch_device.get('graph_properties', {})
                 if 'edge_index' not in graph_properties:
                     graph_properties['edge_index'] = batch_device['edge_index']

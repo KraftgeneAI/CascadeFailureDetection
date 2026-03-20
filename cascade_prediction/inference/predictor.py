@@ -155,7 +155,7 @@ class CascadePredictor:
                 }
                 
                 # Forward pass
-                outputs = self.model(batch_dev, return_sequence=False)
+                outputs = self.model(batch_dev)
                 
                 # Extract failure probabilities
                 probs = outputs['failure_probability'].squeeze(-1).cpu().numpy()

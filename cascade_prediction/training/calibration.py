@@ -110,7 +110,7 @@ def calibrate_loss_weights(
                 continue
             
             # Forward pass
-            outputs = model(batch_device, return_sequence=True)
+            outputs = model(batch_device)
             
             # Prepare targets and graph_properties (matching original train_model.py)
             graph_properties = batch_device.get('graph_properties', {})

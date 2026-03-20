@@ -350,10 +350,12 @@ class PhysicsInformedLoss(nn.Module):
             return graph_properties.get(key)
         
         # --- 0. PREDICTION (Focal Loss) ---
+        # Head outputs probabilities via Sigmoid — convert to logits for numerically
+        # stable focal loss via binary_cross_entropy_with_logits.
         failure_prob = predictions['failure_probability'].squeeze(-1)
         failure_prob_clamped = failure_prob.clamp(1e-7, 1 - 1e-7)
         logits = torch.log(failure_prob_clamped / (1 - failure_prob_clamped))
-        
+
         L_pred = self.focal_loss(logits, targets['failure_label'])
         loss_dict['prediction'] = L_pred.item()
         total_loss += self.lambdas.get('prediction', 1.0) * L_pred
