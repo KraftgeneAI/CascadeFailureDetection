@@ -1,55 +1,102 @@
-##################
+#####################
 import cv2
 import numpy as np
 from typing import Tuple
+from ultralytics import YOLO
 
 
 def extract_threat_curve(
     video_path: str,
-    resize: Tuple[int, int] = (224, 224),
-    smooth: bool = True,
-    smoothing_window: int = 5,
+    model_path: str = "best-yolov8n-50epochs.pt",
+    resize: Tuple[int, int] = (640, 640),
+    confidence_threshold: float = 0.25,
+    frame_skip: int = 5,
+    smooth: bool = False,
+    smoothing_alpha: float = 0.6,
 ) -> np.ndarray:
-    """
-    Extract a per-frame normalized threat signal from a video.
 
-    Uses average frame brightness as a simple proxy.
-    Output is strictly normalized to [0, 1].
-    """
-
+    ### open video stream
     cap = cv2.VideoCapture(video_path)
 
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {video_path}")
 
-    threat_values = []
+    ### load YOLO model once
+    try:
+        model = YOLO(model_path)
+    except Exception as e:
+        cap.release()
+        raise RuntimeError(f"Failed to load YOLO model: {e}")
 
+    threat_values = []
+    frame_index = 0
+    detected_frames = 0
+
+    ### iterate over frames
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        frame = cv2.resize(frame, resize)
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        frame_index += 1
 
-        brightness = np.mean(gray) / 255.0
-        threat_values.append(brightness)
+        ### skip frames for speed
+        if frame_skip > 1 and frame_index % frame_skip != 0:
+            continue
+
+        frame_resized = cv2.resize(frame, resize)
+
+        ### run YOLO
+        try:
+            results = model(frame_resized, verbose=False)
+        except Exception:
+            threat_values.append(0.0)
+            continue
+
+        frame_area = frame_resized.shape[0] * frame_resized.shape[1]
+        frame_stress = 0.0
+
+        ### aggregate detections
+        for r in results:
+            boxes = r.boxes
+            if boxes is None:
+                continue
+
+            for box in boxes:
+                conf = float(box.conf[0])
+
+                ### filter weak detections
+                if conf < confidence_threshold:
+                    continue
+
+                xyxy = box.xyxy[0].cpu().numpy()
+                x1, y1, x2, y2 = xyxy
+
+                ### compute area ratio
+                box_area = max(0.0, (x2 - x1) * (y2 - y1))
+                area_ratio = box_area / frame_area
+
+                ### aggressive amplification
+                score = conf * (area_ratio ** 0.3) * 10.0
+                frame_stress += score
+
+        ### inject strong spike when detection exists
+        if frame_stress > 0:
+            frame_stress = min(frame_stress + 1.0, 5.0)
+            detected_frames += 1
+
+        threat_values.append(frame_stress)
 
     cap.release()
 
     if len(threat_values) == 0:
-        raise ValueError("No frames extracted from video.")
+        raise ValueError("No frames processed.")
 
     signal = np.array(threat_values, dtype=np.float32)
 
-    # Optional smoothing
-    if smooth and smoothing_window > 1:
-        kernel = np.ones(smoothing_window) / smoothing_window
-        signal = np.convolve(signal, kernel, mode="same")
-
-    # Min-max normalization
-    min_val = signal.min()
+    ### normalize to [0, 1]
     max_val = signal.max()
+    min_val = signal.min()
 
     if max_val > min_val:
         signal = (signal - min_val) / (max_val - min_val)
@@ -58,23 +105,23 @@ def extract_threat_curve(
 
     signal = np.clip(signal, 0.0, 1.0)
 
+    ### optional smoothing (disabled by default)
+    if smooth and len(signal) > 1:
+        smoothed = [signal[0]]
+
+        for val in signal[1:]:
+            prev = smoothed[-1]
+            smoothed.append(
+                smoothing_alpha * val + (1 - smoothing_alpha) * prev
+            )
+
+        signal = np.array(smoothed, dtype=np.float32)
+
+    ### log info
+    print(f"[VideoProcessor] Processed frames: {frame_index}")
+    print(f"[VideoProcessor] Detection frames: {detected_frames}")
+    print(f"[VideoProcessor] Max stress: {float(signal.max()):.4f}")
+
     return signal
-
-
-if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) < 2:
-        print("Usage: python video_processor.py <video_path>")
-        sys.exit(1)
-
-    video_path = sys.argv[1]
-
-    signal = extract_threat_curve(video_path)
-
-    print("Frames:", len(signal))
-    print("Min:", float(signal.min()))
-    print("Max:", float(signal.max()))
-    print("First 10 values:", signal[:10])
 
 #%#
