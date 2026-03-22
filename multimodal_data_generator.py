@@ -159,6 +159,12 @@ Examples:
         help='Starting batch number for output files (for parallel generation)'
     )
 
+    parser.add_argument(
+        '--video-path',
+        type=str,
+        default=None,
+        help='Optional path to wildfire video for external stress signal'
+    )
     args = parser.parse_args()
     
     # Validate ratios
@@ -245,3 +251,5 @@ Examples:
 
 if __name__ == "__main__":
     main()
+
+#%#
