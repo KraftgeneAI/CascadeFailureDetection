@@ -15,27 +15,21 @@ Author: Kraftgene AI Inc.
 """
 
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 import pickle
 import numpy as np
 from pathlib import Path
 import json
 from typing import Dict, List, Optional, Tuple, Any
 import argparse
-import glob
 import time
 import sys
-from tqdm import tqdm
 
 # Import refactored classes
 try:
     from cascade_prediction.models.unified_model import UnifiedCascadePredictionModel
     from cascade_prediction.data.collation import collate_cascade_batch
-    from cascade_prediction.data.preprocessing import (
-        normalize_power,
-        normalize_frequency,
-        to_tensor
-    )
+    from cascade_prediction.data.dataset import CascadeDataset
     from cascade_prediction.data.generator.config import Settings
 except ImportError as e:
     print(f"Error: Could not import from cascade_prediction module: {e}")
@@ -58,127 +52,17 @@ class NumpyEncoder(json.JSONEncoder):
 # ============================================================================
 # INFERENCE DATASET
 # ============================================================================
-class ScenarioInferenceDataset(Dataset):
-    """
-    Inference dataset using refactored preprocessing functions.
-    """
-    def __init__(self, scenario: Dict, window_size: int,
-                 base_mva: float = Settings.Dataset.BASE_MVA,
-                 base_frequency: float = Settings.Dataset.BASE_FREQUENCY):
-        self.window_size = window_size
-        self.base_mva = base_mva
-        self.base_frequency = base_frequency
-        self.sequence_original = scenario.get('sequence', [])
-        self.edge_index = scenario['edge_index']
-        if not isinstance(self.edge_index, torch.Tensor):
-            self.edge_index = torch.from_numpy(self.edge_index).long()
-        self.total_steps = len(self.sequence_original)
-        self.num_edges = self.edge_index.shape[1]
-        self.preprocessed_sequence = self._preprocess_full_sequence()
-
-    def _preprocess_full_sequence(self):
-        """Preprocess full sequence using refactored preprocessing functions."""
-        if self.total_steps == 0: 
-            return {}
-        
-        data_dicts = {
-            'scada_data': [], 'pmu_sequence': [], 'satellite_data': [],
-            'weather_sequence': [], 'threat_indicators': [], 'equipment_status': [],
-            'visual_data': [], 'thermal_data': [], 'sensor_data': [], 'edge_mask': []
-        }
-
-        N = Settings.Topology.DEFAULT_NUM_NODES
-        T_total = self.total_steps
-        for i, ts in enumerate(self.sequence_original):
-            # --- Fix #1: keep all 18 SCADA features, matching CascadeDataset ---
-            scada_raw = ts.get('scada_data', np.zeros((N, Settings.Embedding.INFRA_SCADA_FEATURES))).astype(np.float32)
-            if scada_raw.shape[1] >= 6:
-                scada_raw[:, 2] = normalize_power(scada_raw[:, 2], self.base_mva)
-                scada_raw[:, 3] = normalize_power(scada_raw[:, 3], self.base_mva)
-                scada_raw[:, 4] = normalize_power(scada_raw[:, 4], self.base_mva)
-            # Update time_ratio (col 12) to be window-relative progress
-            if scada_raw.shape[1] > 12:
-                scada_raw[:, 12] = i / max(1, T_total)
-            data_dicts['scada_data'].append(to_tensor(scada_raw))
-
-            # PMU data with frequency normalization
-            pmu_raw = ts.get('pmu_sequence', np.zeros((N, Settings.Embedding.INFRA_PMU_FEATURES))).astype(np.float32)
-            if pmu_raw.shape[1] >= 6:
-                pmu_raw[:, 5] = normalize_frequency(pmu_raw[:, 5], self.base_frequency)
-            data_dicts['pmu_sequence'].append(to_tensor(pmu_raw))
-
-            # Other modalities
-            data_dicts['satellite_data'].append(to_tensor(ts.get('satellite_data', np.zeros((N, Settings.Embedding.ENV_SATELLITE_CHANNELS, 16, 16)))))
-
-            weather_raw = ts.get('weather_sequence', np.zeros((N, 10, 8))).astype(np.float32)
-            data_dicts['weather_sequence'].append(to_tensor(weather_raw.reshape(N, -1)))
-
-            data_dicts['threat_indicators'].append(to_tensor(ts.get('threat_indicators', np.zeros((N, Settings.Embedding.ENV_THREAT_FEATURES)))))
-            data_dicts['equipment_status'].append(to_tensor(ts.get('equipment_status', np.zeros((N, Settings.Embedding.INFRA_EQUIPMENT_FEATURES)))))
-            data_dicts['visual_data'].append(to_tensor(ts.get('visual_data', np.zeros((N, Settings.Embedding.ROBOT_VISUAL_CHANNELS, 32, 32)))))
-            data_dicts['thermal_data'].append(to_tensor(ts.get('thermal_data', np.zeros((N, Settings.Embedding.ROBOT_THERMAL_CHANNELS, 32, 32)))))
-            data_dicts['sensor_data'].append(to_tensor(ts.get('sensor_data', np.zeros((N, Settings.Embedding.ROBOT_SENSOR_FEATURES)))))
-
-            # --- Fix #2: thermal loading stress mask, matching CascadeDataset ---
-            ea = ts.get('edge_attr', np.zeros((self.num_edges, 7))).astype(np.float32)
-            if ea.shape[1] >= 6:
-                ea_norm_flow = normalize_power(ea[:, 5].copy(), self.base_mva)
-                ea_norm_limit = normalize_power(ea[:, 1].copy(), self.base_mva)
-                thermal = np.abs(ea_norm_limit) + 1e-6
-                loading_ratio = np.abs(ea_norm_flow) / thermal
-                edge_mask = np.clip(1.0 - loading_ratio, 0.0, 1.0).astype(np.float32)
-            else:
-                edge_mask = np.ones(self.num_edges, dtype=np.float32)
-            data_dicts['edge_mask'].append(to_tensor(edge_mask))
-
-        # Stack all timesteps
-        for k, v in data_dicts.items(): 
-            data_dicts[k] = torch.stack(v)
-        
-        return data_dicts
-
-    def __len__(self): 
-        return self.total_steps
-    
-    def __getitem__(self, idx):
-        """Get a windowed sequence ending at idx."""
-        end_idx = idx + 1
-        start_idx = max(0, end_idx - self.window_size)
-        
-        # Extract window from preprocessed sequence
-        item = {k: v[start_idx:end_idx] for k, v in self.preprocessed_sequence.items()}
-        
-        # Edge attributes — per-timestep [T, E, 7] to match training format.
-        # Cols 5-6 (line_flows) are dynamic; cols 0-4 are static topology.
-        edge_attr_list = []
-        for step_idx in range(start_idx, end_idx):
-            ea_raw = self.sequence_original[step_idx].get('edge_attr', np.zeros((self.num_edges, 7)))
-            ea = to_tensor(ea_raw.astype(np.float32))
-            if ea.shape[1] >= 7:
-                ea[:, 1] = normalize_power(ea[:, 1], self.base_mva)
-                ea[:, 5] = normalize_power(ea[:, 5], self.base_mva)
-                ea[:, 6] = normalize_power(ea[:, 6], self.base_mva)
-            edge_attr_list.append(ea)
-        item['edge_attr'] = torch.stack(edge_attr_list)  # [T, E, 7]
-        item['edge_index'] = self.edge_index
-        item['sequence_length'] = end_idx - start_idx
-        item['temporal_sequence'] = item['scada_data']
-        item['graph_properties'] = {}
-        
-        return item
 
 # ============================================================================
 # PREDICTOR
 # ============================================================================
 class CascadePredictor:
-    def __init__(self, model_path, topology_path, device, base_mva, base_freq):
-        self.device = device
-        with open(topology_path, 'rb') as f:
-            topology = pickle.load(f)
-            self.edge_index = topology['edge_index']
-        
+    def __init__(self, model_path, topology_path=None, device=None, base_mva=Settings.Dataset.BASE_MVA, base_freq=Settings.Dataset.BASE_FREQUENCY):
+        self.device = device or torch.device('cpu')
+        self.base_mva = base_mva
+        self.base_freq = base_freq
+
         print(f"Loading model from {model_path}...")
-        # Set weights_only=False since we trust our own checkpoint
         checkpoint = torch.load(model_path, map_location=device, weights_only=False)
         self.model = UnifiedCascadePredictionModel(
             embedding_dim=Settings.Model.EMBEDDING_DIM,
@@ -190,7 +74,7 @@ class CascadePredictor:
         self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         self.model.to(device)
         self.model.eval()
-        
+
         self.cascade_threshold = checkpoint.get('cascade_threshold', Settings.Training.CASCADE_THRESHOLD)
         self.node_threshold = checkpoint.get('node_threshold', Settings.Training.NODE_THRESHOLD)
         print(f"✓ Model loaded. Thresholds: Cascade={self.cascade_threshold:.2f}, Node={self.node_threshold:.2f}")
@@ -198,97 +82,97 @@ class CascadePredictor:
     def predict_scenario(self, data_path, scenario_idx,
                          window_size=Settings.Simulation.DEFAULT_SEQUENCE_LENGTH,
                          batch_size=Settings.Training.BATCH_SIZE):
-        files = sorted(glob.glob(f"{data_path}/scenario_*.pkl"))
-        if not files: files = sorted(glob.glob(f"{data_path}/scenarios_batch_*.pkl"))
-        target_file = files[scenario_idx]
-        print(f"Loading: {target_file}")
-        
-        with open(target_file, 'rb') as f:
-            data = pickle.load(f)
-        scenario = data[0] if isinstance(data, list) else data
-        scenario['edge_index'] = self.edge_index 
-        
-        dataset = ScenarioInferenceDataset(scenario, window_size)
-        loader = DataLoader(dataset, batch_size=batch_size, collate_fn=collate_cascade_batch, shuffle=False)
-        
-        print(f"Running Inference on {len(dataset)} steps...")
-        
-        max_probs = {}     
-        first_time = {}    
-        final_risk_scores = None
-        final_sys_state = None
+        # Use CascadeDataset to load and preprocess — identical to training pipeline
+        dataset = CascadeDataset(
+            data_path,
+            mode='full_sequence',
+            base_mva=self.base_mva,
+            base_frequency=self.base_freq,
+        )
 
-        current_t = 0
+        print(f"Running inference on scenario {scenario_idx} / {len(dataset) - 1}...")
+        item = dataset[scenario_idx]
+        if not item:
+            raise ValueError(f"Scenario {scenario_idx} could not be loaded from {data_path}")
+
+        # Collate single item into a batch of 1
+        batch = collate_cascade_batch([item])
+        batch_dev = {
+            k: (v.to(self.device) if isinstance(v, torch.Tensor) else v)
+            for k, v in batch.items()
+        }
+
         with torch.no_grad():
-            for i, batch in enumerate(tqdm(loader)):
-                batch_dev = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k,v in batch.items()}
-                outputs = self.model(batch_dev)
-                probs = outputs['failure_probability'].squeeze(-1).cpu().numpy()
-                if len(probs.shape) == 1: probs = probs.reshape(1, -1)
-                
-                for b in range(probs.shape[0]):
-                    t = current_t + 1
-                    step_probs = probs[b]
-                    
-                    for n, p in enumerate(step_probs):
-                        p = float(p)
-                        if n not in max_probs or p > max_probs[n]:
-                            max_probs[n] = p
-                            first_time[n] = t 
-                            
-                    current_t += 1
-                
-                if i == len(loader) - 1:
-                    final_risk_scores = outputs['risk_scores'][-1].mean(dim=0).cpu().numpy().tolist()
-                    final_sys_state = {
-                        'frequency': float(outputs['frequency'].mean().item()),
-                        'voltages': outputs['voltages'][-1].reshape(-1).cpu().numpy().tolist()
-                    }
-        
+            outputs = self.model(batch_dev)
+
+        # Node failure probabilities [1, N] → [N]
+        probs = outputs['failure_probability'].squeeze(-1).squeeze(0).cpu().numpy()  # [N]
+        # Predicted failure times [1, N, 1] → [N], in timesteps; convert to minutes
+        pred_timing_minutes = outputs['cascade_timing'].squeeze(-1).squeeze(0).cpu().numpy()  # [N]
+        final_risk_scores = outputs['risk_scores'][0].mean(dim=0).cpu().numpy().tolist()
+        final_sys_state = {
+            'frequency': float(outputs['frequency'].mean().item()),
+            'voltages': outputs['voltages'][0].reshape(-1).cpu().numpy().tolist()
+        }
+
+        # Build per-node results — include predicted failure time for risky nodes
+        max_probs = {n: float(probs[n]) for n in range(len(probs))}
         risky_nodes = [n for n, p in max_probs.items() if p > self.node_threshold]
-        
-        ranked_nodes = []
-        for n in risky_nodes:
-            ranked_nodes.append({
+
+        ranked_nodes = sorted(
+            [{
                 'node_id': n,
                 'score': max_probs[n],
-                'peak_time': first_time[n]
-            })
-            
-        ranked_nodes.sort(key=lambda x: -x['score'])
-        
+                'pred_time_minutes': float(pred_timing_minutes[n]),
+            } for n in risky_nodes],
+            key=lambda x: x['pred_time_minutes']  # sort by predicted failure time
+        )
+
+        # Assign sequence order based on predicted failure time (nodes failing at
+        # the same minute get the same order number)
         cascade_path = []
         if ranked_nodes:
             current_rank = 1
-            last_score = ranked_nodes[0]['score']
-            for i, node in enumerate(ranked_nodes):
-                if (last_score - node['score']) > 0.002: 
+            last_time = ranked_nodes[0]['pred_time_minutes']
+            for node in ranked_nodes:
+                if node['pred_time_minutes'] > last_time + 0.5:  # >0.5 min gap = new rank
                     current_rank += 1
-                    last_score = node['score']
+                    last_time = node['pred_time_minutes']
                 cascade_path.append({
                     'order': current_rank,
                     'node_id': node['node_id'],
-                    'ranking_score': node['score']
+                    'ranking_score': node['score'],
+                    'pred_time_minutes': node['pred_time_minutes'],
                 })
 
-        meta = scenario.get('metadata', {})
+        # Ground truth from dataset item
+        meta = dataset.scenario_files[scenario_idx]
+        with open(meta, 'rb') as f:
+            raw = pickle.load(f)
+        scenario_meta = (raw[0] if isinstance(raw, list) else raw).get('metadata', {})
+
         gt_path = []
-        if 'failed_nodes' in meta and 'failure_times' in meta:
+        if 'failed_nodes' in scenario_meta and 'failure_times' in scenario_meta:
             gt_path = sorted([
-                {'node_id': int(n), 'time_minutes': float(t)} 
-                for n,t in zip(meta['failed_nodes'], meta['failure_times'])
+                {'node_id': int(n), 'time_minutes': float(t)}
+                for n, t in zip(scenario_meta['failed_nodes'], scenario_meta['failure_times'])
             ], key=lambda x: x['time_minutes'])
 
         return {
             'inference_time': 0.0,
-            'cascade_detected': bool(ranked_nodes),
+            'cascade_detected': bool(risky_nodes),
             'cascade_probability': ranked_nodes[0]['score'] if ranked_nodes else 0.0,
-            'ground_truth': {'is_cascade': meta.get('is_cascade'), 'failed_nodes': meta.get('failed_nodes', []), 'cascade_path': gt_path, 'ground_truth_risk': meta.get('ground_truth_risk', [])},
+            'ground_truth': {
+                'is_cascade': scenario_meta.get('is_cascade'),
+                'failed_nodes': scenario_meta.get('failed_nodes', []),
+                'cascade_path': gt_path,
+                'ground_truth_risk': scenario_meta.get('ground_truth_risk', [])
+            },
             'high_risk_nodes': risky_nodes,
-            'risk_assessment': final_risk_scores if final_risk_scores else [0.0] * Settings.Model.RISK_DIM,
+            'risk_assessment': final_risk_scores,
             'top_nodes': ranked_nodes,
             'cascade_path': cascade_path,
-            'system_state': final_sys_state if final_sys_state else {'frequency': 0.0, 'voltages': []}
+            'system_state': final_sys_state,
         }
 
 def print_report(res: Dict, cascade_thresh: float, node_thresh: float):
@@ -326,22 +210,21 @@ def print_report(res: Dict, cascade_thresh: float, node_thresh: float):
 
     if actual or pred:
         print("\n--- 3. Timing Analysis ---")
-        print(f"  Metric                      | Predicted       | Ground Truth")
-        print(f"  ----------------------------|-----------------|-----------------")
-        
-        scores = [n['score'] for n in res['top_nodes']]
-        min_s, max_s = (min(scores), max(scores)) if scores else (0.0, 0.0)
-        score_spread = max_s - min_s
-        
+        pred_path = res['cascade_path']
         act_path = gt.get('cascade_path', [])
-        min_t, max_t = 0.0, 0.0
-        if act_path:
-            times = [x['time_minutes'] for x in act_path]
-            min_t, max_t = min(times), max(times)
-        
-        print(f"  Prediction Mode             | Relative Rank   | Absolute Time")
-        print(f"  Range (Start -> End)        | {max_s:.3f} -> {min_s:.3f} | {min_t:.2f} -> {max_t:.2f} min")
-        print(f"  Sequence Spread             | {score_spread:.3f} (Score)  | {max_t - min_t:.2f} minutes")
+
+        pred_times = [n['pred_time_minutes'] for n in pred_path] if pred_path else []
+        act_times  = [x['time_minutes'] for x in act_path] if act_path else []
+
+        min_pt, max_pt = (min(pred_times), max(pred_times)) if pred_times else (0.0, 0.0)
+        min_at, max_at = (min(act_times),  max(act_times))  if act_times  else (0.0, 0.0)
+
+        print(f"  {'Metric':<28} | {'Predicted':>12} | {'Actual':>12}")
+        print(f"  {'-'*28}-+-{'-'*12}-+-{'-'*12}")
+        print(f"  {'First failure (min)':<28} | {min_pt:>12.2f} | {min_at:>12.2f}")
+        print(f"  {'Last failure (min)':<28} | {max_pt:>12.2f} | {max_at:>12.2f}")
+        print(f"  {'Spread (min)':<28} | {max_pt-min_pt:>12.2f} | {max_at-min_at:>12.2f}")
+        print(f"  {'Nodes at risk':<28} | {len(pred_path):>12} | {len(act_path):>12}")
 
     print("\n--- 4. Critical Information ---")
     print(f"System Frequency: {res['system_state']['frequency']:.2f} Hz")
@@ -386,34 +269,35 @@ def print_report(res: Dict, cascade_thresh: float, node_thresh: float):
     print("\n--- 5. Cascade Path Analysis (Sequence Order) ---")
     pred_path = res['cascade_path']
     actual_path = gt.get('cascade_path', [])
-    
-    print(f"  {'Seq #':<6} | {'Predicted Node':<15} | {'Score':<8} | {'Actual Seq #':<15} | {'Actual Node':<15} | {'Delta T (min)':<15}")
-    print(f"  {'-'*6} | {'-'*15} | {'-'*8} | {'-'*15} | {'-'*15} | {'-'*15}")
-    
-    max_rows = max(len(pred_path), len(actual_path))
+
+    print(f"  {'Seq#':<5} | {'Pred Node':<10} | {'Prob':>6} | {'Pred(min)':>9} | {'Act Seq#':<8} | {'Act Node':<10} | {'Act(min)':>8}")
+    print(f"  {'-'*5}-+-{'-'*10}-+-{'-'*6}-+-{'-'*9}-+-{'-'*8}-+-{'-'*10}-+-{'-'*8}")
+
     curr_act_seq = 0
     last_act_time = -999.0
-    
+    max_rows = max(len(pred_path), len(actual_path))
+
     for i in range(max_rows):
-        p_seq, p_node, p_score = "", "", ""
+        p_seq = p_node = p_score = p_time = ""
         if i < len(pred_path):
-            p_item = pred_path[i]
-            p_seq = str(p_item['order'])
-            p_node = f"Node {p_item['node_id']}"
-            p_score = f"{p_item['ranking_score']:.3f}"
-        
-        a_seq, a_node, a_time = "", "", ""
+            p = pred_path[i]
+            p_seq   = str(p['order'])
+            p_node  = f"Node {p['node_id']}"
+            p_score = f"{p['ranking_score']:.3f}"
+            p_time  = f"{p['pred_time_minutes']:.2f}"
+
+        a_seq = a_node = a_time = ""
         if i < len(actual_path):
-            a_item = actual_path[i]
-            t = a_item['time_minutes']
+            a = actual_path[i]
+            t = a['time_minutes']
             if t > last_act_time + 0.1:
                 curr_act_seq += 1
                 last_act_time = t
-            a_seq = str(curr_act_seq)
-            a_node = f"Node {a_item['node_id']}"
+            a_seq  = str(curr_act_seq)
+            a_node = f"Node {a['node_id']}"
             a_time = f"{t:.2f}"
-        
-        print(f"  {p_seq:<6} | {p_node:<15} | {p_score:<8} | {a_seq:<15} | {a_node:<15} | {a_time:<15}")
+
+        print(f"  {p_seq:<5} | {p_node:<10} | {p_score:>6} | {p_time:>9} | {a_seq:<8} | {a_node:<10} | {a_time:>8}")
     print("="*80 + "\n")
 
 
