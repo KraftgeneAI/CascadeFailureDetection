@@ -326,18 +326,21 @@ class EnvironmentalDataGenerator:
         cascade_start: int,
         stress_level: float,
         sequence_length: int,
+        precursor_duration: int = None,
         is_cascade: bool = False
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Generate all environmental data in one call.
-        
+
         This is a convenience method that calls all three generation methods
         and returns the complete environmental data package.
-        
-        IMPORTANT: Uses a single precursor_duration value for all three data types
-        to ensure consistent precursor signal timing across satellite, weather, and
-        threat data.
-        
+
+        IMPORTANT: ``precursor_duration`` must be drawn once per scenario (not
+        per timestep) and passed in here so that the precursor signal window is
+        the same across every timestep of the same scenario.  If the caller
+        omits it a random value is drawn as a fallback, but this breaks temporal
+        coherence and should only be done in isolation testing.
+
         Parameters:
         -----------
         failed_nodes : List[int]
@@ -350,7 +353,16 @@ class EnvironmentalDataGenerator:
             Timestep when cascade begins (-1 if no cascade)
         stress_level : float
             Overall grid stress (0.0 to 1.0)
+        sequence_length: int
+            total sequence length
+        precursor_duration : int, optional
+            Number of timesteps before cascade_start over which precursor
+            signals ramp up.  Should be fixed for the whole scenario.
+            Defaults to a random draw in [8, 20] if not provided.
+        is_cascade: bool
+            Whether this is a cascade senario.
         
+
         Returns:
         --------
         satellite_data : np.ndarray, shape (num_nodes, 12, 16, 16)
@@ -360,20 +372,20 @@ class EnvironmentalDataGenerator:
         threat_indicators : np.ndarray, shape (num_nodes, 6)
             Threat levels for 6 hazard types
         """
-        # Calculate precursor_duration once for consistent timing across all data types
-        precursor_duration = np.random.randint(8, 20)
-        
+        if precursor_duration is None:
+            precursor_duration = int(np.random.randint(8, 20))
+
         satellite_data = self.generate_satellite_imagery(
             failed_nodes, timestep, cascade_start, stress_level, precursor_duration
         )
-        
+
         weather_sequence = self.generate_weather_sequence(
             timestep, stress_level
         )
-        
+
         threat_indicators = self.generate_threat_indicators(
             failed_nodes, failed_lines, timestep, cascade_start, stress_level,sequence_length, precursor_duration,
             is_cascade 
         )
-        
+
         return satellite_data, weather_sequence, threat_indicators

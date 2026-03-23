@@ -221,6 +221,10 @@ class CascadeSimulator:
         Returns:
             List of (node_id, failure_time, reason) tuples
         """
+        # Work on local copies so the caller's arrays are never mutated.
+        generation = generation.copy()
+        load = load.copy()
+
         # Initialize
         failed_nodes = set(node[0] for node in initial_failed_nodes)
         failed_reasons = [node[1] for node in initial_failed_nodes]
@@ -228,7 +232,7 @@ class CascadeSimulator:
             (fail_node, 0.0, fail_reason)
             for fail_node, fail_reason in zip(failed_nodes, failed_reasons)
         ]
-        
+
         queue = [(node[0], 0.0) for node in initial_failed_nodes]
         visited = set(node[0] for node in initial_failed_nodes)
         

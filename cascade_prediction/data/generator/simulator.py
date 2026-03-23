@@ -45,9 +45,9 @@ class PhysicsBasedGridSimulator:
     
     SCENARIO TYPES:
     ---------------
-    - NORMAL (stress 0.3-0.7): Grid operates safely, no failures
-    - STRESSED (stress 0.8-0.9): High load but no failures (near-miss scenarios)
-    - CASCADE (stress > 0.9): Failures propagate through grid
+    - NORMAL   (stress 0.00–0.55): Grid operates safely, no failures expected
+    - STRESSED (stress 0.55–0.72): High load but no cascade (near-miss scenarios)
+    - CASCADE  (stress 0.72–1.00): Failures propagate through the grid
     
     MULTI-MODAL DATA:
     -----------------
@@ -252,9 +252,9 @@ class PhysicsBasedGridSimulator:
         -----------
         stress_level : float
             Grid stress level (0.0 to 1.0)
-            - 0.3-0.7: Normal operation
-            - 0.8-0.9: Stressed operation
-            - 0.9-1.0: Critical stress (cascade likely)
+            - 0.00–0.55: Normal operation
+            - 0.55–0.72: Stressed operation (near-miss)
+            - 0.72–1.00: Critical stress (cascade likely)
         sequence_length : int
             Number of timesteps to simulate (default: 30)
         
@@ -321,20 +321,19 @@ class PhysicsBasedGridSimulator:
         return scenario_data
     
     def _get_heat_generation(self, loading_ratios: np.ndarray) -> np.ndarray:
+        """
+        Compute per-node heat generation from line loading ratios.
+
+        Heat is proportional to I²R.  We use (apparent loading ratio)² as a
+        dimensionless current² proxy so the scale stays consistent with the
+        thermal model tuning regardless of the chosen resistance units.
+        Each line's heat is split equally between its two endpoint nodes.
+        """
         src, dst = self.edge_index
-
+        heat_per_line = loading_ratios ** 2          # dimensionless, 0–(several) range
         heat_generation = np.zeros(self.num_nodes)
-
-        for i in range(self.num_edges):
-            s, d = src[i].item(), dst[i].item()
-            # Heat is proportional to I²R, but resistance is now in Ohms (4-38 Ω).
-            # We use loading_ratio² as the relative current² proxy, normalized by
-            # a fixed reference resistance (1 Ω) so heat stays in a consistent
-            # dimensionless scale that the thermal model was tuned for.
-            heat = loading_ratios[i] ** 2  # dimensionless, ~0-1 range
-            heat_generation[s] += heat / 2
-            heat_generation[d] += heat / 2
-
+        np.add.at(heat_generation, src.numpy(), heat_per_line / 2)
+        np.add.at(heat_generation, dst.numpy(), heat_per_line / 2)
         return heat_generation
 
     def _generate_time_series(
@@ -352,6 +351,10 @@ class PhysicsBasedGridSimulator:
         self.thermal_sim.ambient_temperature = ambient_temp_base
         self.thermal_sim.reset_temperatures()
         self.frequency_sim.reset_ufls()
+
+        # Draw once per scenario so precursor signals are temporally coherent
+        # across all timesteps (same window edge for every call this scenario).
+        scenario_precursor_duration = int(np.random.randint(8, 20))
 
         generation = np.zeros(self.num_nodes)
         load_values = np.zeros(self.num_nodes)
@@ -441,8 +444,10 @@ class PhysicsBasedGridSimulator:
                     print(f"  [REJECT] Power flow unstable at t={t} with no prior state. Rejecting.")
                     return None
 
-            # Update physics
-            loading_ratios = np.abs(line_flows) / (self.thermal_limits + 1e-6)
+            # Update physics — use apparent power (S = √(P²+Q²)) for loading
+            # ratios so both active and reactive current contribute to thermal
+            # loading, consistent with how propagate_cascade_physics works.
+            loading_ratios = np.sqrt(line_flows**2 + line_flows_q**2) / (self.thermal_limits + 1e-6)
             heat_generation = self._get_heat_generation(loading_ratios)
 
             current_frequency, load_values = self.frequency_sim.update_frequency(
@@ -453,17 +458,22 @@ class PhysicsBasedGridSimulator:
             self.thermal_sim.ambient_temperature = ambient_temp
             equipment_temps = self.thermal_sim.update_temperatures(heat_generation, 1.0)
 
-            # Dynamic failure check: every non-failed node at every timestep
-            # node_line_loading = ratio of actual load to base load (ML feature proxy)
+            # ----------------------------------------------------------------
+            # Step 1 — Identify trigger failures.
+            # Use the load-ratio proxy (actual load / base load) as the
+            # initial threshold check.  This is fast and well-calibrated with
+            # the existing NodeConfig failure thresholds.
+            # ----------------------------------------------------------------
 
             # Environmental + robotic data
             sat_data, weather_seq, threat_ind = self.env_gen.generate_correlated_environmental_data(
                 list(cumulative_failed_nodes), failed_lines_t, t, cascade_start_time, current_stress, sequence_length, 
-                stress_level > Settings.Scenario.CASCADE_STRESS_MIN
+                stress_level > Settings.Scenario.CASCADE_STRESS_MIN,scenario_precursor_duration
             )
 
             vis_data, thermal_data, sensor_data = self.robot_gen.generate_correlated_robotic_data(
-                list(cumulative_failed_nodes), failed_lines_t, t, cascade_start_time, equipment_temps
+                list(cumulative_failed_nodes), failed_lines_t, t, cascade_start_time, equipment_temps,
+                scenario_precursor_duration
             )
 
             # Compute fire stress with spatial decay + amplification
@@ -496,7 +506,6 @@ class PhysicsBasedGridSimulator:
                 if state == 2:
                     new_failures.append((n, reason))
 
-            # Keep this part unchanged
             for n, reason in new_failures:
                 if cascade_start_time < 0:
                     cascade_start_time = t
@@ -505,8 +514,6 @@ class PhysicsBasedGridSimulator:
                 generation[n] = 0.0
                 load_values[n] = 0.0
                 print(f"  [FAIL] Node {n} failed at t={t} (reason: {reason})")
-
-            # Generate multi-modal data
 
             current_cascade_timing = self._compute_cascade_timing(t, failure_record)
 
