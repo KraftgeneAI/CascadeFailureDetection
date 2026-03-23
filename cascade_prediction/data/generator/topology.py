@@ -115,6 +115,14 @@ class GridTopologyGenerator:
         with open(path, "rb") as f:
             topology = pickle.load(f)
 
+        # Derive num_nodes / num_edges when not stored explicitly so that
+        # topology files saved before these keys existed still load cleanly.
+        if "num_nodes" not in topology:
+            topology["num_nodes"] = int(topology["adjacency_matrix"].shape[0])
+        if "num_edges" not in topology:
+            ei = topology["edge_index"]
+            topology["num_edges"] = int(ei.shape[1] if hasattr(ei, "shape") else len(ei[0]))
+
         print(
             f"  Loaded topology: {topology['num_nodes']} nodes, "
             f"{topology['num_edges']} edges \u2190 {path}"
