@@ -396,7 +396,10 @@ def generate_dataset_from_config(
     batch_size: int = Settings.Scenario.DEFAULT_BATCH_SIZE,
     seed: int = Settings.Scenario.DEFAULT_SEED,
     topology_file: Optional[str] = None,
-    start_batch: int = 0
+    start_batch: int = 0,
+    train_ratio: float = Settings.Dataset.TRAIN_RATIO,
+    val_ratio: float = Settings.Dataset.VAL_RATIO,
+    test_ratio: float = Settings.Dataset.TEST_RATIO,
 ) -> Dict[str, int]:
     """
     Convenience function to generate dataset from configuration.
@@ -423,6 +426,12 @@ def generate_dataset_from_config(
         Path to saved topology
     start_batch : int
         Starting batch number (for parallel generation)
+    train_ratio : float
+        Fraction of data for training
+    val_ratio : float
+        Fraction of data for validation
+    test_ratio : float
+        Fraction of data for testing
     
     Returns:
     --------
@@ -454,7 +463,10 @@ def generate_dataset_from_config(
     orchestrator = ScenarioOrchestrator(
         simulator=simulator,
         output_dir=output_dir,
-        batch_size=batch_size
+        batch_size=batch_size,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
     )
     
     # Generate dataset
