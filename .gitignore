@@ -24,6 +24,8 @@
 
 # And exclude the .gitignore file itself
 !.gitignore
+# Allow git configuration files
+!.gitattributes
 
 # Ignore Python cache directories (even in allowed directories)
 **/__pycache__/
