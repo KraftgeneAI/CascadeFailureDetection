@@ -180,18 +180,17 @@ class RoboticDataGenerator:
             (self.num_nodes, 1, 32, 32), dtype=np.float16
         )
         
-        # Add hotspots
+        # Pre-build pixel coordinate grids once (shared across all nodes/hotspots)
+        xs, ys = np.meshgrid(np.arange(32), np.arange(32), indexing='ij')  # (32,32)
+
+        # Add hotspots — fully vectorised: no Python loops over pixels
         for node_idx in range(self.num_nodes):
             num_hotspots = np.random.randint(2, 5)
             for _ in range(num_hotspots):
                 hx, hy = np.random.randint(4, 28, 2)
                 hotspot_temp = equipment_temps[node_idx] + np.random.uniform(5, 15)
-                
-                # Create Gaussian hotspot
-                for x in range(32):
-                    for y in range(32):
-                        dist = np.sqrt((x - hx)**2 + (y - hy)**2)
-                        thermal_data[node_idx, 0, x, y] += hotspot_temp * np.exp(-dist / 3)
+                dist = np.sqrt((xs - hx) ** 2 + (ys - hy) ** 2)       # (32,32)
+                thermal_data[node_idx, 0] += (hotspot_temp * np.exp(-dist / 3)).astype(np.float16)
         
         # Add measurement noise
         thermal_data += np.random.uniform(-2, 2, (self.num_nodes, 1, 32, 32)).astype(np.float16)
@@ -316,18 +315,21 @@ class RoboticDataGenerator:
         failed_lines: List[int],
         timestep: int,
         cascade_start: int,
-        equipment_temps: np.ndarray
+        equipment_temps: np.ndarray,
+        precursor_duration: int = None
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Generate all robotic data in one call.
-        
+
         This is a convenience method that calls all three generation methods
         and returns the complete robotic data package.
-        
-        IMPORTANT: Uses a single precursor_duration value for all three data types
-        to ensure consistent precursor signal timing across visual, thermal, and
-        sensor data.
-        
+
+        IMPORTANT: ``precursor_duration`` must be drawn once per scenario (not
+        per timestep) and passed in here so that the precursor signal window is
+        the same across every timestep of the same scenario.  If the caller
+        omits it a random value is drawn as a fallback, but this breaks temporal
+        coherence and should only be done in isolation testing.
+
         Parameters:
         -----------
         failed_nodes : List[int]
@@ -340,7 +342,11 @@ class RoboticDataGenerator:
             Timestep when cascade begins (-1 if no cascade)
         equipment_temps : np.ndarray, shape (num_nodes,)
             Current equipment temperature at each node (°C)
-        
+        precursor_duration : int, optional
+            Number of timesteps before cascade_start over which precursor
+            signals ramp up.  Should be fixed for the whole scenario.
+            Defaults to a random draw in [8, 20] if not provided.
+
         Returns:
         --------
         visual_data : np.ndarray, shape (num_nodes, 3, 32, 32)
@@ -350,19 +356,19 @@ class RoboticDataGenerator:
         sensor_data : np.ndarray, shape (num_nodes, 12)
             Multi-sensor array readings
         """
-        # Calculate precursor_duration once for consistent timing across all data types
-        precursor_duration = np.random.randint(8, 20)
-        
+        if precursor_duration is None:
+            precursor_duration = int(np.random.randint(8, 20))
+
         visual_data = self.generate_visual_data(
             failed_nodes, timestep, cascade_start, precursor_duration
         )
-        
+
         thermal_data = self.generate_thermal_data(
             equipment_temps, failed_nodes, timestep, cascade_start, precursor_duration
         )
-        
+
         sensor_data = self.generate_sensor_data(
             failed_nodes, timestep, cascade_start, precursor_duration
         )
-        
+
         return visual_data, thermal_data, sensor_data

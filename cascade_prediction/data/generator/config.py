@@ -248,6 +248,10 @@ class SimulationConfig:
     # Grid collapse reporting threshold
     COLLAPSE_FAILURE_RATIO  = 0.9       # Fraction of failed nodes = collapse
 
+    # Physics cascade propagation cap: max additional failures per cascade wave
+    # (expressed as a fraction of total nodes, on top of the initial trigger failures)
+    CASCADE_MAX_SPREAD_FRACTION = 0.30
+
     # Ambient temperature model
     AMBIENT_BASE_MIN_C      = 25.0
     AMBIENT_BASE_MAX_C      = 35.0      # base = 25 + 10 * rand()
@@ -267,12 +271,16 @@ class ScenarioConfig:
     MAX_RETRIES             = 10
 
     # Stress level ranges by scenario type
-    CASCADE_STRESS_MIN      = 0.70
+    # Stress level ranges by scenario type — contiguous, non-overlapping, covering [0, 1].
+    # Normal:   0.00–0.55  (safe operation, no failures expected)
+    # Stressed: 0.55–0.72  (near-miss region — high load, no cascade)
+    # Cascade:  0.72–1.00  (critical stress — failures propagate)
+    CASCADE_STRESS_MIN      = 0.72
     CASCADE_STRESS_MAX      = 1.00
-    STRESSED_STRESS_MIN     = 0.50
-    STRESSED_STRESS_MAX     = 0.62
+    STRESSED_STRESS_MIN     = 0.55
+    STRESSED_STRESS_MAX     = 0.72
     NORMAL_STRESS_MIN       = 0.00
-    NORMAL_STRESS_MAX       = 0.50
+    NORMAL_STRESS_MAX       = 0.55
 
 
 # ---------------------------------------------------------------------------
