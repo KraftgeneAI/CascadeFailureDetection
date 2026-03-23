@@ -1,4 +1,4 @@
-# Just to train and test model on SCADA datasets. Do NOT merge.
+# AI-Driven Predictive Cascade Failure Analysis （End-To-End）
 
 We present an end-to-end Graph Neural Network (GNN) architecture for predictive cascade failure analysis in electrical power grids, capable of forecasting the **causal chain of failures** (e.g., `Node B -> Node A -> Node C`) minutes before they occur.
 
@@ -28,22 +28,15 @@ This specific implementation validates the core GNN and its physics-informed lea
 
 The model is a multi-task spatio-temporal GNN. An input scenario is processed in parallel by three encoders, fused, and then passed through a GNN-LSTM core to make simultaneous predictions.
 
-![Figure 1: High-Level System Architecture](./images/f1.JPG)
-
 1.  **Feature Extraction Layer (Multi-Modal Encoders)**:
     * `EnvironmentalEmbedding`: CNNs process satellite imagery and threat maps.
     * `InfrastructureEmbedding`: MLPs process SCADA/PMU time-series data.
     * `RoboticEmbedding`: CNNs process visual/thermal drone imagery and sensor data.
 
-![Figure 2: Data Source Integration Architecture](./images/f2.JPG)
-
-![Figure 3: Fusion Processing Architecture](./images/f3.JPG)
-
 2.  **Spatio-Temporal Prediction Layer (The "Brain")**:
     * An attention mechanism fuses the three embeddings into a single vector for each node.
     * `TemporalGNNCell`: A **Graph Attention (GAT)** layer shares information between neighboring nodes, while an **LSTM** processes the *sequence* of these messages over time. This is what allows the model to learn `B -> A -> C` causal relationships.
 
-![Figure 4: Sample Grid Graph Representation](./images/f4.JPG)
 
 3.  **Multi-Task Decision Layer (The "Output")**:
     The final node embeddings are fed into parallel heads to predict:
@@ -52,8 +45,6 @@ The model is a multi-task spatio-temporal GNN. An input scenario is processed in
     * **`risk_head`**: *Why* will it fail? (7-D Risk Vector)
     * **Physics Heads**: `voltage_head`, `angle_head`, `line_flow_head`, etc.
 
-![Figure 5: Seven-Dimensional Risk Assessment Framework](./images/f5.JPG)
-![Figure 6: End-to-End System Data Flow](./images/f6.JPG)
 ## The Multi-Component Loss Function
 
 The "enormous gaps" in timing are fixed by training the model on a comprehensive loss function that grades *all* of its predictions, not just the final yes/no answer.
@@ -62,8 +53,6 @@ The "enormous gaps" in timing are fixed by training the model on a comprehensive
 * **`timing_loss`**: Trains the `failure_time_head`. (Is the predicted causal path `B -> A -> C` correct?)
 * **`risk_loss`**: Trains the `risk_head`. (Is the predicted *reason* for the failure correct?)
 * **Physics Losses** (`powerflow_loss`, `capacity_loss`, etc.): Trains the physics heads. (Are the predicted voltages and line flows physically possible?)
-
-![Figure 7: Multi-Component Loss Function](./images/f7.JPG)
 
 ## Detailed Example: The Landslide Scenario
 
@@ -348,29 +337,6 @@ python inference.py --model_path checkpoints/best_f1_model.pth --data_path data/
 
 ```
 This outputs the detailed report, including the Predicted Causal Path and the 7-D Risk Assessment for comparison against the ground truth.
-
-Project Structure
-
-```bash
-.
-├── checkpoints/
-│   ├── best_model.pth           # Best va loss weights
-│   ├── best_f1_model.pth      # Best f1 model weights
-│   └── latest_checkpoint.pth    # Raw metrics per epoch
-│
-├── data/
-│   ├── grid_topology.pkl        # The MASTER grid topology file
-│   ├── train/                   # Training data batches
-│   ├── val/                     # Validation data batches
-│   └── test/                    # Test data batches
-│
-├── multimodal_data_generator.py # Data generation script (Run this first)
-├── cascade_dataset.py           # PyTorch Dataset class (Loads data)
-├── multimodal_cascade_model.py  # Model architecture (The "Brain")
-├── train_model.py               # Training script (The "Teacher")
-├── inference.py                 # Inference script (The "Report")
-└── README.md                    # This file
-```
 
 ## Requirements
 
