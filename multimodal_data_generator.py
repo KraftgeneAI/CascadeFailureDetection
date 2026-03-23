@@ -217,6 +217,9 @@ Examples:
         seed=args.seed,
         topology_file=args.topology_file,
         start_batch=args.start_batch,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        test_ratio=args.test_ratio,
         video_path=args.video_path
     )
     
