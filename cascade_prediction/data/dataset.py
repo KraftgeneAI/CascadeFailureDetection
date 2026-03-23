@@ -347,14 +347,25 @@ class CascadeDataset(Dataset):
         else:
             correct_timing_tensor = to_tensor(np.full(num_nodes, -1, dtype=np.float32))
         
+        # ── 115-feature node tensor ──────────────────────────────────────────
+        # Build (T, N, 115) from the already-collected per-timestep arrays so
+        # the NodeFeatureMLP in the unified model can consume it directly.
+        node_features = self._build_node_features(
+            scada_list=data_arrays['scada_data'],       # list[T] of (N,18) tensors
+            pmu_list=data_arrays['pmu_sequence'],       # list[T] of (N, 8) tensors
+            equip_list=data_arrays['equipment_status'], # list[T] of (N,10) tensors
+            sequence=sequence,                          # raw dicts for injections
+            num_nodes=num_nodes,
+        )
+
         # Data augmentation (training only)
         is_training = 'train' in str(self.data_dir)
         scada_tensor = torch.stack(data_arrays['scada_data'])
-        
+
         if is_training:
             noise = torch.randn_like(scada_tensor) * Settings.Dataset.AUGMENTATION_NOISE_STD
             scada_tensor = scada_tensor + noise
-        
+
         return {
             # Masked modalities (zeroed)
             'satellite_data': torch.zeros_like(torch.stack(data_arrays['satellite_data'])),
@@ -367,6 +378,8 @@ class CascadeDataset(Dataset):
             'scada_data': scada_tensor,
             'pmu_sequence': torch.stack(data_arrays['pmu_sequence']),
             'equipment_status': torch.stack(data_arrays['equipment_status']),
+            # 115-feature node tensor [T, N, 115]
+            'node_features': node_features,
             'edge_index': to_tensor(edge_index).long(),
             'edge_attr': edge_attr,           # [T, E, 7] — per-timestep, dynamic flows included
             'edge_mask': torch.stack(data_arrays['edge_mask']),
@@ -378,6 +391,71 @@ class CascadeDataset(Dataset):
             'sequence_length': len(sequence)
         }
     
+    @staticmethod
+    def _build_node_features(
+        scada_list: List[torch.Tensor],
+        pmu_list:   List[torch.Tensor],
+        equip_list: List[torch.Tensor],
+        sequence:   List[Dict],
+        num_nodes:  int,
+    ) -> torch.Tensor:
+        """Build the (T, N, 115) node-feature tensor used by NodeFeatureMLP.
+
+        Feature layout (matches Settings.Embedding constants):
+          [0:18]   SCADA measurements         (18)
+          [18:26]  PMU measurements            ( 8)
+          [26:36]  Equipment status           (10)
+          [36:37]  Active power injection      ( 1)
+          [37:38]  Reactive power injection    ( 1)
+          [38:76]  1-step temporal deltas of [0:38]  (38)
+          [76:114] 2-step temporal deltas of [0:38]  (38)
+          [114]    Normalised timestep position ( 1)
+
+        Args:
+            scada_list: T tensors of shape (N, 18), already normalised.
+            pmu_list:   T tensors of shape (N,  8), already normalised.
+            equip_list: T tensors of shape (N, 10), already normalised.
+            sequence:   Raw per-timestep dicts (for power/reactive injection).
+            num_nodes:  Number of nodes N.
+
+        Returns:
+            Tensor of shape (T, N, 115), float32.
+        """
+        T = len(scada_list)
+
+        # ── base features (T, N, 38) ─────────────────────────────────────────
+        base_parts = []
+        for t in range(T):
+            ts = sequence[t]
+
+            p_inj = ts.get('power_injection',    np.zeros((num_nodes, 1), dtype=np.float32))
+            q_inj = ts.get('reactive_injection', np.zeros((num_nodes, 1), dtype=np.float32))
+
+            p_inj = torch.from_numpy(
+                np.array(p_inj, dtype=np.float32).reshape(num_nodes, 1))
+            q_inj = torch.from_numpy(
+                np.array(q_inj, dtype=np.float32).reshape(num_nodes, 1))
+
+            base_t = torch.cat(
+                [scada_list[t], pmu_list[t], equip_list[t], p_inj, q_inj],
+                dim=1,
+            )                                    # (N, 38)
+            base_parts.append(base_t)
+
+        base = torch.stack(base_parts, dim=0)    # (T, N, 38)
+
+        # ── temporal deltas ───────────────────────────────────────────────────
+        delta1 = torch.zeros_like(base)
+        delta2 = torch.zeros_like(base)
+        delta1[1:]  = base[1:]  - base[:-1]
+        delta2[2:]  = base[2:]  - base[:-2]
+
+        # ── timestep position ─────────────────────────────────────────────────
+        t_pos = torch.linspace(0.0, 1.0, T)              # (T,)
+        t_pos = t_pos.view(T, 1, 1).expand(T, num_nodes, 1)  # (T, N, 1)
+
+        return torch.cat([base, delta1, delta2, t_pos], dim=2).float()  # (T, N, 115)
+
     def _process_metadata_format(self, scenario: Dict) -> Dict[str, Any]:
         """
         Process metadata-only format (fallback for empty sequences).

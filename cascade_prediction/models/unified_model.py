@@ -23,6 +23,7 @@ from .embeddings import (
     EnvironmentalEmbedding,
     InfrastructureEmbedding,
     RoboticEmbedding,
+    NodeFeatureMLP,
 )
 
 # Import layers
@@ -83,11 +84,15 @@ class UnifiedCascadePredictionModel(nn.Module):
         super(UnifiedCascadePredictionModel, self).__init__()
         
         # Multi-modal embeddings
-        self.env_embedding = EnvironmentalEmbedding(embedding_dim=embedding_dim)
+        self.env_embedding   = EnvironmentalEmbedding(embedding_dim=embedding_dim)
         self.infra_embedding = InfrastructureEmbedding(embedding_dim=embedding_dim)
         self.robot_embedding = RoboticEmbedding(embedding_dim=embedding_dim)
-        
-        # Multi-modal fusion with attention
+
+        # 115-feature node MLP (SCADA+PMU+equip+inj + temporal deltas + t_pos)
+        self.node_feature_mlp = NodeFeatureMLP(embedding_dim=embedding_dim)
+
+        # Multi-modal fusion with attention — now 4 modalities
+        # (env, infra, robot, node_features)
         self.fusion_attention = nn.MultiheadAttention(
             embed_dim=embedding_dim,
             num_heads=heads,
@@ -177,6 +182,14 @@ class UnifiedCascadePredictionModel(nn.Module):
             batch['sensor_data']
         )
         
+        # 115-feature node embedding — (B, T, N, D) or (B, N, D)
+        node_feat_raw = batch.get('node_features')
+        if node_feat_raw is not None:
+            node_emb = self.node_feature_mlp(node_feat_raw)
+        else:
+            # Fallback: zero embedding if key not present (backward-compatible)
+            node_emb = torch.zeros_like(env_emb)
+
         has_temporal = env_emb.dim() == 4  # [B, T, N, D]
         
         # Prepare edge attributes
@@ -204,16 +217,15 @@ class UnifiedCascadePredictionModel(nn.Module):
             
             fused_list = []
             for t in range(T):
-                # Select timestep t for robot embedding
-                robot_feat_t = robot_emb[:, t, :, :]
-                
+                # Select timestep t for each modality
                 multi_modal_t = torch.stack([
                     env_emb[:, t, :, :],
                     infra_emb[:, t, :, :],
-                    robot_feat_t
+                    robot_emb[:, t, :, :],
+                    node_emb[:, t, :, :],   # 115-feature MLP embedding
                 ], dim=2)
-                
-                multi_modal_flat = multi_modal_t.reshape(B * N, 3, D)
+
+                multi_modal_flat = multi_modal_t.reshape(B * N, 4, D)
                 fused_t, _ = self.fusion_attention(
                     multi_modal_flat, multi_modal_flat, multi_modal_flat
                 )
@@ -284,8 +296,15 @@ class UnifiedCascadePredictionModel(nn.Module):
                 robot_emb_expanded = robot_emb.unsqueeze(1).expand(-1, N, -1)
             else:
                 robot_emb_expanded = robot_emb
-            
-            multi_modal = torch.stack([env_emb, infra_emb, robot_emb_expanded], dim=2)
+
+            if node_emb.dim() == 2:
+                node_emb_expanded = node_emb.unsqueeze(1).expand(-1, N, -1)
+            else:
+                node_emb_expanded = node_emb
+
+            multi_modal = torch.stack(
+                [env_emb, infra_emb, robot_emb_expanded, node_emb_expanded], dim=2
+            )
             B, N, M, D = multi_modal.shape
             multi_modal_flat = multi_modal.reshape(B * N, M, D)
             
