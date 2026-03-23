@@ -408,6 +408,21 @@ class EmbeddingConfig:
     DROPOUT_CNN             = 0.2       # Spatial (2-D) dropout in CNN blocks
     DROPOUT_FC              = 0.3       # Dropout in fully-connected blocks
 
+    # -- Node-level 115-feature MLP ------------------------------------------
+    # Feature layout per node per timestep (115 total):
+    #   [0:18]   SCADA measurements          (18)
+    #   [18:26]  PMU measurements             ( 8)
+    #   [26:36]  Equipment status            (10)
+    #   [36:37]  Active power injection       ( 1)
+    #   [37:38]  Reactive power injection     ( 1)
+    #   [38:76]  1-step temporal deltas of [0:38]  (38)
+    #   [76:114] 2-step temporal deltas of [0:38]  (38)
+    #   [114]    Normalised timestep position ( 1)
+    NODE_FEATURE_BASE_DIM   = 38        # SCADA+PMU+equip+inj before deltas
+    NODE_FEATURE_DIM        = 115       # Full per-node feature vector width
+    NODE_MLP_HIDDEN_1       = 256       # First hidden layer of NodeFeatureMLP
+    NODE_MLP_HIDDEN_2       = 128       # Second hidden layer of NodeFeatureMLP
+
 
 # ---------------------------------------------------------------------------
 # Single entry-point: import only Settings everywhere
