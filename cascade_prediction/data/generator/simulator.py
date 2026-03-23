@@ -85,8 +85,22 @@ class PhysicsBasedGridSimulator:
         
         if topology_file:
             topo_data = topo_gen.load_topology(topology_file)
+            if topo_data is None:
+                # File not found — generate a new topology and save it
+                print(f"  Topology file not found, generating new topology and saving to {topology_file}...")
+                topo_data = topo_gen.generate_topology()
+                import pickle, pathlib
+                pathlib.Path(topology_file).parent.mkdir(parents=True, exist_ok=True)
+                with open(topology_file, 'wb') as f:
+                    pickle.dump({
+                        'adjacency_matrix': topo_data['adjacency_matrix'],
+                        'edge_index': topo_data['edge_index'].numpy() if hasattr(topo_data['edge_index'], 'numpy') else topo_data['edge_index'],
+                        'positions': topo_data['positions'],
+                    }, f)
+                print(f"  Saved new topology to {topology_file}")
             self.adjacency_matrix = topo_data['adjacency_matrix']
-            self.edge_index = topo_data['edge_index']
+            ei = topo_data['edge_index']
+            self.edge_index = torch.from_numpy(ei).long() if isinstance(ei, np.ndarray) else ei.long()
             self.positions = topo_data['positions']
             self.num_nodes = self.adjacency_matrix.shape[0]
         else:
