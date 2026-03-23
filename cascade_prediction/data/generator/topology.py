@@ -10,9 +10,11 @@ This module handles:
 - Connectivity verification
 """
 
+import pickle
 import numpy as np
 import torch
-from typing import Tuple, Dict
+from pathlib import Path
+from typing import Dict, Optional, Tuple
 
 from .config import Settings
 
@@ -71,7 +73,54 @@ class GridTopologyGenerator:
             'num_nodes': self.num_nodes,
             'num_edges': edge_index.shape[1]
         }
-    
+
+    @classmethod
+    def load_topology(
+        cls,
+        topology_file: str = Settings.Dataset.DEFAULT_TOPOLOGY_FILE,
+    ) -> Optional[Dict]:
+        """
+        Load a previously saved grid topology from disk.
+
+        Re-uses an existing topology pickle so that all training runs share
+        the same grid structure.  Falls back to
+        ``Settings.Dataset.DEFAULT_TOPOLOGY_FILE`` when no path is given.
+
+        Args:
+            topology_file: Path to the topology ``.pkl`` file.  Defaults to
+                ``Settings.Dataset.DEFAULT_TOPOLOGY_FILE``
+                (``"data/grid_topology.pkl"``).
+
+        Returns:
+            Topology dictionary with keys ``adjacency_matrix``, ``edge_index``,
+            ``positions``, ``num_nodes``, and ``num_edges``, or ``None`` if the
+            file does not exist.
+
+        Example::
+
+            # Load from the default location
+            topo = GridTopologyGenerator.load_topology()
+
+            # Load from a custom path
+            topo = GridTopologyGenerator.load_topology("runs/exp1/topology.pkl")
+
+            if topo is None:
+                topo = GridTopologyGenerator(num_nodes=118).generate_topology()
+        """
+        path = Path(topology_file)
+        if not path.exists():
+            print(f"  [GridTopologyGenerator.load_topology] File not found: {path}")
+            return None
+
+        with open(path, "rb") as f:
+            topology = pickle.load(f)
+
+        print(
+            f"  Loaded topology: {topology['num_nodes']} nodes, "
+            f"{topology['num_edges']} edges \u2190 {path}"
+        )
+        return topology
+
     def _generate_realistic_topology(self) -> np.ndarray:
         """
         Generate realistic meshed grid topology.

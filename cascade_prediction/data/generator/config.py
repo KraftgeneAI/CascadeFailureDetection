@@ -291,6 +291,11 @@ class DatasetConfig:
     BASE_FREQUENCY          = PowerSystemConfig.BASE_FREQUENCY
     DEFAULT_NUM_NODES       = TopologyConfig.DEFAULT_NUM_NODES
 
+    # Default path where the pre-generated grid topology pickle is stored.
+    # Callers that do not supply an explicit topology_file will fall back to
+    # this value so that the same grid structure is reused across runs.
+    DEFAULT_TOPOLOGY_FILE   = "data/grid_topology.pkl"
+
     TRAIN_RATIO             = 0.70
     VAL_RATIO               = 0.15
     TEST_RATIO              = 0.15
