@@ -107,8 +107,22 @@ class CascadePredictor:
 
         # Node failure probabilities [1, N] → [N]
         probs = outputs['failure_probability'].squeeze(-1).squeeze(0).cpu().numpy()  # [N]
-        # Predicted failure times [1, N, 1] → [N], in timesteps; convert to minutes
-        pred_timing_minutes = outputs['cascade_timing'].squeeze(-1).squeeze(0).cpu().numpy()  # [N]
+
+        # ── IMPROVED TIMING DECODE (v2) ──────────────────────────────────────
+        # The improved TimingHead now outputs Sigmoid-normalised values in (0,1)
+        # where 0 = beginning of sequence and 1 = end of sequence.
+        #
+        # To recover absolute minutes:
+        #   1. Multiply by DEFAULT_SEQUENCE_LENGTH (30 timesteps) → timestep index
+        #   2. Multiply by DT_MINUTES (2.0 min/timestep) → minutes
+        #
+        # Previously the head output raw linear values with no activation, which
+        # were interpreted directly as minutes — producing predictions of ~2-8 min
+        # while actual failure times were ~44-58 min (MAE ≈ 47 min).
+        # ─────────────────────────────────────────────────────────────────────
+        DT_MINUTES = 2.0   # minutes per simulation timestep (ThermalConfig.DT_MINUTES)
+        pred_timing_normed = outputs['cascade_timing'].squeeze(-1).squeeze(0).cpu().numpy()  # [N] in (0,1)
+        pred_timing_minutes = pred_timing_normed * window_size * DT_MINUTES   # → minutes
         final_risk_scores = outputs['risk_scores'][0].mean(dim=0).cpu().numpy().tolist()
         final_sys_state = {
             'frequency': float(outputs['frequency'].mean().item()),
@@ -153,8 +167,11 @@ class CascadePredictor:
 
         gt_path = []
         if 'failed_nodes' in scenario_meta and 'failure_times' in scenario_meta:
+            # Ground truth failure_times are stored as absolute timestep indices.
+            # Convert to minutes using DT_MINUTES = 2.0 (ThermalConfig.DT_MINUTES).
+            GT_DT = 2.0   # minutes per simulation timestep
             gt_path = sorted([
-                {'node_id': int(n), 'time_minutes': float(t)}
+                {'node_id': int(n), 'time_minutes': float(t) * GT_DT}
                 for n, t in zip(scenario_meta['failed_nodes'], scenario_meta['failure_times'])
             ], key=lambda x: x['time_minutes'])
 

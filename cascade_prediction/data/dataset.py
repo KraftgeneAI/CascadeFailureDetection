@@ -315,16 +315,34 @@ class CascadeDataset(Dataset):
         # Ground truth labels and timing
         final_labels = to_tensor(sequence_original[-1].get('node_labels', np.zeros(num_nodes)))
         
-        # Timing with shift correction
-        # CRITICAL: cascade_timing values are RELATIVE times (minutes until failure),
-        # NOT absolute timesteps. Do NOT subtract start_idx from them!
+        # ── IMPROVED TIMING TARGETS (v2) ────────────────────────────────────
+        # Root-cause fix: previous code stored raw shifted timestep indices
+        # (e.g. 21, 23, 25) which produced a very large raw MSE (~8.4) and
+        # caused dynamic calibration to shrink lambda_timing to ~0.013,
+        # essentially killing the gradient signal.  The new approach:
+        #
+        #   target = (failure_timestep - start_idx) / total_original_seq_len
+        #
+        # This maps every target into [0, 1], matching the new Sigmoid output
+        # of the improved TimingHead.  The normalisation denominator uses the
+        # FULL original sequence length (not the truncated window length) so
+        # that the same node always receives a consistent target regardless
+        # of which sliding-window crop is sampled.
+        #
+        # At inference time: multiply the raw Sigmoid output by
+        # Settings.Simulation.DEFAULT_SEQUENCE_LENGTH to recover the absolute
+        # timestep, then multiply by ThermalConfig.DT_MINUTES (2.0) for minutes.
+        # ─────────────────────────────────────────────────────────────────────
         original_cascade_start_time = metadata.get('cascade_start_time', -1)
+        # Denominator for normalisation — use full original sequence length
+        timing_norm_denom = float(max(len(sequence_original), 1))
+
         if is_cascade and 0 <= original_cascade_start_time < len(sequence_original):
             correct_timing_tensor = torch.full(timing_shape, -1.0, dtype=torch.float32)
-            
-           # ====================================================================
-            # START: TIMING SHIFT FIX (Crucial for Sliding Window)
-            # ====================================================================
+
+            # ================================================================
+            # START: TIMING SHIFT + NORMALISATION FIX
+            # ================================================================
             failed_nodes_list = metadata.get('failed_nodes', [])
             failure_times_list = metadata.get('failure_times', [])
 
@@ -333,19 +351,23 @@ class CascadeDataset(Dataset):
             if failed_nodes_list:
                 mask_failure[failed_nodes_list] = True
 
-            # Assign shifted timing for failing nodes
+            # Assign NORMALISED shifted timing for failing nodes
             if failed_nodes_list:
+                # shifted = absolute_failure_step - sliding_window_start
                 shifted = torch.tensor(failure_times_list, dtype=torch.float32) - start_idx
-                correct_timing_tensor[mask_failure] = shifted
-
-            # Normalize if max_time_horizon is set
-            if hasattr(self, 'max_time_horizon') and self.max_time_horizon > 0:
-                correct_timing_tensor[mask_failure] = correct_timing_tensor[mask_failure] / self.max_time_horizon
-            # ====================================================================
-            # END: TIMING SHIFT FIX
-            # ====================================================================
+                # Normalise to [0, 1] using the original sequence length so the
+                # target is consistent across different window crops.
+                normalised = torch.clamp(shifted / timing_norm_denom, 0.0, 1.0)
+                correct_timing_tensor[mask_failure] = normalised
+            # ================================================================
+            # END: TIMING SHIFT + NORMALISATION FIX
+            # ================================================================
         else:
             correct_timing_tensor = to_tensor(np.full(num_nodes, -1, dtype=np.float32))
+
+        # Store normalisation denominator so inference can decode predictions
+        # (attached to graph_properties for easy propagation to the model)
+        _timing_norm_denom = timing_norm_denom
         
         # ── 115-feature node tensor ──────────────────────────────────────────
         # Build (T, N, 115) from the already-collected per-timestep arrays so
@@ -454,7 +476,82 @@ class CascadeDataset(Dataset):
         t_pos = torch.linspace(0.0, 1.0, T)              # (T,)
         t_pos = t_pos.view(T, 1, 1).expand(T, num_nodes, 1)  # (T, N, 1)
 
-        return torch.cat([base, delta1, delta2, t_pos], dim=2).float()  # (T, N, 115)
+        # ── IMPROVED: physics-based time-to-failure (TTF) estimators ─────────
+        # SCADA features relevant to failure proximity (from simulator.py):
+        #   [14]: voltage_ratio     (> 1 = safe, < 1 = danger)
+        #   [15]: temp_ratio        (< 1 = safe, > 1 = danger)
+        #   [16]: freq_ratio        (> 1 = safe, < 1 = danger)
+        #   [17]: loading_ratio     (< 1 = safe, > 1 = danger)
+        #
+        # For each ratio r and its 1-step velocity v = delta1[t, :, idx]:
+        #   estimated_steps = (threshold - r) / v  (clamped to [0, 1] normalised)
+        #
+        # These explicit "estimated steps until threshold crossing" features give
+        # the model a direct physics-based signal for WHEN failure will occur,
+        # complementing the raw ratio values and their deltas.
+        #
+        # Feature layout adds 4 TTF channels → (T, N, 4):
+        #   [0]: ttf_voltage  (steps to voltage < 1.0, normalised by T)
+        #   [1]: ttf_temp     (steps to temp   > 1.0, normalised by T)
+        #   [2]: ttf_freq     (steps to freq   < 1.0, normalised by T)
+        #   [3]: ttf_loading  (steps to loading > 1.0, normalised by T)
+        # ─────────────────────────────────────────────────────────────────────
+        EPS = 1e-6
+        T_float = float(max(T, 1))
+
+        # Extract ratios from SCADA (indices 14-17 in the 38-feat base)
+        # base[t, :, 14:18] corresponds to scada[:, 14:18]
+        r_volt    = base[:, :, 14]   # (T, N) — safe >1
+        r_temp    = base[:, :, 15]   # (T, N) — safe <1
+        r_freq    = base[:, :, 16]   # (T, N) — safe >1
+        r_loading = base[:, :, 17]   # (T, N) — safe <1
+
+        # Velocities from 1-step delta (same indices)
+        v_volt    = delta1[:, :, 14]  # rate of change per step
+        v_temp    = delta1[:, :, 15]
+        v_freq    = delta1[:, :, 16]
+        v_loading = delta1[:, :, 17]
+
+        def ttf(current, threshold, velocity, safe_if_above: bool):
+            """Estimated normalised steps to threshold crossing.
+            Returns 1.0 (far future) if already safe or velocity is moving away.
+            Returns 0.0 if already breached.
+            """
+            # Gap = remaining margin (positive = still safe)
+            if safe_if_above:
+                gap = current - threshold        # positive while safe
+                approaching = (velocity < -EPS)  # decreasing toward threshold
+            else:
+                gap = threshold - current        # positive while safe
+                approaching = (velocity > EPS)   # increasing toward threshold
+
+            # Already breached
+            breached = (gap <= 0)
+            # Approaching: steps_left = gap / |velocity|
+            abs_vel = velocity.abs().clamp(min=EPS)
+            raw_steps = gap / abs_vel            # may be negative or huge
+
+            # Clamp: 0 if breached, cap at T if not approaching / far away
+            result = torch.where(breached,
+                                 torch.zeros_like(gap),
+                                 torch.where(approaching,
+                                             raw_steps.clamp(0.0, T_float),
+                                             torch.full_like(gap, T_float)))
+            return (result / T_float).clamp(0.0, 1.0)   # normalise to [0,1]
+
+        ttf_volt    = ttf(r_volt,    1.0, v_volt,    safe_if_above=True)   # (T,N)
+        ttf_temp    = ttf(r_temp,    1.0, v_temp,    safe_if_above=False)
+        ttf_freq    = ttf(r_freq,    1.0, v_freq,    safe_if_above=True)
+        ttf_loading = ttf(r_loading, 1.0, v_loading, safe_if_above=False)
+
+        ttf_features = torch.stack(
+            [ttf_volt, ttf_temp, ttf_freq, ttf_loading], dim=2
+        ).float()  # (T, N, 4)
+
+        # Final tensor: 115 + 4 = 119 features
+        return torch.cat(
+            [base, delta1, delta2, t_pos, ttf_features], dim=2
+        ).float()  # (T, N, 119)
 
     def _process_metadata_format(self, scenario: Dict) -> Dict[str, Any]:
         """
