@@ -210,36 +210,71 @@ class PhysicsInformedLoss(nn.Module):
         target: torch.Tensor
     ) -> torch.Tensor:
         """
-        Cascade timing loss with both regression and ranking components.
-        
+        IMPROVED cascade timing loss (v2) — normalised targets in [0, 1].
+
+        Combines three components:
+          1. MSE regression on valid (non -1) nodes — balanced loss with BCE
+             flavour since both pred and target are in [0, 1].
+          2. Smooth-L1 regression as a secondary term for outlier robustness.
+          3. Pairwise ranking loss enforcing correct cascade sequence order,
+             with margin scaled to the normalised target space (0.02 instead
+             of 0.1 — proportional to typical inter-failure gap of ~2 steps
+             out of 30, i.e. 2/30 ≈ 0.067, margin set to 0.02 for leniency).
+
+        Previously, targets were un-normalised timestep indices (20-30), so
+        smooth_l1_loss produced a raw value of ~8.4.  Dynamic calibration
+        responded by driving lambda_timing to ~0.013, killing the gradient.
+        With normalised targets the raw loss is comparable to other components.
+
         Args:
-            predicted: Predicted timing [batch_size, num_nodes, 1]
-            target: Target timing [batch_size, num_nodes]
-        
+            predicted: Predicted timing [batch_size, num_nodes, 1],
+                       Sigmoid output in (0, 1).
+            target:    Target timing [batch_size, num_nodes],
+                       normalised to [0, 1] (−1 = non-failing node, masked).
+
         Returns:
-            Combined timing loss
+            Combined timing loss scalar.
         """
-        pred_s = predicted.squeeze(-1)
+        pred_s = predicted.squeeze(-1)  # [B, N]
         losses = []
-        
+
         for b in range(pred_s.shape[0]):
             t = target[b]
-            pos_idx = torch.where(t >=0)[0]
-            
-            if len(pos_idx) < 2:
+            pos_idx = torch.where(t >= 0)[0]
+
+            if len(pos_idx) == 0:
                 continue
-            
-            # 1. Absolute Time Loss (Regression)
-            regression_loss = F.smooth_l1_loss(pred_s[b][pos_idx], t[pos_idx])
-            
-            # 2. Sequence Order Loss (Ranking)
-            pairs = torch.combinations(pos_idx, r=2)
-            p_diff = pred_s[b][pairs[:, 0]] - pred_s[b][pairs[:, 1]]
-            t_diff = t[pairs[:, 0]] - t[pairs[:, 1]]
-            ranking_loss = torch.relu(0.1 - p_diff * torch.sign(t_diff)).mean()
-            
-            losses.append(regression_loss + ranking_loss)
-        
+
+            p_valid = pred_s[b][pos_idx]   # model predictions for failing nodes
+            t_valid = t[pos_idx]            # normalised ground-truth times
+
+            # 1. MSE regression (primary)
+            mse_loss = F.mse_loss(p_valid, t_valid)
+
+            # 2. Smooth-L1 regression (outlier-robust secondary)
+            sl1_loss = F.smooth_l1_loss(p_valid, t_valid, beta=0.05)
+
+            regression_loss = 0.7 * mse_loss + 0.3 * sl1_loss
+
+            # 3. Pairwise ranking: only when ≥2 failing nodes exist
+            if len(pos_idx) >= 2:
+                pairs = torch.combinations(pos_idx, r=2)
+                p_diff = pred_s[b][pairs[:, 0]] - pred_s[b][pairs[:, 1]]
+                t_diff = t[pairs[:, 0]] - t[pairs[:, 1]]
+                # Only penalise pairs with meaningfully different actual times
+                # (gap > 1/seq_len in normalised space ≈ 0.033)
+                sig_mask = t_diff.abs() > 0.025
+                if sig_mask.sum() > 0:
+                    ranking_loss = torch.relu(
+                        0.02 - p_diff[sig_mask] * torch.sign(t_diff[sig_mask])
+                    ).mean()
+                else:
+                    ranking_loss = torch.tensor(0.0, device=predicted.device)
+
+                losses.append(regression_loss + 0.5 * ranking_loss)
+            else:
+                losses.append(regression_loss)
+
         if losses:
             return torch.stack(losses).mean()
         else:

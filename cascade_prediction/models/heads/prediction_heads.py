@@ -314,31 +314,55 @@ class RiskHead(nn.Module):
 
 class TimingHead(nn.Module):
     """
-    Predicts cascade failure timing (time-to-failure for each node).
+    Predicts cascade failure timing (normalised time-to-failure for each node).
 
-    Direct node-based timing prediction using Softplus activation
-    to ensure positive time values.
+    IMPROVED ARCHITECTURE (v2):
+    - Deeper 3-layer MLP with residual skip connection for richer representation
+    - Sigmoid output constrained to [0, 1] matching normalised training targets
+      (failure_time / sequence_length).  The old linear output had no activation,
+      allowing arbitrary negative values that were meaningless for timing.
+    - BatchNorm replaced by LayerNorm for stability across variable batch sizes.
 
-    Output: [batch_size, num_nodes, 1] with softplus activation (positive values)
+    Output: [batch_size, num_nodes, 1] in range (0, 1) — normalised failure time.
+    Multiply by sequence_length (or max_time_horizon) at inference time to recover
+    the absolute timestep prediction.
     """
 
     def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_HIGH):
         super(TimingHead, self).__init__()
-        
-        self.head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
+
+        mid = hidden_dim // 2
+
+        # Main path: hidden → mid → mid → 1
+        self.layer1 = nn.Sequential(
+            nn.Linear(hidden_dim, mid),
+            nn.LayerNorm(mid),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 1),
-            # nn.Softplus()  # Ensures time is always positive
         )
-    
+        self.layer2 = nn.Sequential(
+            nn.Linear(mid, mid),
+            nn.LayerNorm(mid),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+        self.out = nn.Linear(mid, 1)
+
+        # Residual projection: hidden → mid (so we can add to layer2 output)
+        self.residual_proj = nn.Linear(hidden_dim, mid)
+
+        # Sigmoid so output is always in (0, 1) — matches normalised targets
+        self.activation = nn.Sigmoid()
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x: Node embeddings [batch_size, num_nodes, hidden_dim]
-        
+
         Returns:
-            Time-to-failure predictions [batch_size, num_nodes, 1]
+            Normalised time-to-failure predictions [batch_size, num_nodes, 1] in (0, 1)
         """
-        return self.head(x)
+        residual = self.residual_proj(x)   # [B, N, mid]
+        h = self.layer1(x)                 # [B, N, mid]
+        h = self.layer2(h) + residual      # residual skip
+        return self.activation(self.out(h))

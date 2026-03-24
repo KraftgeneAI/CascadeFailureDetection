@@ -350,7 +350,15 @@ class LossConfig:
     LAMBDA_PREDICTION   = 10.0
     LAMBDA_POWERFLOW    = 0.1
     LAMBDA_RISK         = 0.1
-    LAMBDA_TIMING       = 0.1
+    # IMPROVED: timing lambda raised from 0.1 → 5.0.
+    # Previously, dynamic calibration drove timing lambda to ~0.013 because
+    # the raw timing loss (~8.4) dwarfed the prediction loss (~0.11).  The
+    # root cause was un-normalised absolute timestep targets (values 20-30)
+    # versus a linear un-bounded head — giving enormous raw MSE.  With the
+    # new normalised targets ([0,1]) and Sigmoid output the raw loss stays
+    # comparable to other components, so a weight of 5.0 gives it sufficient
+    # gradient without destabilising training.
+    LAMBDA_TIMING       = 5.0
     LAMBDA_ACTIVE_FLOW  = 0.1
     LAMBDA_TEMPERATURE  = 0.05
     LAMBDA_FREQUENCY    = 0.08
@@ -408,8 +416,8 @@ class EmbeddingConfig:
     DROPOUT_CNN             = 0.2       # Spatial (2-D) dropout in CNN blocks
     DROPOUT_FC              = 0.3       # Dropout in fully-connected blocks
 
-    # -- Node-level 115-feature MLP ------------------------------------------
-    # Feature layout per node per timestep (115 total):
+    # -- Node-level 119-feature MLP ------------------------------------------
+    # Feature layout per node per timestep (119 total, IMPROVED v2):
     #   [0:18]   SCADA measurements          (18)
     #   [18:26]  PMU measurements             ( 8)
     #   [26:36]  Equipment status            (10)
@@ -418,8 +426,16 @@ class EmbeddingConfig:
     #   [38:76]  1-step temporal deltas of [0:38]  (38)
     #   [76:114] 2-step temporal deltas of [0:38]  (38)
     #   [114]    Normalised timestep position ( 1)
+    #   [115]    TTF voltage  — normalised steps to voltage threshold  ( 1)
+    #   [116]    TTF temp     — normalised steps to temperature threshold ( 1)
+    #   [117]    TTF freq     — normalised steps to frequency threshold  ( 1)
+    #   [118]    TTF loading  — normalised steps to loading threshold    ( 1)
+    #
+    # The 4 new TTF (time-to-failure) features encode physics-based estimates
+    # of how many steps remain before each failure condition is breached.
+    # They directly provide the timing signal needed by the TimingHead.
     NODE_FEATURE_BASE_DIM   = 38        # SCADA+PMU+equip+inj before deltas
-    NODE_FEATURE_DIM        = 115       # Full per-node feature vector width
+    NODE_FEATURE_DIM        = 119       # Full per-node feature vector width (was 115)
     NODE_MLP_HIDDEN_1       = 256       # First hidden layer of NodeFeatureMLP
     NODE_MLP_HIDDEN_2       = 128       # Second hidden layer of NodeFeatureMLP
 
