@@ -50,18 +50,15 @@ class PhysicsInformedLoss(nn.Module):
         lambda_reactive: float = Settings.Loss.LAMBDA_REACTIVE,
         lambda_voltage: float = Settings.Loss.LAMBDA_VOLTAGE,
         lambda_capacity: float = Settings.Loss.LAMBDA_CAPACITY,
-        pos_weight: float = 1.0,
         focal_alpha: float = Settings.Loss.FOCAL_ALPHA,
         focal_gamma: float = Settings.Loss.FOCAL_GAMMA,
-        label_smoothing: float = 0.0,
-        use_logits: bool = False,
         base_mva: float = Settings.Dataset.BASE_MVA,
         base_freq: float = Settings.Dataset.BASE_FREQUENCY,
         **kwargs
     ):
         """
         Initialize physics-informed loss.
-        
+
         Args:
             lambda_prediction: Weight for failure prediction loss (focal loss)
             lambda_powerflow: Weight for reactive power flow consistency loss
@@ -69,20 +66,17 @@ class PhysicsInformedLoss(nn.Module):
             lambda_timing: Weight for timing prediction loss
             lambda_active_flow: Weight for active power flow loss
             lambda_temperature: Weight for temperature prediction loss
-            lambda_frequency: Weight for frequency dynamics loss
+            lambda_frequency: Weight for frequency supervision loss
             lambda_reactive: Weight for reactive power loss
             lambda_voltage: Weight for voltage prediction loss
-            lambda_capacity: Weight for thermal capacity loss
-            pos_weight: Positive class weight for BCE loss
+            lambda_capacity: Weight for thermal capacity constraint loss
             focal_alpha: Alpha parameter for focal loss
             focal_gamma: Gamma parameter for focal loss
-            label_smoothing: Label smoothing factor
-            use_logits: Whether model outputs logits (not used currently)
             base_mva: Base MVA for power normalization
-            base_freq: Base frequency for normalization
+            base_freq: Base frequency (Hz) for normalization
         """
         super().__init__()
-        
+
         # Store lambda weights
         self.lambdas = {
             'prediction': lambda_prediction,
@@ -96,13 +90,11 @@ class PhysicsInformedLoss(nn.Module):
             'voltage': lambda_voltage,
             'capacity': lambda_capacity,
         }
-        
-        # Classification loss settings
-        self.pos_weight = pos_weight
+
+        # Focal loss parameters
         self.focal_alpha = focal_alpha
         self.focal_gamma = focal_gamma
-        self.label_smoothing = label_smoothing
-        
+
         # Physics parameters
         self.base_mva = base_mva
         self.base_freq = base_freq
@@ -166,26 +158,31 @@ class PhysicsInformedLoss(nn.Module):
     def frequency_loss(
         self,
         predicted_freq: torch.Tensor,
-        power_injection: torch.Tensor
+        ground_truth_freq: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Forces frequency to respond to power imbalance (Gen - Load).
-        
+        Direct supervised frequency loss against ground-truth SCADA measurements.
+
+        The previous physics-derived target (1.0 + sum(P_inj)/POWER_TO_FREQ) was
+        incorrect: the POWER_TO_FREQ=10 constant produced targets clustered near
+        1.0 p.u. (≈60 Hz) even during cascades where the observed system frequency
+        drops to ~38 Hz (0.64 p.u.).  This caused the frequency head to learn the
+        wrong operating point and injected a misleading gradient signal into the
+        shared encoder.
+
+        We now supervise directly against the ground-truth frequency recorded in
+        SCADA column 6 (in Hz), normalised to per-unit by dividing by base_freq.
+
         Args:
-            predicted_freq: Predicted frequency [batch_size, 1, 1]
-            power_injection: Power injection (gen - load) [batch_size, num_nodes, 1]
-        
+            predicted_freq:    [batch_size, 1, 1] — FrequencyHead output (Hz)
+            ground_truth_freq: [batch_size, 1, 1] — SCADA ground truth (Hz)
+
         Returns:
-            MSE loss for frequency prediction
+            MSE loss in per-unit space
         """
-        imbalance = torch.sum(power_injection, dim=1)  # [B, 1] or [B]
-        target_freq_dev = imbalance / Settings.Loss.POWER_TO_FREQ
-        target_freq = 1.0 + target_freq_dev.view(-1, 1, 1)
-        
-        # Normalize predicted frequency (assuming it outputs Hz)
-        pred_freq_pu = predicted_freq / self.base_freq
-        
-        return F.mse_loss(pred_freq_pu, target_freq)
+        pred_pu   = predicted_freq   / self.base_freq
+        target_pu = ground_truth_freq / self.base_freq
+        return F.mse_loss(pred_pu, target_pu)
     
     def risk_loss(
         self,
@@ -360,29 +357,41 @@ class PhysicsInformedLoss(nn.Module):
     
     def capacity_loss(
         self,
-        line_flows: torch.Tensor,
-        thermal_limits: torch.Tensor
+        active_flows: torch.Tensor,
+        reactive_flows: torch.Tensor,
+        thermal_limits: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Compute thermal capacity constraint violations.
-        
-        Penalizes line flows that exceed thermal limits.
-        
+        Compute thermal capacity constraint violations using apparent power.
+
+        Previous implementation compared only reactive (Q) line flows against MVA
+        thermal limits, which is physically incorrect: thermal ratings bound apparent
+        power S = sqrt(P² + Q²), not Q alone.  Using Q-only understated violations on
+        lines carrying large active power flows and overstated them on lines with high
+        reactive flow but low active flow.
+
+        This version computes S = sqrt(P² + Q²) and penalises violations of the form
+        max(0, S - S_limit)², giving a smooth, physically correct constraint signal.
+
         Args:
-            line_flows: Predicted line flows [batch_size, num_edges, 1]
-            thermal_limits: Thermal limits [batch_size, num_edges] or [num_edges]
-        
+            active_flows:   Predicted active power flows P  [batch_size, num_edges, 1]
+            reactive_flows: Predicted reactive power flows Q [batch_size, num_edges, 1]
+            thermal_limits: MVA thermal limits  [batch_size, num_edges] or [num_edges]
+
         Returns:
             Mean squared violation loss
         """
-        # Handle different thermal_limits dimensions
+        # Broadcast thermal_limits to [B, E, 1]
         if thermal_limits.dim() == 1:
             thermal_limits = thermal_limits.unsqueeze(0).unsqueeze(-1)
         elif thermal_limits.dim() == 2:
             thermal_limits = thermal_limits.unsqueeze(-1)
-        
-        # Violations occur when |line_flow| > thermal_limit
-        violations = F.relu(torch.abs(line_flows) - thermal_limits)
+
+        # Apparent power S = sqrt(P² + Q²) in per-unit
+        apparent_power = torch.sqrt(active_flows.pow(2) + reactive_flows.pow(2) + 1e-8)
+
+        # Violations only when apparent power exceeds thermal limit
+        violations = F.relu(apparent_power - thermal_limits)
         return torch.mean(violations ** 2)
     
     def forward(
@@ -464,13 +473,16 @@ class PhysicsInformedLoss(nn.Module):
             total_loss += self.lambdas.get('temperature',0.05) * L_temp
             loss_dict['temperature'] = L_temp.item()
         
-        # --- 5. FREQUENCY (Rule 4) ---
-        if 'frequency' in predictions and get_prop('power_injection') is not None:
+        # --- 5. FREQUENCY SUPERVISION ---
+        # Uses ground-truth SCADA frequency (col 6) rather than physics-derived
+        # target.  The old formula used POWER_TO_FREQ=10 which produced targets near
+        # 60 Hz even during cascades where the true frequency drops to ~38 Hz.
+        if 'frequency' in predictions and targets.get('ground_truth_frequency') is not None:
             L_freq = self.frequency_loss(
                 predictions['frequency'],
-                get_prop('power_injection')
+                targets['ground_truth_frequency'],
             )
-            total_loss += self.lambdas.get('frequency',0.05) * L_freq
+            total_loss += self.lambdas.get('frequency', 0.1) * L_freq
             loss_dict['frequency'] = L_freq.item()
         
         # --- 6. RISK & TIMING ---
@@ -485,10 +497,25 @@ class PhysicsInformedLoss(nn.Module):
             loss_dict['timing'] = L_time.item()
         
         # --- 7. THERMAL CAPACITY CONSTRAINTS ---
-        if 'line_flows' in predictions and get_prop('thermal_limits') is not None:
+        # Uses apparent power S = sqrt(P² + Q²) compared against MVA thermal limits,
+        # replacing the previous Q-only comparison which was physically incorrect.
+        if ('line_flows' in predictions
+                and 'active_power_line_flows' in predictions
+                and get_prop('thermal_limits') is not None):
             L_capacity = self.capacity_loss(
+                predictions['active_power_line_flows'],
                 predictions['line_flows'],
-                get_prop('thermal_limits')
+                get_prop('thermal_limits'),
+            )
+            total_loss += self.lambdas.get('capacity', 0.05) * L_capacity
+            loss_dict['capacity'] = L_capacity.item()
+        elif 'line_flows' in predictions and get_prop('thermal_limits') is not None:
+            # Fallback: only reactive flows available — use Q as proxy
+            apparent_proxy = torch.abs(predictions['line_flows'])
+            L_capacity = self.capacity_loss(
+                apparent_proxy,
+                torch.zeros_like(apparent_proxy),
+                get_prop('thermal_limits'),
             )
             total_loss += self.lambdas.get('capacity', 0.05) * L_capacity
             loss_dict['capacity'] = L_capacity.item()
