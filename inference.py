@@ -95,6 +95,15 @@ class CascadePredictor:
         if not item:
             raise ValueError(f"Scenario {scenario_idx} could not be loaded from {data_path}")
 
+        # Extract the un-truncated scenario length BEFORE collation.
+        # This is the denominator used during training normalisation
+        # (failure_time / len(sequence_original)), so we need the same value
+        # to correctly decode: minutes = pred_normed × original_seq_len × DT_MINUTES.
+        # Falls back to DEFAULT_SEQUENCE_LENGTH only if the dataset item is missing
+        # the field (e.g., older pickled datasets).
+        original_seq_len = int(item.get('original_sequence_length',
+                                        Settings.Simulation.DEFAULT_SEQUENCE_LENGTH))
+
         # Collate single item into a batch of 1
         batch = collate_cascade_batch([item])
         batch_dev = {
@@ -108,21 +117,25 @@ class CascadePredictor:
         # Node failure probabilities [1, N] → [N]
         probs = outputs['failure_probability'].squeeze(-1).squeeze(0).cpu().numpy()  # [N]
 
-        # ── IMPROVED TIMING DECODE (v2) ──────────────────────────────────────
-        # The improved TimingHead now outputs Sigmoid-normalised values in (0,1)
-        # where 0 = beginning of sequence and 1 = end of sequence.
+        # ── TIMING DECODE (v3 — per-scenario absolute normalisation) ─────────
+        # The TimingHead outputs a Sigmoid-normalised value in (0, 1):
         #
-        # To recover absolute minutes:
-        #   1. Multiply by DEFAULT_SEQUENCE_LENGTH (30 timesteps) → timestep index
-        #   2. Multiply by DT_MINUTES (2.0 min/timestep) → minutes
+        #   pred_normed ≈ absolute_failure_timestep / len(sequence_original)
         #
-        # Previously the head output raw linear values with no activation, which
-        # were interpreted directly as minutes — producing predictions of ~2-8 min
-        # while actual failure times were ~44-58 min (MAE ≈ 47 min).
+        # Training normalisation (dataset.py):
+        #   target = failure_time_abs / len(sequence_original)   ← no start_idx shift
+        #
+        # Decode formula (must be the inverse, using the SAME per-scenario length):
+        #   minutes = pred_normed × original_seq_len × DT_MINUTES
+        #
+        # We use original_seq_len (the actual un-truncated length read from the
+        # dataset item) rather than a fixed DEFAULT_SEQUENCE_LENGTH constant,
+        # because each scenario may have a different number of timesteps.
         # ─────────────────────────────────────────────────────────────────────
-        DT_MINUTES = 2.0   # minutes per simulation timestep (ThermalConfig.DT_MINUTES)
+        DT_MINUTES = Settings.Thermal.DT_MINUTES  # 2.0 min per simulation timestep
         pred_timing_normed = outputs['cascade_timing'].squeeze(-1).squeeze(0).cpu().numpy()  # [N] in (0,1)
-        pred_timing_minutes = pred_timing_normed * window_size * DT_MINUTES   # → minutes
+        # Decode using the scenario's actual length — consistent with training targets
+        pred_timing_minutes = pred_timing_normed * original_seq_len * DT_MINUTES
         final_risk_scores = outputs['risk_scores'][0].mean(dim=0).cpu().numpy().tolist()
         final_sys_state = {
             'frequency': float(outputs['frequency'].mean().item()),
@@ -168,8 +181,9 @@ class CascadePredictor:
         gt_path = []
         if 'failed_nodes' in scenario_meta and 'failure_times' in scenario_meta:
             # Ground truth failure_times are stored as absolute timestep indices.
-            # Convert to minutes using DT_MINUTES = 2.0 (ThermalConfig.DT_MINUTES).
-            GT_DT = 2.0   # minutes per simulation timestep
+            # Convert to minutes using the same DT_MINUTES constant used for
+            # inference decoding to ensure pred vs actual are on the same scale.
+            GT_DT = Settings.Thermal.DT_MINUTES  # 2.0 min per simulation timestep
             gt_path = sorted([
                 {'node_id': int(n), 'time_minutes': float(t) * GT_DT}
                 for n, t in zip(scenario_meta['failed_nodes'], scenario_meta['failure_times'])

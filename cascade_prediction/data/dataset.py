@@ -259,9 +259,15 @@ class CascadeDataset(Dataset):
             # Keep all 18 features, update time_ratio to be relative to window
             scada_data = scada_data_raw.copy()
             if scada_data.shape[1] > 12:
-                # Feature 12 is time_ratio. Change it to delta_t (progress within this specific window)
-                # i is the current step in the truncated sequence, len(sequence) is total steps
-                scada_data[:, 12] = i / max(1, len(sequence)) 
+                # FIX: Use ABSOLUTE position (start_idx + i) / len(sequence_original) instead
+                # of relative window position.  This is critical for timing prediction: the model
+                # must know *where in the actual scenario* it is so it can reason "I am at t=0.6
+                # of the full sequence, failures typically occur at t=0.8–0.97, therefore predict
+                # ~0.85".  The old relative encoding gave 0→1 regardless of where the truncated
+                # window started, making the model believe it was always at the beginning.
+                # We use len(sequence_original) (per-scenario actual length) because each scenario
+                # may have a different number of timesteps.
+                scada_data[:, 12] = (start_idx + i) / max(1.0, float(len(sequence_original)))
                 # scada_data[:, 13:18] = 0
                 # 13: stress_level - CRITICAL for prediction!
                 # 14: voltage_ratio (voltage / voltage_failure_threshold)
@@ -334,15 +340,27 @@ class CascadeDataset(Dataset):
         # timestep, then multiply by ThermalConfig.DT_MINUTES (2.0) for minutes.
         # ─────────────────────────────────────────────────────────────────────
         original_cascade_start_time = metadata.get('cascade_start_time', -1)
-        # Denominator for normalisation — use full original sequence length
+        # Use per-scenario actual length as the normalization denominator.
+        # Each scenario has its own number of timesteps (cascade scenarios may
+        # resolve early, normal scenarios may run longer), so a fixed constant
+        # like DEFAULT_SEQUENCE_LENGTH is incorrect.
+        #
+        # The key fix vs the previous version is removing the "- start_idx" shift:
+        #   OLD (buggy): (failure_time - start_idx) / seq_len
+        #     → target was window-relative, but inference decoded without adding
+        #       back start_idx × DT_MINUTES, causing systematic early predictions.
+        #   NEW (correct): failure_time / len(sequence_original)
+        #     → target is ABSOLUTE (fraction of the actual scenario length).
+        #     → inference decode = pred_normed × len(sequence_original) × DT_MINUTES.
+        #
+        # Example: failure at t=24, start_idx=3, seq_len=32 →
+        #   old: (24-3)/32 = 0.656 → decoded 42 min  (error 6 min)
+        #   new:    24/32  = 0.750 → decoded 48 min  ✓
         timing_norm_denom = float(max(len(sequence_original), 1))
 
         if is_cascade and 0 <= original_cascade_start_time < len(sequence_original):
             correct_timing_tensor = torch.full(timing_shape, -1.0, dtype=torch.float32)
 
-            # ================================================================
-            # START: TIMING SHIFT + NORMALISATION FIX
-            # ================================================================
             failed_nodes_list = metadata.get('failed_nodes', [])
             failure_times_list = metadata.get('failure_times', [])
 
@@ -351,17 +369,17 @@ class CascadeDataset(Dataset):
             if failed_nodes_list:
                 mask_failure[failed_nodes_list] = True
 
-            # Assign NORMALISED shifted timing for failing nodes
+            # Assign ABSOLUTE-NORMALISED timing for failing nodes.
+            # failure_times_list contains absolute timestep indices from the
+            # *original* (un-truncated) simulation.  Dividing by the fixed
+            # sequence length gives a stable target in [0, 1] that is
+            # identical regardless of which sliding-window crop is sampled.
             if failed_nodes_list:
-                # shifted = absolute_failure_step - sliding_window_start
-                shifted = torch.tensor(failure_times_list, dtype=torch.float32) - start_idx
-                # Normalise to [0, 1] using the original sequence length so the
-                # target is consistent across different window crops.
-                normalised = torch.clamp(shifted / timing_norm_denom, 0.0, 1.0)
+                normalised = torch.clamp(
+                    torch.tensor(failure_times_list, dtype=torch.float32) / timing_norm_denom,
+                    0.0, 1.0
+                )
                 correct_timing_tensor[mask_failure] = normalised
-            # ================================================================
-            # END: TIMING SHIFT + NORMALISATION FIX
-            # ================================================================
         else:
             correct_timing_tensor = to_tensor(np.full(num_nodes, -1, dtype=np.float32))
 
@@ -378,6 +396,8 @@ class CascadeDataset(Dataset):
             equip_list=data_arrays['equipment_status'], # list[T] of (N,10) tensors
             sequence=sequence,                          # raw dicts for injections
             num_nodes=num_nodes,
+            start_idx=start_idx,                        # absolute window start for t_pos
+            seq_len_for_norm=len(sequence_original),    # actual scenario length for t_pos normalisation
         )
 
         # Data augmentation (training only)
@@ -410,16 +430,21 @@ class CascadeDataset(Dataset):
             'ground_truth_risk': to_tensor(metadata.get('ground_truth_risk', np.zeros(7, dtype=np.float32))),
             'graph_properties': self._extract_graph_properties(last_step, metadata, edge_attr[-1]),
             'temporal_sequence': scada_tensor,
-            'sequence_length': len(sequence)
+            'sequence_length': len(sequence),
+            # Actual (un-truncated) scenario length — needed to decode normalised
+            # timing predictions back to absolute minutes at inference time.
+            'original_sequence_length': len(sequence_original),
         }
     
     @staticmethod
     def _build_node_features(
-        scada_list: List[torch.Tensor],
-        pmu_list:   List[torch.Tensor],
-        equip_list: List[torch.Tensor],
-        sequence:   List[Dict],
-        num_nodes:  int,
+        scada_list:       List[torch.Tensor],
+        pmu_list:         List[torch.Tensor],
+        equip_list:       List[torch.Tensor],
+        sequence:         List[Dict],
+        num_nodes:        int,
+        start_idx:        int = 0,
+        seq_len_for_norm: int = 30,   # actual un-truncated scenario length
     ) -> torch.Tensor:
         """Build the (T, N, 115) node-feature tensor used by NodeFeatureMLP.
 
@@ -472,8 +497,16 @@ class CascadeDataset(Dataset):
         delta1[1:]  = base[1:]  - base[:-1]
         delta2[2:]  = base[2:]  - base[:-2]
 
-        # ── timestep position ─────────────────────────────────────────────────
-        t_pos = torch.linspace(0.0, 1.0, T)              # (T,)
+        # ── timestep position (ABSOLUTE, per-scenario) ───────────────────────
+        # FIX: Use absolute position (start_idx + step) / len(sequence_original)
+        # rather than relative position [0, 1] within the truncated window.
+        # Uses seq_len_for_norm (= len(sequence_original)) passed in from the
+        # caller — NOT a fixed DEFAULT_SEQUENCE_LENGTH constant — because each
+        # scenario has its own actual number of timesteps.
+        T_total = float(max(seq_len_for_norm, 1))
+        t_start_frac = start_idx / T_total
+        t_end_frac   = (start_idx + T - 1) / T_total
+        t_pos = torch.linspace(t_start_frac, t_end_frac, T)  # (T,) absolute
         t_pos = t_pos.view(T, 1, 1).expand(T, num_nodes, 1)  # (T, N, 1)
 
         # ── IMPROVED: physics-based time-to-failure (TTF) estimators ─────────

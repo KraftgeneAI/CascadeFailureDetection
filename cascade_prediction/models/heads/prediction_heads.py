@@ -314,45 +314,63 @@ class RiskHead(nn.Module):
 
 class TimingHead(nn.Module):
     """
-    Predicts cascade failure timing (normalised time-to-failure for each node).
+    Predicts cascade failure timing (absolute-normalised time-to-failure per node).
 
-    IMPROVED ARCHITECTURE (v2):
-    - Deeper 3-layer MLP with residual skip connection for richer representation
-    - Sigmoid output constrained to [0, 1] matching normalised training targets
-      (failure_time / sequence_length).  The old linear output had no activation,
-      allowing arbitrary negative values that were meaningless for timing.
-    - BatchNorm replaced by LayerNorm for stability across variable batch sizes.
+    IMPROVED ARCHITECTURE (v3):
+    - Sigmoid output in (0, 1), matching absolute-normalised training targets
+      (failure_time / DEFAULT_SEQUENCE_LENGTH).
+    - Residual skip connection for gradient stability.
+    - LayerNorm for training stability across variable batch sizes.
+    - Reduced dropout (0.25 vs 0.4): timing is a precise regression task where
+      high dropout destroys the fine-grained signal needed for accurate timing.
+    - Output bias initialised to 1.4 (Sigmoid ≈ 0.80) so predictions start
+      centred around the typical cascade failure region (≈ timestep 24/30 =
+      0.80 ≈ 48 min).  This prevents the model from spending early epochs
+      learning the baseline "failures happen late" prior.
 
-    Output: [batch_size, num_nodes, 1] in range (0, 1) — normalised failure time.
-    Multiply by sequence_length (or max_time_horizon) at inference time to recover
-    the absolute timestep prediction.
+    Output: [batch_size, num_nodes, 1] in (0, 1) — absolute-normalised time.
+    Decode at inference: pred × DEFAULT_SEQUENCE_LENGTH × DT_MINUTES → minutes.
     """
+
+    # Reduced dropout vs other heads — timing regression needs fine-grained
+    # gradient signal that high dropout would destroy.
+    TIMING_DROPOUT = 0.25
 
     def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_HIGH):
         super(TimingHead, self).__init__()
 
         mid = hidden_dim // 2
+        # Use lower dropout regardless of the passed-in dropout rate
+        _drop = self.TIMING_DROPOUT
 
         # Main path: hidden → mid → mid → 1
         self.layer1 = nn.Sequential(
             nn.Linear(hidden_dim, mid),
             nn.LayerNorm(mid),
             nn.ReLU(),
-            nn.Dropout(dropout),
+            nn.Dropout(_drop),
         )
         self.layer2 = nn.Sequential(
             nn.Linear(mid, mid),
             nn.LayerNorm(mid),
             nn.ReLU(),
-            nn.Dropout(dropout),
+            nn.Dropout(_drop),
         )
         self.out = nn.Linear(mid, 1)
 
-        # Residual projection: hidden → mid (so we can add to layer2 output)
+        # Residual projection: hidden → mid
         self.residual_proj = nn.Linear(hidden_dim, mid)
 
-        # Sigmoid so output is always in (0, 1) — matches normalised targets
+        # Sigmoid so output is always in (0, 1)
         self.activation = nn.Sigmoid()
+
+        # ── Output bias initialisation ────────────────────────────────────────
+        # Cascade failures in the dataset typically occur in the 0.75-0.97
+        # normalised time range (≈ t=22-29 out of 30 steps).  Initialising
+        # the output bias to logit(0.80) ≈ 1.386 centres the initial
+        # predictions at 0.80 instead of 0.50, cutting the number of epochs
+        # needed to learn the basic "failures happen late" prior.
+        nn.init.constant_(self.out.bias, 1.386)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -360,7 +378,7 @@ class TimingHead(nn.Module):
             x: Node embeddings [batch_size, num_nodes, hidden_dim]
 
         Returns:
-            Normalised time-to-failure predictions [batch_size, num_nodes, 1] in (0, 1)
+            Absolute-normalised time-to-failure [batch_size, num_nodes, 1] in (0, 1)
         """
         residual = self.residual_proj(x)   # [B, N, mid]
         h = self.layer1(x)                 # [B, N, mid]
