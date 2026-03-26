@@ -282,8 +282,8 @@ class Trainer:
         
         risk_mse = 0.0
         if 'risk_scores' in outputs and 'ground_truth_risk' in batch and batch['ground_truth_risk'] is not None:
-            pred_risk_agg = torch.mean(outputs['risk_scores'], dim=1)  # [B, N, 7] -> [B, 7]
-            target_risk = batch['ground_truth_risk']  # [B, 7]
+            pred_risk_agg = outputs['risk_scores']  # [B, N, 7]
+            target_risk = batch['ground_truth_risk']  # [B, N, 7]
             risk_mse = nn.functional.mse_loss(pred_risk_agg, target_risk).item()
         
         # ── IMPROVED TIMING METRIC (v2) ─────────────────────────────────────
