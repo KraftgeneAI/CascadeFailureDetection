@@ -210,27 +210,31 @@ class PhysicsInformedLoss(nn.Module):
         target: torch.Tensor
     ) -> torch.Tensor:
         """
-        IMPROVED cascade timing loss (v2) — normalised targets in [0, 1].
+        IMPROVED cascade timing loss (v3) — absolute-normalised targets in [0, 1].
 
-        Combines three components:
-          1. MSE regression on valid (non -1) nodes — balanced loss with BCE
-             flavour since both pred and target are in [0, 1].
-          2. Smooth-L1 regression as a secondary term for outlier robustness.
-          3. Pairwise ranking loss enforcing correct cascade sequence order,
-             with margin scaled to the normalised target space (0.02 instead
-             of 0.1 — proportional to typical inter-failure gap of ~2 steps
-             out of 30, i.e. 2/30 ≈ 0.067, margin set to 0.02 for leniency).
+        Combines four components:
+          1. MSE + Smooth-L1 regression on failing nodes (primary regression).
+          2. Bias-correction term: penalises the mean prediction deviating from
+             the mean target within each sample.  This directly counteracts the
+             systematic early-prediction bias that was the observed failure mode
+             (model predicted ~41 min while actual was ~48 min).
+          3. Temporal-spread term: enforces that the predicted time range
+             (max - min) matches the true range of the cascade progression,
+             preventing the model from collapsing all timing to a single value.
+          4. Pairwise ranking loss with margin 0.04 (≈ 1.2 timesteps in a
+             30-step scenario), enforcing the correct failure sequence order.
 
-        Previously, targets were un-normalised timestep indices (20-30), so
-        smooth_l1_loss produced a raw value of ~8.4.  Dynamic calibration
-        responded by driving lambda_timing to ~0.013, killing the gradient.
-        With normalised targets the raw loss is comparable to other components.
+        All targets are now ABSOLUTE (failure_time / DEFAULT_SEQUENCE_LENGTH),
+        making them consistent across different sliding-window crops and with
+        the inference decode formula:
+            decoded_minutes = pred_normed × DEFAULT_SEQ_LEN × DT_MINUTES
 
         Args:
             predicted: Predicted timing [batch_size, num_nodes, 1],
                        Sigmoid output in (0, 1).
             target:    Target timing [batch_size, num_nodes],
-                       normalised to [0, 1] (−1 = non-failing node, masked).
+                       absolute-normalised to [0, 1] (−1 = non-failing node,
+                       masked out of all loss terms).
 
         Returns:
             Combined timing loss scalar.
@@ -246,32 +250,55 @@ class PhysicsInformedLoss(nn.Module):
                 continue
 
             p_valid = pred_s[b][pos_idx]   # model predictions for failing nodes
-            t_valid = t[pos_idx]            # normalised ground-truth times
+            t_valid = t[pos_idx]            # absolute-normalised ground-truth times
 
-            # 1. MSE regression (primary)
+            # ── 1. Regression loss ────────────────────────────────────────────
             mse_loss = F.mse_loss(p_valid, t_valid)
-
-            # 2. Smooth-L1 regression (outlier-robust secondary)
             sl1_loss = F.smooth_l1_loss(p_valid, t_valid, beta=0.05)
+            regression_loss = 0.6 * mse_loss + 0.3 * sl1_loss
 
-            regression_loss = 0.7 * mse_loss + 0.3 * sl1_loss
+            # ── 2. Bias-correction loss ───────────────────────────────────────
+            # Penalise the mean predicted time deviating from the mean actual
+            # time.  This is the primary counter-measure to the systematic
+            # early-prediction bias: by explicitly penalising the *mean* offset
+            # the model is pushed to centre its predictions correctly even when
+            # individual node rankings are uncertain.
+            mean_pred_bias   = p_valid.mean()
+            mean_target_bias = t_valid.mean()
+            bias_loss = (mean_pred_bias - mean_target_bias).pow(2)
+            regression_loss = regression_loss + 0.1 * bias_loss
 
-            # 3. Pairwise ranking: only when ≥2 failing nodes exist
+            # ── 3. Temporal spread loss ───────────────────────────────────────
+            # Encourage the model to reproduce the correct time RANGE of the
+            # cascade (last_failure - first_failure).  Without this, the model
+            # tends to cluster all timing predictions around a single value.
+            if len(pos_idx) >= 2:
+                pred_spread   = p_valid.max() - p_valid.min()
+                target_spread = t_valid.max() - t_valid.min()
+                spread_loss   = F.mse_loss(pred_spread.unsqueeze(0),
+                                           target_spread.unsqueeze(0))
+                regression_loss = regression_loss + 0.1 * spread_loss
+
+            # ── 4. Pairwise ranking loss ──────────────────────────────────────
+            # Enforce correct cascade sequence order with a margin of 0.04
+            # (≈ 1.2 timesteps at DEFAULT_SEQUENCE_LENGTH = 30, previously 0.02
+            # which was too lenient — ~0.6 steps — letting mis-ordered pairs
+            # slip through the penalty).
             if len(pos_idx) >= 2:
                 pairs = torch.combinations(pos_idx, r=2)
                 p_diff = pred_s[b][pairs[:, 0]] - pred_s[b][pairs[:, 1]]
                 t_diff = t[pairs[:, 0]] - t[pairs[:, 1]]
                 # Only penalise pairs with meaningfully different actual times
-                # (gap > 1/seq_len in normalised space ≈ 0.033)
-                sig_mask = t_diff.abs() > 0.025
+                # (gap > 1 timestep ≈ 0.033 in normalised space)
+                sig_mask = t_diff.abs() > 0.033
                 if sig_mask.sum() > 0:
                     ranking_loss = torch.relu(
-                        0.02 - p_diff[sig_mask] * torch.sign(t_diff[sig_mask])
+                        0.04 - p_diff[sig_mask] * torch.sign(t_diff[sig_mask])
                     ).mean()
                 else:
                     ranking_loss = torch.tensor(0.0, device=predicted.device)
 
-                losses.append(regression_loss + 0.5 * ranking_loss)
+                losses.append(regression_loss + 0.4 * ranking_loss)
             else:
                 losses.append(regression_loss)
 

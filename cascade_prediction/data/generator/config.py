@@ -350,15 +350,14 @@ class LossConfig:
     LAMBDA_PREDICTION   = 10.0
     LAMBDA_POWERFLOW    = 0.1
     LAMBDA_RISK         = 0.1
-    # IMPROVED: timing lambda raised from 0.1 → 5.0.
-    # Previously, dynamic calibration drove timing lambda to ~0.013 because
-    # the raw timing loss (~8.4) dwarfed the prediction loss (~0.11).  The
-    # root cause was un-normalised absolute timestep targets (values 20-30)
-    # versus a linear un-bounded head — giving enormous raw MSE.  With the
-    # new normalised targets ([0,1]) and Sigmoid output the raw loss stays
-    # comparable to other components, so a weight of 5.0 gives it sufficient
-    # gradient without destabilising training.
-    LAMBDA_TIMING       = 5.0
+    # IMPROVED: timing lambda raised from 0.1 → 5.0 → 8.0.
+    # v3 further increases it because:
+    #  - Absolute-normalised targets (failure_time / DEFAULT_SEQ_LEN) give raw
+    #    MSE of ~0.01-0.05, which is smaller than the prediction focal loss.
+    #  - The new bias-correction and spread-enforcement terms are also small.
+    #  - A weight of 8.0 brings the timing contribution to ~10-15% of total
+    #    loss — sufficient to drive precise timing without hurting detection.
+    LAMBDA_TIMING       = 8.0
     LAMBDA_ACTIVE_FLOW  = 0.1
     LAMBDA_TEMPERATURE  = 0.05
     LAMBDA_FREQUENCY    = 0.08
