@@ -174,10 +174,15 @@ class Trainer:
             # Use advanced indexing: [batch_indices, last_step_indices, :, feature_idx]
             voltages = batch_device['scada_data'][batch_indices, last_step_indices, :, 0:1]  # [B, N, 1]
             node_reactive_power = batch_device['scada_data'][batch_indices, last_step_indices, :, 3:4]  # [B, N, 1]
+            # SCADA col 6 = system frequency (Hz), same value across nodes — take mean.
+            # Shape: [B, N] → mean over nodes → [B] → [B, 1, 1] to match FrequencyHead output.
+            freq_raw = batch_device['scada_data'][batch_indices, last_step_indices, :, 6]  # [B, N]
+            ground_truth_frequency = freq_raw.mean(dim=1).view(-1, 1, 1)  # [B, 1, 1]
         else:
             voltages = None
             node_reactive_power = None
-        
+            ground_truth_frequency = None
+
         targets = {
             'failure_label': batch_device['node_failure_labels'],
             'ground_truth_risk': batch_device.get('ground_truth_risk'),
@@ -186,6 +191,7 @@ class Trainer:
             'node_reactive_power': node_reactive_power,
             'line_reactive_power': batch_device['edge_attr'][:, -1, :, 6:7] if 'edge_attr' in batch_device else None,
             'active_power_line_flows': batch_device['edge_attr'][:, -1, :, 5:6] if 'edge_attr' in batch_device else None,
+            'ground_truth_frequency': ground_truth_frequency,
         }
         return targets
     

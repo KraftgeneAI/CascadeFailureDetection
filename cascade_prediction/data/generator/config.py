@@ -359,10 +359,18 @@ class LossConfig:
     #    loss — sufficient to drive precise timing without hurting detection.
     LAMBDA_TIMING       = 8.0
     LAMBDA_ACTIVE_FLOW  = 0.1
-    LAMBDA_TEMPERATURE  = 0.05
-    LAMBDA_FREQUENCY    = 0.08
+    # TEMPERATURE: loss is MSE(pred/100, true/100) = MSE_raw/10000.  With raw MSE ≈ 50
+    # (7°C mean error), effective contribution = 0.05 * 50/10000 ≈ 0.00025 — negligible.
+    # Raising to 10.0 yields 10.0 * 50/10000 = 0.05, on par with powerflow/reactive.
+    LAMBDA_TEMPERATURE  = 10.0
+    # FREQUENCY: now supervised directly against SCADA ground-truth (fixed from physics
+    # formula with wrong POWER_TO_FREQ constant).  Small upward nudge from 0.08 → 0.10
+    # since the supervision signal is now correct and informative.
+    LAMBDA_FREQUENCY    = 0.1
     LAMBDA_REACTIVE     = 0.1
-    LAMBDA_VOLTAGE      = 1.0
+    # VOLTAGE: down-weighted from 1.0 → 0.3.  At 1.0 it consumed ~10% of the total
+    # gradient budget for an auxiliary task, crowding out failure prediction and timing.
+    LAMBDA_VOLTAGE      = 0.3
     LAMBDA_CAPACITY     = 0.05
 
     # Focal loss parameters
