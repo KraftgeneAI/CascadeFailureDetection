@@ -298,22 +298,22 @@ class PhysicsBasedGridSimulator:
         cascade_start_time = scenario_data.pop('actual_cascade_start')
         is_cascade = len(failed_nodes) > 0
 
-        # Compute risk vector
-        if is_cascade:
-            ground_truth_risk = self._compute_risk_vector(
-                stress_level,
-                failure_reasons[0] if failure_reasons else 'none',
-                len(failed_nodes)
-            )
-        else:
+        # Compute per-node 7-dim risk vectors from last-timestep physics state.
+        # Both cascade and non-cascade scenarios use the same per-node formulas so
+        # the risk head receives consistent supervision across all scenario types.
+        if not is_cascade:
             if stress_level > Settings.Scenario.STRESSED_STRESS_MAX:
                 print(f"  [STRESSED] No failures at stress={stress_level:.3f}")
             else:
                 print(f"  [NORMAL] No failures")
-            ground_truth_risk = np.array([
-                stress_level, stress_level*0.7, stress_level*0.5,
-                0.1, 0.1, 0.1, stress_level
-            ], dtype=np.float32)
+
+        last_sequence = scenario_data['sequence']
+        ground_truth_risk = self._compute_node_risk_vectors(
+            last_sequence,
+            failed_nodes,
+            failure_times,
+            sequence_length,
+        )
 
         scenario_data['metadata'] = {
             'cascade_start_time': cascade_start_time,
@@ -560,28 +560,100 @@ class PhysicsBasedGridSimulator:
             result['actual_cascade_start'] = cascade_start_time
         return result
     
-    def _compute_risk_vector(
+    def _compute_node_risk_vectors(
         self,
-        stress_level: float,
-        initial_reason: str,
-        num_failed: int
+        sequence: List[Dict],
+        failed_nodes: List[int],
+        failure_times: List[int],
+        sequence_length: int,
     ) -> np.ndarray:
-        """Compute 7-dimensional risk vector."""
-        risk_vec = np.zeros(7, dtype=np.float32)
-        risk_vec[0] = stress_level  # threat_severity
-        
-        if 'loading' in initial_reason or 'temperature' in initial_reason:
-            risk_vec[1] = 0.8  # vulnerability
-            risk_vec[2] = 0.7  # operational_impact
-            risk_vec[6] = 0.7  # urgency
-        elif 'voltage' in initial_reason or 'frequency' in initial_reason:
-            risk_vec[1] = 0.7  # vulnerability
-            risk_vec[2] = 0.9  # operational_impact
-            risk_vec[6] = 0.9  # urgency
-        
-        risk_vec[3] = 0.5 + 0.5 * (num_failed / self.num_nodes)  # cascade_probability
-        
-        return risk_vec
+        """
+        Compute per-node 7-dimensional risk vectors from simulation state.
+
+        Returns shape [num_nodes, 7] — one risk vector per node — using only
+        quantities that are naturally per-node so that the RiskHead receives
+        genuine per-node supervision rather than a collapsed scenario average.
+
+        Dimensions
+        ----------
+        [0] threat_severity   : max(loading_ratio, temp_ratio) clipped to [0, 1].
+                                How much physical stress this node is currently under.
+        [1] vulnerability     : 1 - equipment_condition.
+                                Equipment degradation; higher = more fragile.
+        [2] impact_severity   : base_load[n] / max(base_load).
+                                Load importance; losing a large bus is worse.
+        [3] cascade_probability: 1.0 for nodes that actually failed; loading_ratio
+                                 (clipped) for all others — a physics-grounded proxy
+                                 for how close this node is to tipping.
+        [4] response_capability: clip(1 - loading_ratio, 0, 1).
+                                Available headroom; near-full nodes have little room.
+        [5] safety_margin     : clip(min(voltage_margin, temp_margin, load_margin), 0, 1)
+                                where each margin is positive when safe, 0 at threshold.
+        [6] urgency           : 1 - (failure_time / sequence_length) for failed nodes,
+                                0 for non-failed. Earlier failures → higher urgency.
+
+        All values are clipped to [0, 1].
+
+        SCADA column reference (last timestep)
+        ----------------------------------------
+        col 14: voltage_ratio  = voltage / voltage_failure_threshold  (>1 = safe)
+        col 15: temp_ratio     = temp    / temp_failure_threshold      (<1 = safe)
+        col 17: loading_ratio  = loading / loading_failure_threshold   (<1 = safe)
+        col  8: equipment_condition  (0 = fully degraded, 1 = perfect)
+        col 10: base_load (MW)
+        """
+        # ── Last timestep SCADA ────────────────────────────────────────────────
+        last_scada = sequence[-1]['scada_data']          # [N, 18]
+
+        voltage_ratio  = last_scada[:, 14].astype(np.float32)   # >1 safe
+        temp_ratio     = last_scada[:, 15].astype(np.float32)   # <1 safe
+        loading_ratio  = last_scada[:, 17].astype(np.float32)   # <1 safe
+
+        # ── Static node properties ─────────────────────────────────────────────
+        equipment_condition = self.equipment_condition.astype(np.float32)   # [N]
+        base_load           = self.base_load.astype(np.float32)             # [N]
+        max_load            = float(base_load.max()) if base_load.max() > 0 else 1.0
+
+        # ── Failure record look-up ─────────────────────────────────────────────
+        failed_set = set(failed_nodes)
+        # Map node index → failure timestep
+        node_failure_time = {n: t for n, t in zip(failed_nodes, failure_times)}
+
+        # ── Build per-node vectors ─────────────────────────────────────────────
+        risk = np.zeros((self.num_nodes, 7), dtype=np.float32)
+
+        # dim[0] — threat_severity
+        risk[:, 0] = np.clip(np.maximum(loading_ratio, temp_ratio), 0.0, 1.0)
+
+        # dim[1] — vulnerability
+        risk[:, 1] = np.clip(1.0 - equipment_condition, 0.0, 1.0)
+
+        # dim[2] — impact_severity
+        risk[:, 2] = np.clip(base_load / max_load, 0.0, 1.0)
+
+        # dim[3] — cascade_probability
+        cascade_prob = np.clip(loading_ratio, 0.0, 1.0)
+        for n in failed_set:
+            cascade_prob[n] = 1.0
+        risk[:, 3] = cascade_prob
+
+        # dim[4] — response_capability (available headroom)
+        risk[:, 4] = np.clip(1.0 - loading_ratio, 0.0, 1.0)
+
+        # dim[5] — safety_margin  (minimum across three failure modes)
+        voltage_margin = voltage_ratio - 1.0          # positive = safe
+        temp_margin    = 1.0 - temp_ratio             # positive = safe
+        load_margin    = 1.0 - loading_ratio          # positive = safe
+        min_margin     = np.minimum(np.minimum(voltage_margin, temp_margin), load_margin)
+        risk[:, 5] = np.clip(min_margin, 0.0, 1.0)
+
+        # dim[6] — urgency (early failures are most urgent)
+        urgency = np.zeros(self.num_nodes, dtype=np.float32)
+        for n, t_fail in node_failure_time.items():
+            urgency[n] = np.clip(1.0 - (t_fail / max(sequence_length, 1)), 0.0, 1.0)
+        risk[:, 6] = urgency
+
+        return risk
     
     def _compute_cascade_timing(
         self,

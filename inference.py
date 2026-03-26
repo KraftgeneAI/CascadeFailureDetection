@@ -284,13 +284,13 @@ def print_report(res: Dict, cascade_thresh: float, node_thresh: float):
         print(f"  - {labels[6]}: {r[6]:.3f} {get_lvl(r[6]):<10}")
 
     gt_risk = gt.get('ground_truth_risk', [])
-    if gt_risk is not None and len(gt_risk) >= 7:
+    if gt_risk is not None and gt_risk.shape[1] >= 7:
         print("\n  Ground Truth Risk Assessment:")
-        g_line1 = [f"{l}: {s:.3f} {get_lvl(s):<10}" for l,s in zip(labels[:3], gt_risk[:3])]
-        g_line2 = [f"{l}: {s:.3f} {get_lvl(s):<10}" for l,s in zip(labels[3:6], gt_risk[3:6])]
+        g_line1 = [f"{l}: {s.mean():.3f} {get_lvl(s.mean()):<10}" for l,s in zip(labels[:3], gt_risk[:,:3])]
+        g_line2 = [f"{l}: {s.mean():.3f} {get_lvl(s.mean()):<10}" for l,s in zip(labels[3:6], gt_risk[:,3:6])]
         print("  - " + " | ".join(g_line1))
         print("  - " + " | ".join(g_line2))
-        print(f"  - {labels[6]}: {gt_risk[6]:.3f} {get_lvl(gt_risk[6]):<10}")
+        print(f"  - {labels[6]}: {gt_risk[:,6].mean():.3f} {get_lvl(gt_risk[:,6].mean()):<10}")
         
     print("\n--- Risk Definitions ---")
     print("  Critical (0.8+): Immediate Failure | Severe (0.6+): High Danger | Medium (0.3+): Caution")

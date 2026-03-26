@@ -177,16 +177,21 @@ class CascadePredictor:
                 
                 # Save final outputs
                 if i == len(loader) - 1:
-                    final_risk_scores = outputs['risk_scores'][-1].mean(dim=0).cpu().numpy().tolist()
+                    # per_node_risk: [N, 7] — supervised per-node risk vectors
+                    per_node_risk = outputs['risk_scores'][-1].cpu().numpy()   # [N, 7]
+                    # Scenario-level aggregate: mean over nodes — used for the
+                    # 7-dim summary reported in the risk assessment table.
+                    final_risk_scores = per_node_risk.mean(axis=0).tolist()    # [7]
                     final_sys_state = {
                         'frequency': float(outputs['frequency'].mean().item()),
                         'voltages': outputs['voltages'][-1].reshape(-1).cpu().numpy().tolist()
                     }
-        
+
         return {
             'max_probs': max_probs,
             'first_time': first_time,
             'risk_scores': final_risk_scores,
+            'per_node_risk': per_node_risk if 'per_node_risk' in dir() else None,
             'system_state': final_sys_state
         }
     
@@ -194,22 +199,36 @@ class CascadePredictor:
         """Analyze predictions and format results."""
         max_probs = predictions['max_probs']
         first_time = predictions['first_time']
-        
-        # Identify risky nodes
+        per_node_risk = predictions.get('per_node_risk')  # [N, 7] or None
+
+        # Identify risky nodes by failure probability threshold
         risky_nodes = [
-            n for n, p in max_probs.items() 
+            n for n, p in max_probs.items()
             if p > self.node_threshold
         ]
-        
-        # Rank nodes by score
+
+        # Rank nodes by failure probability score
         ranked_nodes = []
         for n in risky_nodes:
-            ranked_nodes.append({
+            node_entry = {
                 'node_id': n,
                 'score': max_probs[n],
-                'peak_time': first_time[n]
-            })
-        
+                'peak_time': first_time[n],
+            }
+            # Attach per-node risk breakdown when available
+            if per_node_risk is not None and n < len(per_node_risk):
+                dims = per_node_risk[n].tolist()
+                node_entry['risk_breakdown'] = {
+                    'threat_severity':    round(dims[0], 3),
+                    'vulnerability':      round(dims[1], 3),
+                    'impact_severity':    round(dims[2], 3),
+                    'cascade_probability':round(dims[3], 3),
+                    'response_capability':round(dims[4], 3),
+                    'safety_margin':      round(dims[5], 3),
+                    'urgency':            round(dims[6], 3),
+                }
+            ranked_nodes.append(node_entry)
+
         ranked_nodes.sort(key=lambda x: -x['score'])
         
         # Generate cascade path with ranking

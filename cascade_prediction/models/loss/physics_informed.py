@@ -187,19 +187,28 @@ class PhysicsInformedLoss(nn.Module):
     def risk_loss(
         self,
         predicted_risk: torch.Tensor,
-        target_risk: torch.Tensor
+        target_risk: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Supervised learning for risk score.
-        
+        Per-node supervised risk loss.
+
+        Both tensors are [batch_size, num_nodes, 7].  The loss supervises each
+        node individually so the model must learn to differentiate high-risk
+        nodes (overloaded, degraded equipment, early failure) from low-risk ones.
+
+        The previous implementation collapsed predictions via mean(dim=1) and
+        compared against a single scenario-level [7] vector, which gave every
+        node the same gradient signal and made per-node risk discrimination
+        impossible to learn.
+
         Args:
             predicted_risk: Predicted risk scores [batch_size, num_nodes, 7]
-            target_risk: Target risk scores [batch_size, 7]
-        
+            target_risk:    Ground-truth risk      [batch_size, num_nodes, 7]
+
         Returns:
-            MSE loss for risk assessment
+            Mean squared error across all nodes and risk dimensions.
         """
-        return F.mse_loss(torch.mean(predicted_risk, dim=1), target_risk)
+        return F.mse_loss(predicted_risk, target_risk)
     
     def timing_loss(
         self,
