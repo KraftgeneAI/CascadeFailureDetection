@@ -267,7 +267,9 @@ class CascadeDataset(Dataset):
                 # window started, making the model believe it was always at the beginning.
                 # We use len(sequence_original) (per-scenario actual length) because each scenario
                 # may have a different number of timesteps.
-                scada_data[:, 12] = (start_idx + i) / max(1.0, float(len(sequence_original)))
+                # scada_data[:, 12] = (start_idx + i) / max(1.0, float(len(sequence_original)))
+                scada_data[:,12]=0
+                scada_data[:,13]=0
                 # scada_data[:, 13:18] = 0
                 # 13: stress_level - CRITICAL for prediction!
                 # 14: voltage_ratio (voltage / voltage_failure_threshold)
@@ -399,7 +401,7 @@ class CascadeDataset(Dataset):
             start_idx=start_idx,                        # absolute window start for t_pos
             seq_len_for_norm=len(sequence_original),    # actual scenario length for t_pos normalisation
         )
-
+        node_features[:,:,114]=0
         # Data augmentation (training only)
         is_training = 'train' in str(self.data_dir)
         scada_tensor = torch.stack(data_arrays['scada_data'])
