@@ -301,11 +301,15 @@ def print_report(res: Dict, cascade_thresh: float, node_thresh: float):
     pred_path = res['cascade_path']
     actual_path = gt.get('cascade_path', [])
 
-    print(f"  {'Seq#':<5} | {'Pred Node':<10} | {'Prob':>6} | {'Pred(min)':>9} | {'Act Seq#':<8} | {'Act Node':<10} | {'Act(min)':>8}")
-    print(f"  {'-'*5}-+-{'-'*10}-+-{'-'*6}-+-{'-'*9}-+-{'-'*8}-+-{'-'*10}-+-{'-'*8}")
+    pred_node_ids = set(n['node_id'] for n in pred_path)
+
+    print(f"  {'Seq#':<5} | {'Pred Node':<10} | {'Prob':>6} | {'Pred(min)':>9} | {'Act Seq#':<8} | {'Act Node':<10} | {'Act(min)':>8} | {'Caught%':>8}")
+    print(f"  {'-'*5}-+-{'-'*10}-+-{'-'*6}-+-{'-'*9}-+-{'-'*8}-+-{'-'*10}-+-{'-'*8}-+-{'-'*8}")
 
     curr_act_seq = 0
     last_act_time = -999.0
+    actual_seen = 0       # cumulative actual nodes seen so far
+    caught_so_far = 0     # of those, how many are in predicted set
     max_rows = max(len(pred_path), len(actual_path))
 
     for i in range(max_rows):
@@ -317,7 +321,7 @@ def print_report(res: Dict, cascade_thresh: float, node_thresh: float):
             p_score = f"{p['ranking_score']:.3f}"
             p_time  = f"{p['pred_time_minutes']:.2f}"
 
-        a_seq = a_node = a_time = ""
+        a_seq = a_node = a_time = caught_pct = ""
         if i < len(actual_path):
             a = actual_path[i]
             t = a['time_minutes']
@@ -327,8 +331,13 @@ def print_report(res: Dict, cascade_thresh: float, node_thresh: float):
             a_seq  = str(curr_act_seq)
             a_node = f"Node {a['node_id']}"
             a_time = f"{t:.2f}"
+            actual_seen += 1
+            if a['node_id'] in pred_node_ids:
+                caught_so_far += 1
+            pct = caught_so_far / actual_seen * 100
+            caught_pct = f"{pct:.0f}%"
 
-        print(f"  {p_seq:<5} | {p_node:<10} | {p_score:>6} | {p_time:>9} | {a_seq:<8} | {a_node:<10} | {a_time:>8}")
+        print(f"  {p_seq:<5} | {p_node:<10} | {p_score:>6} | {p_time:>9} | {a_seq:<8} | {a_node:<10} | {a_time:>8} | {caught_pct:>8}")
     print("="*80 + "\n")
 
 
