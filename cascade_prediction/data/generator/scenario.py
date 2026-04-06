@@ -291,15 +291,16 @@ class ScenarioOrchestrator:
         scenario : Dict or None
             Generated scenario or None if failed
         """
+        # Determine stress level based on type
+        if scenario_type == 'cascade':
+            stress_level = np.random.uniform(Settings.Scenario.CASCADE_STRESS_MIN, Settings.Scenario.CASCADE_STRESS_MAX)
+        elif scenario_type == 'stressed':
+            stress_level = np.random.uniform(Settings.Scenario.STRESSED_STRESS_MIN, Settings.Scenario.STRESSED_STRESS_MAX)
+        else:  # normal
+            stress_level = np.random.uniform(Settings.Scenario.NORMAL_STRESS_MIN, Settings.Scenario.NORMAL_STRESS_MAX)
+        
         for retry in range(max_retries):
-            # Determine stress level based on type
-            if scenario_type == 'cascade':
-                stress_level = np.random.uniform(Settings.Scenario.CASCADE_STRESS_MIN, Settings.Scenario.CASCADE_STRESS_MAX)
-            elif scenario_type == 'stressed':
-                stress_level = np.random.uniform(Settings.Scenario.STRESSED_STRESS_MIN, Settings.Scenario.STRESSED_STRESS_MAX)
-            else:  # normal
-                stress_level = np.random.uniform(Settings.Scenario.NORMAL_STRESS_MIN, Settings.Scenario.NORMAL_STRESS_MAX)
-            
+
             # Generate scenario
             scenario = self.simulator.generate_scenario(
                 stress_level=stress_level,
@@ -317,11 +318,13 @@ class ScenarioOrchestrator:
             if scenario_type == 'cascade' and not is_cascade:
                 if retry < max_retries - 1:
                     print(f"  [RETRY {retry+1}] Wanted cascade, got normal. Increasing stress...")
+                    stress_level+=0.05
                 continue
             
             if scenario_type in ['normal', 'stressed'] and is_cascade:
                 if retry < max_retries - 1:
                     print(f"  [RETRY {retry+1}] Wanted {scenario_type}, got cascade. Decreasing stress...")
+                    stress_level-=0.05
                 continue
             
             # Success!
