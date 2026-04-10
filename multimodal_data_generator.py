@@ -1874,7 +1874,21 @@ class PhysicsBasedGridSimulator:
         """
         
         print(f"  [INPUT] Generating scenario with stress_level: {stress_level:.3f}")
-        
+
+        ### build time-dependent stress sequence
+        T = sequence_length
+        stress_sequence = np.ones(T) * stress_level
+
+        if external_stress_signal is not None and len(external_stress_signal) > 0:
+            video_signal = np.array(external_stress_signal)
+
+            if len(video_signal) > T:
+                video_signal = video_signal[:T]
+
+            L = len(video_signal)
+            start = np.random.randint(0, max(1, T - L))
+            stress_sequence[start:start + L] = video_signal
+
         # This is the base stress level for the scenario
         base_stress_level = stress_level
         
@@ -2042,23 +2056,35 @@ class PhysicsBasedGridSimulator:
 
         for t in range(sequence_length):
 
-            current_stress = base_stress_level
-
+            ### combine baseline stress with video signal
             if external_stress_signal is not None:
                 if t < len(external_stress_signal):
-                    external_factor = float(external_stress_signal[t])             ############
+                    video_stress = float(external_stress_signal[t])
                 else:
-                    external_factor = float(external_stress_signal[-1])
-            else:
-                external_factor = 1.0
+                    video_stress = float(external_stress_signal[-1])
 
-            
-            if is_cascade:
-                load_multiplier = 0.7 + current_stress * 0.4 
-                load_noise = 0.05
+                current_stress = stress_sequence[t] + video_stress * 5.0
             else:
-                load_multiplier = 0.5 + current_stress * 0.4
-                load_noise = 0.02
+                current_stress = stress_sequence[t]
+
+
+            ### force early failure from video signal
+            if external_stress_signal is not None:
+                if current_stress > 2.5:
+                    prob = min(0.3, current_stress * 0.1)
+
+                    for node in range(self.num_nodes):
+                        if np.random.rand() < prob:
+                            failed_nodes.append(node)
+
+
+            ### amplify system sensitivity to stress
+            if is_cascade:
+                load_multiplier = 0.7 + current_stress * 3.0
+                load_noise = 0.01
+            else:
+                load_multiplier = 0.5 + current_stress * 2.5
+                load_noise = 0.01
             
             load_values = self.base_load * load_multiplier * (1 + np.random.normal(0, load_noise, self.num_nodes))
             

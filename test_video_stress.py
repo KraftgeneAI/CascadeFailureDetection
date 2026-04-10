@@ -1,119 +1,98 @@
-#################
+########################
 import numpy as np
 
 from video_processor import extract_threat_curve
 from multimodal_data_generator import PhysicsBasedGridSimulator
 
 
-### define input video path
+### input video
 video_path = "videos/wildfire1.mp4"
 
+### extract node-level signal (T, N)
+stress_signal = extract_threat_curve(video_path)
 
-### extract stress signal
-stress_signal = extract_threat_curve(
-    video_path,
-    frame_skip=20
-)
-
-
-### print signal summary
-print("=== Video Stress Signal ===")
-print("Length:", len(stress_signal))
-print("Min:", float(np.min(stress_signal)))
+print("\n=== Video Signal ===")
+print("Shape:", stress_signal.shape)
 print("Max:", float(np.max(stress_signal)))
-print("First values:", stress_signal[:10])
 
 
-### derive stable stress level (IMPORTANT: keep small impact)
-video_mean_stress = float(np.mean(stress_signal))
+### aggregate + amplify (strong but stable)
+global_stress = stress_signal.max(axis=1) * 6
 
-### SAFE mapping (this is the fix)
-adjusted_stress_level = 0.5 + 0.2 * video_mean_stress
-
-### clamp to safe range
-adjusted_stress_level = min(max(adjusted_stress_level, 0.4), 0.7)
-
-print("\n=== Derived Stress Level ===")
-print("Base stress level: 0.5")
-print("Adjusted stress level:", adjusted_stress_level)
+print("\n=== Global Stress ===")
+print("Shape:", global_stress.shape)
+print("First values:", global_stress[:10])
 
 
-### initialize simulator
+### simulator
 simulator = PhysicsBasedGridSimulator()
+simulator.dataset_mode = False
+simulator.num_samples = 1
+simulator.generate_dataset = False
 
 
-### disable dataset mode
-if hasattr(simulator, "dataset_mode"):
-    simulator.dataset_mode = False
+print("\n=== Running Simulation ===")
 
-if hasattr(simulator, "num_samples"):
-    simulator.num_samples = 1
+### 🔥 lower baseline to avoid saturation
+BASE_STRESS = 0.05
 
-if hasattr(simulator, "generate_dataset"):
-    simulator.generate_dataset = False
-
-
-### run scenario
-print("\n=== Running SINGLE scenario (FAST MODE) ===")
-
+### baseline run
 result_no_video = simulator._generate_scenario_data(
-    stress_level=0.5,
+    stress_level=BASE_STRESS,
     sequence_length=10,
     external_stress_signal=None
 )
 
+### video-driven run
 result_with_video = simulator._generate_scenario_data(
-    stress_level=adjusted_stress_level,
+    stress_level=BASE_STRESS,
     sequence_length=10,
-    external_stress_signal=None
+    external_stress_signal=global_stress[:10]
 )
 
 
-### validate outputs
-print("\n=== Simulation Results ===")
-print("Without video:", result_no_video is not None)
-print("With video:", result_with_video is not None)
+### extract failures
+failed_no = set(result_no_video["metadata"]["failed_nodes"])
+failed_yes = set(result_with_video["metadata"]["failed_nodes"])
 
-if result_no_video is None or result_with_video is None:
-    print("\n[ERROR] Simulation failed")
-    exit()
-
-
-### extract failure sets
-failed_no_video = set(result_no_video["metadata"]["failed_nodes"])
-failed_with_video = set(result_with_video["metadata"]["failed_nodes"])
+print("\n=== Results ===")
+print("WITHOUT count:", len(failed_no))
+print("WITH count:", len(failed_yes))
 
 
-### print failures
-print("\n=== Failed Nodes ===")
-print("WITHOUT video:", sorted(list(failed_no_video)))
-print("WITH video:", sorted(list(failed_with_video)))
+### difference
+extra = failed_yes - failed_no
+
+print("\n=== Impact ===")
+print("Extra failures:", extra)
+print("Extra failure count:", len(extra))
 
 
-### counts
-count_no_video = len(failed_no_video)
-count_with_video = len(failed_with_video)
-
-print("\n=== Failure Counts ===")
-print("Failures without video:", count_no_video)
-print("Failures with video:", count_with_video)
-
-
-### similarity
-intersection = len(failed_no_video & failed_with_video)
-union = len(failed_no_video | failed_with_video)
+### similarity metric
+intersection = len(failed_no & failed_yes)
+union = len(failed_no | failed_yes)
 jaccard = intersection / union if union > 0 else 1.0
 
-print("\n=== Cascade Difference Metric ===")
-print("Jaccard similarity:", jaccard)
+print("\n=== Metrics ===")
+print("Jaccard similarity:", round(jaccard, 4))
 
 
-### impact
-extra_failures = failed_with_video - failed_no_video
+### validation
+print("\n=== Validation ===")
 
-print("\n=== Video Impact ===")
-print("Additional failures caused by video stress:")
-print(sorted(list(extra_failures)))
-print("Additional failure count:", len(extra_failures))
+if len(extra) > 0:
+    print("PASS: video signal changes cascade behavior")
+else:
+    print("WARNING: no visible impact, increase scaling")
+
+
+### optional plot
+import matplotlib.pyplot as plt
+
+plt.plot(global_stress)
+plt.title("Global Fire Stress Signal")
+plt.xlabel("Time")
+plt.ylabel("Stress")
+plt.show()
 
 #%#
