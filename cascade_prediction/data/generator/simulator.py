@@ -375,8 +375,8 @@ class PhysicsBasedGridSimulator:
         cumulative_failed_nodes: set = set()
         prev_voltages: Optional[np.ndarray] = None
 
-        # failure_record: node → (absolute timestep of failure, reason string)
-        failure_record: Dict[int, Tuple[int, str]] = {}
+        # failure_record: node → (absolute timestep of failure, reason string, parent node id or None)
+        failure_record: Dict[int, Tuple[int, str, Optional[int]]] = {}
         cascade_start_time = -1
 
         # Stress ramp: rise from 60% to 100% of stress_level over first RAMP_FRACTION of sequence
@@ -520,14 +520,41 @@ class PhysicsBasedGridSimulator:
                 if state == 2:
                     new_failures.append((n, reason))
 
-            for n, reason in new_failures:
-                if cascade_start_time < 0:
-                    cascade_start_time = t
-                failure_record[n] = (t, reason)
-                cumulative_failed_nodes.add(n)
-                generation[n] = 0.0
-                load_values[n] = 0.0
-                print(f"  [FAIL] Node {n} failed at t={t} (reason: {reason})")
+            # ----------------------------------------------------------------
+            # Step 2 — Physics-based cascade propagation.
+            # When trigger failures exist, recompute AC power flow after each
+            # new failure to find every downstream node that overloads next.
+            # This models real-world cascade speed (many nodes can trip within
+            # the same simulation minute) and is consistent with the power flow
+            # physics used throughout the rest of the simulation.
+            # ----------------------------------------------------------------
+            if new_failures:
+                target_max_failures = min(
+                    len(new_failures) + int(self.num_nodes * Settings.Simulation.CASCADE_MAX_SPREAD_FRACTION),
+                    self.num_nodes
+                )
+                cascade_sequence = self.cascade_sim.propagate_cascade_physics(
+                    initial_failed_nodes=new_failures,
+                    generation=generation.copy(),  # propagator uses internal copies
+                    load=load_values.copy(),
+                    current_temperature=equipment_temps,
+                    current_frequency=current_frequency,
+                    target_num_failures=target_max_failures,
+                    power_flow_simulator=self.power_flow_sim,
+                    edge_index=self.edge_index.numpy(),
+                    thermal_limits=self.thermal_limits
+                )
+                # Record every failure from this cascade wave (initial + propagated)
+                for fail_node, fail_time_offset, fail_reason, fail_parent in cascade_sequence:
+                    if fail_node not in cumulative_failed_nodes:
+                        if cascade_start_time < 0:
+                            cascade_start_time = t
+                        failure_record[fail_node] = (t, fail_reason, fail_parent)
+                        cumulative_failed_nodes.add(fail_node)
+                        generation[fail_node] = 0.0
+                        load_values[fail_node] = 0.0
+                        print(f"  [FAIL] Node {fail_node} failed at t={t} "
+                              f"(reason: {fail_reason}, cascade offset: {fail_time_offset:.2f} min)")
 
             current_cascade_timing = self._compute_cascade_timing(t, failure_record)
 
@@ -544,6 +571,7 @@ class PhysicsBasedGridSimulator:
         failed_nodes_out    = sorted(failure_record.keys(), key=lambda n: failure_record[n][0])
         failure_times_out   = [failure_record[n][0] for n in failed_nodes_out]
         failure_reasons_out = [failure_record[n][1] for n in failed_nodes_out]
+        failure_parents_out = [failure_record[n][2] for n in failed_nodes_out]
 
         if failed_nodes_out:
             print(f"  [CASCADE] {len(failed_nodes_out)} nodes failed. First failure at t={cascade_start_time}.")
@@ -553,6 +581,7 @@ class PhysicsBasedGridSimulator:
             result['failed_nodes']        = failed_nodes_out
             result['failure_times']       = failure_times_out
             result['failure_reasons']     = failure_reasons_out
+            result['failure_parents']     = failure_parents_out
             result['actual_cascade_start'] = cascade_start_time
         return result
     
@@ -654,14 +683,14 @@ class PhysicsBasedGridSimulator:
     def _compute_cascade_timing(
         self,
         t: int,
-        failure_record: Dict[int, Tuple[int, str]]
+        failure_record: Dict[int, Tuple[int, str, Optional[int]]]
     ) -> np.ndarray:
         """
         Time since failure for each node.
         -1.0 = not yet failed; 0.0 = failed this timestep; positive = timesteps since failure.
         """
         timing = np.full(self.num_nodes, -1.0, dtype=np.float32)
-        for n, (ft, _) in failure_record.items():
+        for n, (ft, _, _p) in failure_record.items():
             timing[n] = float(t - ft)
         return timing
     
