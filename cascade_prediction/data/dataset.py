@@ -388,6 +388,31 @@ class CascadeDataset(Dataset):
         # Store normalisation denominator so inference can decode predictions
         # (attached to graph_properties for easy propagation to the model)
         _timing_norm_denom = timing_norm_denom
+
+        # ── Parent labels for causal parent prediction head ───────────────────
+        # parent_labels[i]:
+        #   -1          → node i did not fail (masked out in loss)
+        #   num_nodes   → node i is a trigger (no causal parent)
+        #   j (0..N-1)  → node j caused node i to fail
+        parent_labels = torch.full((num_nodes,), -1, dtype=torch.long)
+        failed_nodes_list  = metadata.get('failed_nodes', [])
+        failure_parents_list = scenario.get('failure_parents', [])
+        if failed_nodes_list and failure_parents_list:
+            for node, parent in zip(failed_nodes_list, failure_parents_list):
+                node = int(node)
+                if 0 <= node < num_nodes:
+                    if parent is None:
+                        parent_labels[node] = num_nodes   # trigger class
+                    else:
+                        p = int(parent)
+                        if 0 <= p < num_nodes:
+                            parent_labels[node] = p
+        elif failed_nodes_list:
+            # Older data without failure_parents: treat all as triggers
+            for node in failed_nodes_list:
+                node = int(node)
+                if 0 <= node < num_nodes:
+                    parent_labels[node] = num_nodes
         
         # ── 115-feature node tensor ──────────────────────────────────────────
         # Build (T, N, 115) from the already-collected per-timestep arrays so
@@ -429,6 +454,7 @@ class CascadeDataset(Dataset):
             'edge_mask': torch.stack(data_arrays['edge_mask']),
             'node_failure_labels': final_labels,
             'cascade_timing': correct_timing_tensor,
+            'parent_labels': parent_labels,           # [N] long — causal parent per node
             'ground_truth_risk': to_tensor(metadata.get('ground_truth_risk', np.zeros(7, dtype=np.float32))),
             'graph_properties': self._extract_graph_properties(last_step, metadata, edge_attr[-1]),
             'temporal_sequence': scada_tensor,

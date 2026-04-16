@@ -50,6 +50,7 @@ class PhysicsInformedLoss(nn.Module):
         lambda_reactive: float = Settings.Loss.LAMBDA_REACTIVE,
         lambda_voltage: float = Settings.Loss.LAMBDA_VOLTAGE,
         lambda_capacity: float = Settings.Loss.LAMBDA_CAPACITY,
+        lambda_parent: float = Settings.Loss.LAMBDA_PARENT,
         focal_alpha: float = Settings.Loss.FOCAL_ALPHA,
         focal_gamma: float = Settings.Loss.FOCAL_GAMMA,
         base_mva: float = Settings.Dataset.BASE_MVA,
@@ -89,6 +90,7 @@ class PhysicsInformedLoss(nn.Module):
             'reactive': lambda_reactive,
             'voltage': lambda_voltage,
             'capacity': lambda_capacity,
+            'parent': lambda_parent,
         }
 
         # Focal loss parameters
@@ -528,5 +530,22 @@ class PhysicsInformedLoss(nn.Module):
             )
             total_loss += self.lambdas.get('capacity', 0.05) * L_capacity
             loss_dict['capacity'] = L_capacity.item()
+
+        # --- 8. CAUSAL PARENT PREDICTION ---
+        # parent_labels[i] = -1  → node did not fail (ignore)
+        # parent_labels[i] = N   → trigger node (no causal parent)
+        # parent_labels[i] = j   → node j caused node i to fail
+        if 'parent_logits' in predictions and targets.get('parent_labels') is not None:
+            parent_logits = predictions['parent_logits']   # [B, N, N+1]
+            parent_labels = targets['parent_labels'].long()  # [B, N]
+            B, N, _ = parent_logits.shape
+            # Flatten and mask out non-failing nodes (label == -1)
+            logits_flat  = parent_logits.reshape(B * N, N + 1)   # [B*N, N+1]
+            labels_flat  = parent_labels.reshape(B * N)           # [B*N]
+            mask         = labels_flat != -1
+            if mask.sum() > 0:
+                L_parent = F.cross_entropy(logits_flat[mask], labels_flat[mask])
+                total_loss += self.lambdas.get('parent', 0.5) * L_parent
+                loss_dict['parent'] = L_parent.item()
 
         return total_loss, loss_dict

@@ -384,3 +384,54 @@ class TimingHead(nn.Module):
         h = self.layer1(x)                 # [B, N, mid]
         h = self.layer2(h) + residual      # residual skip
         return self.activation(self.out(h))
+
+
+class ParentPredictionHead(nn.Module):
+    """
+    Predicts the causal parent for each node in a cascade failure.
+
+    For each node i, outputs a distribution over all N nodes (possible parents)
+    plus one extra "trigger" slot (index N) for nodes with no parent (initial
+    failures / external triggers).
+
+    Output logits: [batch_size, num_nodes, num_nodes + 1]
+      - [..., j]   = score that node j caused node i to fail  (j < N)
+      - [..., N]   = score that node i is a trigger node      (no parent)
+
+    Training loss: cross_entropy(parent_logits[mask], parent_labels[mask])
+    where mask selects only the nodes that actually failed.
+    parent_labels[i] = N     → trigger node
+    parent_labels[i] = j     → node j caused i
+    parent_labels[i] = -1    → node did not fail (ignored)
+    """
+
+    def __init__(self, hidden_dim: int, dropout: float = 0.1):
+        super().__init__()
+        self.query_proj  = nn.Linear(hidden_dim, hidden_dim)
+        self.key_proj    = nn.Linear(hidden_dim, hidden_dim)
+        # Learned embedding for the "no parent / trigger" class
+        self.trigger_key = nn.Parameter(torch.randn(1, hidden_dim) * 0.02)
+        self.dropout     = nn.Dropout(dropout)
+        self.scale       = hidden_dim ** -0.5
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            h: Node embeddings [B, N, D]
+        Returns:
+            parent_logits: [B, N, N+1]
+        """
+        Q = self.dropout(self.query_proj(h))          # [B, N, D]
+        K = self.dropout(self.key_proj(h))             # [B, N, D]
+
+        # Project trigger key with the same linear as node keys for consistency
+        trigger = self.key_proj(self.trigger_key)      # [1, D]
+        B = h.shape[0]
+        trigger = trigger.unsqueeze(0).expand(B, -1, -1)  # [B, 1, D]
+
+        # Concatenate N node keys + 1 trigger key → [B, N+1, D]
+        all_keys = torch.cat([K, trigger], dim=1)
+
+        # Score each node against every key
+        scores = torch.bmm(Q, all_keys.transpose(1, 2)) * self.scale  # [B, N, N+1]
+        return scores

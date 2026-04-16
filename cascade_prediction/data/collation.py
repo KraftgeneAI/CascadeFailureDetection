@@ -82,6 +82,12 @@ def collate_cascade_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor
                 dtype=torch.long
             )
 
+        elif key == 'parent_labels':
+            # Long tensor [N] — must not be cast to float32
+            items = [item[key] for item in batch if key in item]
+            if items:
+                batch_dict[key] = torch.stack(items, dim=0)   # [B, N] long
+
         elif key == 'graph_properties':
             graph_props_batch = {}
             if batch[0]['graph_properties']:

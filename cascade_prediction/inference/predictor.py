@@ -107,6 +107,15 @@ class CascadePredictor:
         cascade_path = self._build_cascade_path(ranked_nodes)
         ground_truth = self._load_ground_truth(dataset, scenario_idx)
 
+        # ── Causal parent decoding ────────────────────────────────────────────
+        # parent_logits: [B, N, N+1]  (index N = "trigger / no parent")
+        parent_logits_tensor = outputs["parent_logits"].squeeze(0).cpu()  # [N, N+1]
+        num_nodes = parent_logits_tensor.shape[0]
+        predicted_parents = parent_logits_tensor.argmax(dim=-1).tolist()  # list[int], len=N
+        cascade_sequence = self._build_causal_sequence(
+            risky_nodes, predicted_parents, pred_timing_minutes, num_nodes
+        )
+
         return {
             "inference_time": 0.0,
             "cascade_detected": bool(risky_nodes),
@@ -116,6 +125,7 @@ class CascadePredictor:
             "risk_assessment": final_risk_scores,
             "top_nodes": ranked_nodes,
             "cascade_path": cascade_path,
+            "cascade_sequence": cascade_sequence,   # causal chain with parent links
             "system_state": final_sys_state,
         }
 
@@ -136,6 +146,53 @@ class CascadePredictor:
                 "pred_time_minutes": node["pred_time_minutes"],
             })
         return cascade_path
+
+    def _build_causal_sequence(
+        self,
+        risky_nodes: List[int],
+        predicted_parents: List[int],
+        pred_timing_minutes: "np.ndarray",
+        num_nodes: int,
+    ) -> List[Dict]:
+        """
+        Build an ordered causal sequence from predicted parents.
+
+        Each high-risk node is assigned its predicted parent (or None if it is
+        a trigger), then the sequence is sorted by predicted failure time.
+
+        Returns list of dicts:
+          { order, node_id, parent_id, ranking_score, pred_time_minutes }
+        where parent_id is None for trigger nodes.
+        """
+        if not risky_nodes:
+            return []
+
+        risky_set = set(risky_nodes)
+        sequence = []
+        for node in risky_nodes:
+            raw_parent = predicted_parents[node]
+            # index == num_nodes  →  trigger (no parent)
+            # index not in risky_set  →  predicted parent is a non-failing node
+            #   (shouldn't happen often, but treat as trigger to be safe)
+            if raw_parent == num_nodes or raw_parent not in risky_set:
+                parent_id = None
+            else:
+                parent_id = raw_parent
+
+            sequence.append({
+                "node_id": node,
+                "parent_id": parent_id,
+                "pred_time_minutes": float(pred_timing_minutes[node]),
+            })
+
+        # Sort by predicted failure time
+        sequence.sort(key=lambda x: x["pred_time_minutes"])
+
+        # Assign sequential order numbers
+        for rank, step in enumerate(sequence, start=1):
+            step["order"] = rank
+
+        return sequence
 
     def _load_ground_truth(self, dataset: CascadeDataset, scenario_idx: int) -> Dict:
         with open(dataset.scenario_files[scenario_idx], "rb") as f:

@@ -187,6 +187,7 @@ class Trainer:
             'failure_label': batch_device['node_failure_labels'],
             'ground_truth_risk': batch_device.get('ground_truth_risk'),
             'cascade_timing': batch_device.get('cascade_timing'),
+            'parent_labels': batch_device.get('parent_labels'),
             'voltages': voltages,
             'node_reactive_power': node_reactive_power,
             'line_reactive_power': batch_device['edge_attr'][:, -1, :, 6:7] if 'edge_attr' in batch_device else None,

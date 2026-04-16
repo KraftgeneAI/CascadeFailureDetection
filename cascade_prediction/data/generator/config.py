@@ -372,6 +372,7 @@ class LossConfig:
     # gradient budget for an auxiliary task, crowding out failure prediction and timing.
     LAMBDA_VOLTAGE      = 0.3
     LAMBDA_CAPACITY     = 0.05
+    LAMBDA_PARENT       = 0.5   # Weight for causal parent prediction loss
 
     # Focal loss parameters
     FOCAL_ALPHA         = 0.85          # PhysicsInformedLoss default

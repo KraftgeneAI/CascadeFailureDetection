@@ -44,6 +44,7 @@ from .heads import (
     ActivePowerLineFlowHead,
     RiskHead,
     TimingHead,
+    ParentPredictionHead,
 )
 
 # Import loss
@@ -146,7 +147,8 @@ class UnifiedCascadePredictionModel(nn.Module):
         self.temperature_head = TemperatureHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
         self.active_power_line_flow_head = ActivePowerLineFlowHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
         self.risk_head = RiskHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
-        
+        self.parent_head = ParentPredictionHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
+
         # Physics-informed loss
         self.physics_loss = PhysicsInformedLoss()
     
@@ -352,7 +354,8 @@ class UnifiedCascadePredictionModel(nn.Module):
         reactive_nodes = self.reactive_nodes_head(h)
         
         risk_scores = self.risk_head(h)
-        
+        parent_logits = self.parent_head(h)   # [B, N, N+1]
+
         # Check for NaN values
         if torch.isnan(failure_prob).any():
             logging.error("[ERROR] NaN detected in failure_prob!")
@@ -368,6 +371,7 @@ class UnifiedCascadePredictionModel(nn.Module):
             'reactive_nodes': reactive_nodes,
             'frequency': frequency,
             'risk_scores': risk_scores,
+            'parent_logits': parent_logits,   # [B, N, N+1] causal parent scores
             'node_embeddings': h,
             'env_embedding': env_emb,
             'infra_embedding': infra_emb,
