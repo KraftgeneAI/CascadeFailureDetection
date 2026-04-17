@@ -159,22 +159,20 @@ class GraphAttentionLayer(MessagePassing):
         """
         alpha_src = (x_j * self.att_src).sum(dim=-1)   # [num_edges, H]
         alpha_dst = (x_i * self.att_dst).sum(dim=-1)   # [num_edges, H]
-        alpha = alpha_src + alpha_dst                   # [num_edges, H]
-        
-        # Edge attribute contribution — buffer is already edge-indexed
+        alpha = alpha_src + alpha_dst
         if self._edge_attr_buf is not None and self.att_edge is not None:
-            alpha_edge = (self._edge_attr_buf * self.att_edge).sum(dim=-1)  # [num_edges, H]
-            alpha = alpha + alpha_edge
-        
+            alpha = alpha + (self._edge_attr_buf * self.att_edge).sum(dim=-1)
+
         alpha = F.leaky_relu(alpha, Settings.Model.LEAKY_RELU_SLOPE)
+
+        # Mask BEFORE softmax.
+        # _edge_mask_buf is [num_edges, 1] — keep the trailing dim so it
+        # broadcasts over the H dimension of alpha [num_edges, H].
+        if self._edge_mask_buf is not None:
+            alpha = alpha.masked_fill(self._edge_mask_buf == 0, float('-inf'))
+
         alpha = softmax(alpha, edge_index_i, num_nodes=size_i)
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
-        
-        # Weighted message
-        msg = x_j * alpha.unsqueeze(-1)   # [num_edges, H, C_out]
-        
-        # Apply edge mask from buffer
-        if self._edge_mask_buf is not None:
-            msg = msg * self._edge_mask_buf.unsqueeze(1)   # broadcast over H
+        msg = x_j * alpha.unsqueeze(-1)
         
         return msg
