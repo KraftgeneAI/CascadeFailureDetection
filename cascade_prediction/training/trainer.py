@@ -263,7 +263,7 @@ class Trainer:
     def _calculate_metrics(self, outputs, batch):
         """Helper to calculate all metrics for a batch."""
         
-        node_probs = outputs['failure_probability'].squeeze(-1)  # [B, N]
+        node_probs = outputs['failure_probability'].squeeze(-1).sigmoid()  # [B, N]
         node_pred = (node_probs > self.node_threshold).float()  # [B, N]
         node_labels = batch['node_failure_labels']  # [B, N]
         
@@ -573,7 +573,7 @@ class Trainer:
                 total_timing_loss_sum += loss_components.get('timing', 0.0)
                 
                 # 4. Collect probabilities and labels for threshold optimization
-                node_probs = outputs['failure_probability'].squeeze(-1)  # [B, N]
+                node_probs = outputs['failure_probability'].squeeze(-1).sigmoid()  # [B, N]
                 node_labels = batch_device['node_failure_labels']  # [B, N]
                 
                 # Flatten and collect

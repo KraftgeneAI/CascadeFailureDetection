@@ -77,7 +77,7 @@ class CascadePredictor:
         with torch.no_grad():
             outputs = self.model(batch_dev)
 
-        probs = outputs["failure_probability"].squeeze(-1).squeeze(0).cpu().numpy()  # [N]
+        probs = outputs["failure_probability"].squeeze(-1).squeeze(0).sigmoid().cpu().numpy()  # [N]
 
         DT_MINUTES = Settings.Thermal.DT_MINUTES
         pred_timing_normed = outputs["cascade_timing"].squeeze(-1).squeeze(0).cpu().numpy()  # [N]

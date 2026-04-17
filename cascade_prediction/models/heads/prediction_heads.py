@@ -24,7 +24,10 @@ class FailureProbabilityHead(nn.Module):
     """
     Predicts node failure probability.
 
-    Output: [batch_size, num_nodes, 1] with sigmoid activation (0-1 range)
+    Output: [batch_size, num_nodes, 1] — raw logits (no Sigmoid).
+    Apply .sigmoid() at inference time for probabilities.
+    The loss receives logits directly for numerically stable focal loss
+    via binary_cross_entropy_with_logits.
     """
 
     def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_HIGH):
@@ -33,9 +36,9 @@ class FailureProbabilityHead(nn.Module):
         self.head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Dropout(dropout),  # Increased dropout
-            nn.Linear(hidden_dim // 2, 1),
-            nn.Sigmoid()
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, 1)
+            # No Sigmoid — loss uses BCE_with_logits directly
         )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -44,7 +47,7 @@ class FailureProbabilityHead(nn.Module):
             x: Node embeddings [batch_size, num_nodes, hidden_dim]
         
         Returns:
-            Failure probabilities [batch_size, num_nodes, 1]
+            Raw logits [batch_size, num_nodes, 1]
         """
         return self.head(x)
 
