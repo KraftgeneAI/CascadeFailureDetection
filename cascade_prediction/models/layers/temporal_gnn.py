@@ -55,8 +55,10 @@ class TemporalGNNCell(nn.Module):
         # Pass mask to GAT
         spatial_features = self.gat(x, edge_index, edge_attr, edge_mask=edge_mask)
         
+        # In TemporalGNNCell.forward(), after GAT:
         if self.projection is not None:
             spatial_features = self.projection(spatial_features)
+        spatial_features = spatial_features + x   # residual (requires same dim)
         
         if h_prev is None:
             h_prev = (
