@@ -15,6 +15,7 @@ from tqdm import tqdm
 # Import the loss function
 from cascade_prediction.models import PhysicsInformedLoss
 from cascade_prediction.data.generator.config import Settings
+from cascade_prediction.training.trainer import Trainer
 
 def calibrate_loss_weights(
     model: nn.Module,
@@ -112,21 +113,12 @@ def calibrate_loss_weights(
             # Forward pass
             outputs = model(batch_device)
             
-            # Prepare targets and graph_properties (matching original train_model.py)
+            # Prepare targets and graph_properties (using Trainer._prepare_targets)
             graph_properties = batch_device.get('graph_properties', {})
             if 'edge_index' not in graph_properties:
                 graph_properties['edge_index'] = batch_device['edge_index']
-            
-            targets = {
-                'failure_label': batch_device['node_failure_labels'],
-                'ground_truth_risk': batch_device.get('ground_truth_risk'),
-                'cascade_timing': batch_device.get('cascade_timing'),
-                # Extract Voltage (Feature 0) from the LAST timestep (-1) of the SCADA sequence
-                'voltages': batch_device['scada_data'][:, -1, :, 0:1] if 'scada_data' in batch_device else None,
-                'node_reactive_power': batch_device['scada_data'][:, -1, :, 3:4] if 'scada_data' in batch_device else None,
-                'line_reactive_power': batch_device['edge_attr'][:, -1, :, 6:7] if 'edge_attr' in batch_device else None,
-                'active_power_line_flows': batch_device['edge_attr'][:, -1, :, 5:6] if 'edge_attr' in batch_device else None,
-            }
+
+            targets = Trainer._prepare_targets(None, batch_device)
             
             # Extract edge mask
             edge_mask = batch_device.get('edge_mask')
