@@ -35,13 +35,6 @@ from .layers import (
 # Import prediction heads
 from .heads import (
     FailureProbabilityHead,
-    VoltageHead,
-    AngleHead,
-    FrequencyHead,
-    TemperatureHead,
-    LineFlowHead,
-    ReactiveFlowHead,
-    ActivePowerLineFlowHead,
     RiskHead,
     TimingHead,
     ParentPredictionHead,
@@ -136,16 +129,13 @@ class UnifiedCascadePredictionModel(nn.Module):
             nn.Dropout(dropout)
         )
         
-        # Multi-task prediction heads
+        # Multi-task prediction heads — only the core cascade-specific heads.
+        # Physics auxiliary heads (voltage, angle, line flows, reactive power,
+        # frequency, temperature, active power flows) have been removed: they
+        # were trained on zeroed-out modalities and added gradient noise without
+        # contributing useful signal.
         self.failure_prob_head = FailureProbabilityHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
         self.failure_time_head = TimingHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
-        self.voltage_head = VoltageHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
-        self.angle_head = AngleHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
-        self.line_flow_head = LineFlowHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
-        self.reactive_nodes_head = ReactiveFlowHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
-        self.frequency_head = FrequencyHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
-        self.temperature_head = TemperatureHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
-        self.active_power_line_flow_head = ActivePowerLineFlowHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
         self.risk_head = RiskHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
         self.parent_head = ParentPredictionHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
 
@@ -334,27 +324,10 @@ class UnifiedCascadePredictionModel(nn.Module):
             h = layer_norm(h + h_new)
 
         # Multi-task predictions
-        failure_prob = self.failure_prob_head(h)
-        temperature = self.temperature_head(h)
+        failure_prob   = self.failure_prob_head(h)
         failure_timing = self.failure_time_head(h)
-        voltages = self.voltage_head(h)
-        angles = self.angle_head(h)
-        
-        h_global = h.mean(dim=1, keepdim=True)
-        frequency = self.frequency_head(h_global)
-        
-        # Edge-based predictions
-        src, dst = batch['edge_index']
-        h_src = h[:, src, :]
-        h_dst = h[:, dst, :]
-        edge_features = torch.cat([h_src, h_dst], dim=-1)
-        
-        line_flows = self.line_flow_head(edge_features)
-        active_power_line_flows = self.active_power_line_flow_head(edge_features)
-        reactive_nodes = self.reactive_nodes_head(h)
-        
-        risk_scores = self.risk_head(h)
-        parent_logits = self.parent_head(h)   # [B, N, N+1]
+        risk_scores    = self.risk_head(h)
+        parent_logits  = self.parent_head(h)   # [B, N, N+1]
 
         # Check for NaN values
         if torch.isnan(failure_prob).any():
@@ -363,19 +336,9 @@ class UnifiedCascadePredictionModel(nn.Module):
         return {
             'failure_probability': failure_prob,
             'cascade_timing': failure_timing,
-            'voltages': voltages,
-            'angles': angles,
-            'line_flows': line_flows, #line_reactive_power
-            'active_power_line_flows': active_power_line_flows,
-            'temperature': temperature,
-            'reactive_nodes': reactive_nodes,
-            'frequency': frequency,
             'risk_scores': risk_scores,
-            'parent_logits': parent_logits,   # [B, N, N+1] causal parent scores
+            'parent_logits': parent_logits,
             'node_embeddings': h,
-            'env_embedding': env_emb,
-            'infra_embedding': infra_emb,
-            'robot_embedding': robot_emb,
             'fused_embedding': fused
         }
     

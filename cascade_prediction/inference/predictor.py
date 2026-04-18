@@ -84,10 +84,7 @@ class CascadePredictor:
         pred_timing_minutes = pred_timing_normed * original_seq_len * DT_MINUTES
 
         final_risk_scores = outputs["risk_scores"][0].mean(dim=0).cpu().numpy().tolist()
-        final_sys_state = {
-            "frequency": float(outputs["frequency"].mean().item()),
-            "voltages": outputs["voltages"][0].reshape(-1).cpu().numpy().tolist(),
-        }
+        final_sys_state = {}
 
         max_probs = {n: float(probs[n]) for n in range(len(probs))}
         risky_nodes = [n for n, p in max_probs.items() if p > self.node_threshold]

@@ -319,7 +319,10 @@ class TrainingConfig:
     SCHEDULER_PATIENCE      = 5         # ReduceLROnPlateau patience
     CASCADE_THRESHOLD       = 0.25      # Decision threshold for cascade prediction
     NODE_THRESHOLD          = 0.25      # Decision threshold for node failure
-    FBETA                   = 0.5       # Beta for F-beta score (precision-focused)
+    # IMPROVED: FBETA changed from 0.5 → 1.0 so the validation threshold search
+    # directly maximises standard F1 (the metric we want to report) rather than
+    # F-beta(0.5) which is precision-biased and consistently under-reports Node F1.
+    FBETA                   = 1.0       # Beta for F-beta score (1.0 = standard F1)
 
 
 # ---------------------------------------------------------------------------
@@ -347,17 +350,19 @@ class ModelConfig:
 # ---------------------------------------------------------------------------
 class LossConfig:
     # Default lambda weights (PhysicsInformedLoss constructor defaults)
-    LAMBDA_PREDICTION   = 10.0
+    # IMPROVED: LAMBDA_PREDICTION raised from 10 → 30 to give the node-failure
+    # detection task a larger share of the gradient budget vs physics auxiliaries
+    # (reactive, timing, temperature, etc.).  In the old config the physics losses
+    # collectively contributed ~95% of the gradient — the prediction task was
+    # starved.  With 30 the prediction focal loss now dominates appropriately.
+    LAMBDA_PREDICTION   = 30.0
     LAMBDA_POWERFLOW    = 0.1
     LAMBDA_RISK         = 0.1
-    # IMPROVED: timing lambda raised from 0.1 → 5.0 → 8.0.
-    # v3 further increases it because:
-    #  - Absolute-normalised targets (failure_time / DEFAULT_SEQ_LEN) give raw
-    #    MSE of ~0.01-0.05, which is smaller than the prediction focal loss.
-    #  - The new bias-correction and spread-enforcement terms are also small.
-    #  - A weight of 8.0 brings the timing contribution to ~10-15% of total
-    #    loss — sufficient to drive precise timing without hurting detection.
-    LAMBDA_TIMING       = 8.0
+    # IMPROVED: timing lambda reduced from 8.0 → 2.0.
+    # With the new cascade_obs_steps=7 truncation the model sees early cascade
+    # failures; timing becomes easier to learn.  Reducing its weight frees
+    # gradient budget for the prediction task.
+    LAMBDA_TIMING       = 2.0
     LAMBDA_ACTIVE_FLOW  = 0.1
     # TEMPERATURE: loss is MSE(pred/100, true/100) = MSE_raw/10000.  With raw MSE ≈ 50
     # (7°C mean error), effective contribution = 0.05 * 50/10000 ≈ 0.00025 — negligible.
@@ -372,13 +377,18 @@ class LossConfig:
     # gradient budget for an auxiliary task, crowding out failure prediction and timing.
     LAMBDA_VOLTAGE      = 0.3
     LAMBDA_CAPACITY     = 0.05
-    LAMBDA_PARENT       = 0.5   # Weight for causal parent prediction loss
+    LAMBDA_PARENT       = 0.3   # Weight for causal parent prediction loss (reduced from 0.5)
 
     # Focal loss parameters
     FOCAL_ALPHA         = 0.85          # PhysicsInformedLoss default
     FOCAL_GAMMA         = 2.0
-    FOCAL_ALPHA_TRAIN   = 0.25          # train_model.py (calibrated path)
-    FOCAL_ALPHA_FALLBACK = 0.15         # train_model.py (uncalibrated fallback)
+    # IMPROVED: FOCAL_ALPHA_TRAIN raised from 0.25 → 0.75.
+    # With 0.25 the focal loss penalised the negative class (non-failing nodes)
+    # 3× more than the positive class, despite the positive class being the
+    # minority (~17-20% of nodes).  alpha=0.75 correctly up-weights the minority
+    # positive class, improving recall and the joint F1 optimum.
+    FOCAL_ALPHA_TRAIN   = 0.75          # train_model.py (calibrated path)
+    FOCAL_ALPHA_FALLBACK = 0.65         # train_model.py (uncalibrated fallback)
 
     # Dynamic calibration
     CALIB_NUM_BATCHES       = 20        # Batches used for loss-weight calibration
@@ -443,7 +453,7 @@ class EmbeddingConfig:
     # of how many steps remain before each failure condition is breached.
     # They directly provide the timing signal needed by the TimingHead.
     NODE_FEATURE_BASE_DIM   = 38        # SCADA+PMU+equip+inj before deltas
-    NODE_FEATURE_DIM        = 119       # Full per-node feature vector width (was 115)
+    NODE_FEATURE_DIM        = 124       # Full per-node feature vector width (119 + 5 cascade susceptibility)
     NODE_MLP_HIDDEN_1       = 256       # First hidden layer of NodeFeatureMLP
     NODE_MLP_HIDDEN_2       = 128       # Second hidden layer of NodeFeatureMLP
 

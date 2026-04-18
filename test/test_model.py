@@ -306,13 +306,6 @@ class TestUnifiedModel:
     REQUIRED_KEYS = [
         'failure_probability',
         'cascade_timing',
-        'voltages',
-        'angles',
-        'line_flows',
-        'active_power_line_flows',
-        'temperature',
-        'reactive_nodes',
-        'frequency',
         'risk_scores',
         'parent_logits',
         'node_embeddings',
@@ -349,25 +342,6 @@ class TestUnifiedModel:
         with torch.no_grad():
             out = model(batch)
         assert out['cascade_timing'].shape == (B, N, 1)
-
-    def test_voltages_shape(self, model, batch):
-        with torch.no_grad():
-            out = model(batch)
-        assert out['voltages'].shape == (B, N, 1)
-
-    def test_line_flows_shape(self, model, batch):
-        """Line flow head operates on edges — shape should be [B, E, 1]."""
-        with torch.no_grad():
-            out = model(batch)
-        assert out['line_flows'].shape == (B, E, 1), \
-            f"Got {out['line_flows'].shape}"
-
-    def test_frequency_shape(self, model, batch):
-        """Frequency is a global prediction — shape [B, 1, 1]."""
-        with torch.no_grad():
-            out = model(batch)
-        assert out['frequency'].shape == (B, 1, 1), \
-            f"Got {out['frequency'].shape}"
 
     # ── Numerical health ──────────────────────────────────────────────────────
 

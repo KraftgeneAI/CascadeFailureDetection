@@ -237,14 +237,8 @@ class Trainer:
 
         print("Checking required outputs for loss calculation...")
         check_shape('failure_probability', ('B', 'N', 1))
-        check_shape('voltages', ('B', 'N', 1))
-        check_shape('angles', ('B', 'N', 1))
-        check_shape('line_flows', ('B', 'E', 1))
-        check_shape('frequency', ('B', 1, 1))
         check_shape('risk_scores', ('B', 'N', 7))
         check_shape('cascade_timing', ('B', 'N', 1))
-        check_shape('temperature', ('B', 'N', 1))
-        check_shape('reactive_nodes', ('B', 'N', 1))
 
         if 'temporal_sequence' in batch:
             if batch['temporal_sequence'].dim() > 0:
@@ -608,7 +602,7 @@ class Trainer:
         # Helper 1: Best F1 (Standard)
         def find_best_f1(probs, targets):
             best_f1, best_thresh = 0.0, 0.5
-            for t in np.arange(0.05, 0.96, 0.05):
+            for t in np.arange(0.05, 0.96, 0.01):
                 preds = (probs > t).float()
                 tp = (preds * targets).sum()
                 fp = (preds * (1-targets)).sum()
@@ -624,7 +618,7 @@ class Trainer:
             best_score, best_thresh = 0.0, 0.5
             beta_sq = beta**2
             
-            for t in np.arange(0.05, 0.96, 0.05):
+            for t in np.arange(0.05, 0.96, 0.01):
                 preds = (probs > t).float()
                 tp = (preds * targets).sum()
                 fp = (preds * (1-targets)).sum()

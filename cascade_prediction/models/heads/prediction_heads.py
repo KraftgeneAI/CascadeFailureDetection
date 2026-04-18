@@ -32,7 +32,7 @@ class FailureProbabilityHead(nn.Module):
 
     def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_HIGH):
         super(FailureProbabilityHead, self).__init__()
-        
+
         self.head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
@@ -40,12 +40,12 @@ class FailureProbabilityHead(nn.Module):
             nn.Linear(hidden_dim // 2, 1)
             # No Sigmoid — loss uses BCE_with_logits directly
         )
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x: Node embeddings [batch_size, num_nodes, hidden_dim]
-        
+
         Returns:
             Raw logits [batch_size, num_nodes, 1]
         """
@@ -64,7 +64,7 @@ class VoltageHead(nn.Module):
 
     def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_LOW):
         super(VoltageHead, self).__init__()
-        
+
         self.head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
@@ -72,12 +72,12 @@ class VoltageHead(nn.Module):
             nn.Linear(hidden_dim // 2, 1),
             nn.ReLU()  # Allows prediction of any positive voltage
         )
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x: Node embeddings [batch_size, num_nodes, hidden_dim]
-        
+
         Returns:
             Voltages in p.u. [batch_size, num_nodes, 1]
         """
@@ -96,7 +96,7 @@ class AngleHead(nn.Module):
 
     def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_LOW):
         super(AngleHead, self).__init__()
-        
+
         self.head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
@@ -104,12 +104,12 @@ class AngleHead(nn.Module):
             nn.Linear(hidden_dim // 2, 1),
             nn.Tanh()  # Good range for radians
         )
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x: Node embeddings [batch_size, num_nodes, hidden_dim]
-        
+
         Returns:
             Angles in radians [batch_size, num_nodes, 1]
         """
@@ -128,7 +128,7 @@ class FrequencyHead(nn.Module):
 
     def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_HIGH):
         super(FrequencyHead, self).__init__()
-        
+
         self.head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
@@ -136,12 +136,12 @@ class FrequencyHead(nn.Module):
             nn.Linear(hidden_dim // 2, 1),
             nn.ReLU()  # Allows prediction of any positive frequency
         )
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x: Global node embeddings [batch_size, 1, hidden_dim]
-        
+
         Returns:
             Frequency in Hz [batch_size, 1, 1]
         """
@@ -159,7 +159,7 @@ class TemperatureHead(nn.Module):
 
     def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_LOW):
         super(TemperatureHead, self).__init__()
-        
+
         self.head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -167,12 +167,12 @@ class TemperatureHead(nn.Module):
             nn.Linear(hidden_dim, 1),
             nn.ReLU()  # Temperature must be positive
         )
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x: Node embeddings [batch_size, num_nodes, hidden_dim]
-        
+
         Returns:
             Temperatures [batch_size, num_nodes, 1]
         """
@@ -191,7 +191,7 @@ class LineFlowHead(nn.Module):
 
     def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_LOW):
         super(LineFlowHead, self).__init__()
-        
+
         self.head = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(),
@@ -199,13 +199,13 @@ class LineFlowHead(nn.Module):
             nn.Linear(hidden_dim, 1)
             # No activation - allows positive and negative values
         )
-    
+
     def forward(self, edge_features: torch.Tensor) -> torch.Tensor:
         """
         Args:
             edge_features: Concatenated source and destination node embeddings
                           [batch_size, num_edges, hidden_dim * 2]
-        
+
         Returns:
             Reactive power flows [batch_size, num_edges, 1]
         """
@@ -224,7 +224,7 @@ class ReactiveFlowHead(nn.Module):
 
     def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_LOW):
         super(ReactiveFlowHead, self).__init__()
-        
+
         self.head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim//2),
             nn.ReLU(),
@@ -232,12 +232,12 @@ class ReactiveFlowHead(nn.Module):
             nn.Linear(hidden_dim//2, 1)
             # No activation - allows positive and negative values
         )
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x: Node embeddings [batch_size, num_nodes, hidden_dim]
-        
+
         Returns:
             Reactive power at nodes [batch_size, num_nodes, 1]
         """
@@ -256,7 +256,7 @@ class ActivePowerLineFlowHead(nn.Module):
 
     def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_LOW):
         super(ActivePowerLineFlowHead, self).__init__()
-        
+
         self.head = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(),
@@ -264,13 +264,13 @@ class ActivePowerLineFlowHead(nn.Module):
             nn.Linear(hidden_dim, 1)
             # No activation - allows positive and negative values
         )
-    
+
     def forward(self, edge_features: torch.Tensor) -> torch.Tensor:
         """
         Args:
             edge_features: Concatenated source and destination node embeddings
                           [batch_size, num_edges, hidden_dim * 2]
-        
+
         Returns:
             Active power flows [batch_size, num_edges, 1]
         """
@@ -303,12 +303,12 @@ class RiskHead(nn.Module):
             nn.Linear(hidden_dim // 2, Settings.Model.RISK_DIM),
             nn.Sigmoid()
         )
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x: Node embeddings [batch_size, num_nodes, hidden_dim]
-        
+
         Returns:
             Risk scores [batch_size, num_nodes, 7]
         """
@@ -346,7 +346,7 @@ class TimingHead(nn.Module):
         # Use lower dropout regardless of the passed-in dropout rate
         _drop = self.TIMING_DROPOUT
 
-        # Main path: hidden → mid → mid → 1
+        # Main path: hidden -> mid -> mid -> 1
         self.layer1 = nn.Sequential(
             nn.Linear(hidden_dim, mid),
             nn.LayerNorm(mid),
@@ -361,18 +361,16 @@ class TimingHead(nn.Module):
         )
         self.out = nn.Linear(mid, 1)
 
-        # Residual projection: hidden → mid
+        # Residual projection: hidden -> mid
         self.residual_proj = nn.Linear(hidden_dim, mid)
 
         # Sigmoid so output is always in (0, 1)
         self.activation = nn.Sigmoid()
 
-        # ── Output bias initialisation ────────────────────────────────────────
-        # Cascade failures in the dataset typically occur in the 0.75-0.97
-        # normalised time range (≈ t=22-29 out of 30 steps).  Initialising
-        # the output bias to logit(0.80) ≈ 1.386 centres the initial
-        # predictions at 0.80 instead of 0.50, cutting the number of epochs
-        # needed to learn the basic "failures happen late" prior.
+        # Output bias initialisation:
+        # Cascade failures typically occur in the 0.75-0.97 normalised time range
+        # (t=22-29 out of 30 steps). Initialising to logit(0.80) ~= 1.386 centres
+        # predictions at 0.80 instead of 0.50 from the start.
         nn.init.constant_(self.out.bias, 1.386)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -424,7 +422,7 @@ class ParentPredictionHead(nn.Module):
         Returns:
             parent_logits: [B, N, N+1]
         """
-        Q = self.dropout(self.query_proj(h))          # [B, N, D]
+        Q = self.dropout(self.query_proj(h))           # [B, N, D]
         K = self.dropout(self.key_proj(h))             # [B, N, D]
 
         # Project trigger key with the same linear as node keys for consistency
@@ -432,7 +430,7 @@ class ParentPredictionHead(nn.Module):
         B = h.shape[0]
         trigger = trigger.unsqueeze(0).expand(B, -1, -1)  # [B, 1, D]
 
-        # Concatenate N node keys + 1 trigger key → [B, N+1, D]
+        # Concatenate N node keys + 1 trigger key -> [B, N+1, D]
         all_keys = torch.cat([K, trigger], dim=1)
 
         # Score each node against every key

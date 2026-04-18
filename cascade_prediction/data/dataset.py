@@ -417,6 +417,11 @@ class CascadeDataset(Dataset):
         # ── 115-feature node tensor ──────────────────────────────────────────
         # Build (T, N, 115) from the already-collected per-timestep arrays so
         # the NodeFeatureMLP in the unified model can consume it directly.
+        # Collect raw edge attributes per timestep (numpy arrays before tensor conversion)
+        raw_edge_attrs = [
+            seq_step.get('edge_attr', np.zeros((len(edge_index[0]) if hasattr(edge_index, '__len__') else 1, 7), dtype=np.float32)).astype(np.float32)
+            for seq_step in sequence
+        ]
         node_features = self._build_node_features(
             scada_list=data_arrays['scada_data'],       # list[T] of (N,18) tensors
             pmu_list=data_arrays['pmu_sequence'],       # list[T] of (N, 8) tensors
@@ -425,6 +430,8 @@ class CascadeDataset(Dataset):
             num_nodes=num_nodes,
             start_idx=start_idx,                        # absolute window start for t_pos
             seq_len_for_norm=len(sequence_original),    # actual scenario length for t_pos normalisation
+            edge_index=edge_index,                      # (2, E) for cascade susceptibility features
+            edge_attr_list=raw_edge_attrs,              # list[T] of (E,7) arrays
         )
         node_features[:,:,114]=0
         # Data augmentation (training only)
@@ -473,8 +480,10 @@ class CascadeDataset(Dataset):
         num_nodes:        int,
         start_idx:        int = 0,
         seq_len_for_norm: int = 30,   # actual un-truncated scenario length
+        edge_index:       Optional[np.ndarray] = None,   # (2, E) numpy int array
+        edge_attr_list:   Optional[List[np.ndarray]] = None,  # list[T] of (E,7) arrays
     ) -> torch.Tensor:
-        """Build the (T, N, 115) node-feature tensor used by NodeFeatureMLP.
+        """Build the (T, N, 124) node-feature tensor used by NodeFeatureMLP.
 
         Feature layout (matches Settings.Embedding constants):
           [0:18]   SCADA measurements         (18)
@@ -485,13 +494,22 @@ class CascadeDataset(Dataset):
           [38:76]  1-step temporal deltas of [0:38]  (38)
           [76:114] 2-step temporal deltas of [0:38]  (38)
           [114]    Normalised timestep position ( 1)
+          [115:119] TTF physics estimators     ( 4)
+          [119:124] Cascade susceptibility     ( 5)
+              [119] mean_adjacent_line_loading — mean |flow|/limit of adjacent edges
+              [120] cascade_initiation_risk    — |P_inj| / sum_of_adjacent_thermal_limits
+              [121] cascade_reception_risk     — weighted flow stress from stressed neighbors
+              [122] max_adjacent_line_loading  — max |flow|/limit over adjacent edges
+              [123] loading_x_max_line         — loading_ratio × max_adjacent_line_loading
 
         Args:
-            scada_list: T tensors of shape (N, 18), already normalised.
-            pmu_list:   T tensors of shape (N,  8), already normalised.
-            equip_list: T tensors of shape (N, 10), already normalised.
-            sequence:   Raw per-timestep dicts (for power/reactive injection).
-            num_nodes:  Number of nodes N.
+            scada_list:     T tensors of shape (N, 18), already normalised.
+            pmu_list:       T tensors of shape (N,  8), already normalised.
+            equip_list:     T tensors of shape (N, 10), already normalised.
+            sequence:       Raw per-timestep dicts (for power/reactive injection).
+            num_nodes:      Number of nodes N.
+            edge_index:     Graph connectivity (2, E) numpy int array.
+            edge_attr_list: Per-timestep edge attributes list[T] of (E,7) arrays.
 
         Returns:
             Tensor of shape (T, N, 115), float32.
@@ -609,10 +627,89 @@ class CascadeDataset(Dataset):
             [ttf_volt, ttf_temp, ttf_freq, ttf_loading], dim=2
         ).float()  # (T, N, 4)
 
-        # Final tensor: 115 + 4 = 119 features
+        # ── Cascade susceptibility features (5 new channels) ─────────────────
+        # These topology-informed features give the model pre-cascade signals
+        # about which nodes are susceptible to cascade failure via propagation.
+        # All features are computed from pre-cascade power flow data and topology.
+        # ─────────────────────────────────────────────────────────────────────
+        if edge_index is not None and edge_attr_list is not None and len(edge_attr_list) == T:
+            src_nodes = edge_index[0]   # (E,)  — source of each edge
+            dst_nodes = edge_index[1]   # (E,)  — destination of each edge
+
+            # Pre-compute static adjacency lists: neighbors[i] = list of neighbor nodes
+            neighbors = [[] for _ in range(num_nodes)]
+            adj_edges  = [[] for _ in range(num_nodes)]  # adj_edges[i] = edge indices where dst==i
+            for e_idx, (s, d) in enumerate(zip(src_nodes, dst_nodes)):
+                neighbors[d].append(s)
+                adj_edges[d].append(e_idx)
+
+            susc_parts = []
+            for t in range(T):
+                ea  = edge_attr_list[t]   # (E, 7)
+                loading_ratio = base[t, :, 17].numpy()  # SCADA col 17 (loading_ratio)
+
+                # edge col 5: active power flow (normalized by base_mva)
+                # edge col 1: thermal limits (normalized)
+                flows   = np.abs(ea[:, 5]).astype(np.float32)   # |P_flow| per edge (E,)
+                thermal = np.abs(ea[:, 1]).astype(np.float32) + 1e-6  # thermal limit (E,)
+                line_loading = np.clip(flows / thermal, 0.0, 2.0)     # |flow|/limit (E,)
+
+                # Power injection magnitude (N,) — reuse from base features (col 36)
+                p_inj = np.abs(base[t, :, 36].numpy()).astype(np.float32)  # |P_inj|
+
+                # 5 cascade susceptibility features per node:
+                # F1: mean_adjacent_line_loading  (+0.074 discrimination, pos_frac=1.00)
+                # F2: cascade_initiation_risk      (+0.028 discrimination)
+                # F3: cascade_reception_risk       (+0.067 discrimination, pos_frac=1.00)
+                # F4: max_adjacent_line_loading    (+0.232 discrimination, pos_frac=1.00) ★ best
+                # F5: loading_ratio × f4 (interact)(+0.219 discrimination, pos_frac=1.00)
+                f1 = np.zeros(num_nodes, dtype=np.float32)  # mean_adj_line_loading
+                f2 = np.zeros(num_nodes, dtype=np.float32)  # cascade_initiation_risk
+                f3 = np.zeros(num_nodes, dtype=np.float32)  # cascade_reception_risk
+                f4 = np.zeros(num_nodes, dtype=np.float32)  # max_adj_line_loading
+
+                for i in range(num_nodes):
+                    nbrs   = neighbors[i]
+                    e_idxs = adj_edges[i]
+
+                    if e_idxs:
+                        # F1: mean line loading across adjacent edges
+                        f1[i] = float(np.mean([line_loading[e] for e in e_idxs]))
+
+                        # F4: max line loading across adjacent edges
+                        f4[i] = float(max(line_loading[e] for e in e_idxs))
+
+                        # F2: cascade initiation risk = |P_inj[i]| / sum(thermal limits)
+                        sum_thermal = float(sum(thermal[e] for e in e_idxs))
+                        f2[i] = float(p_inj[i]) / (sum_thermal + 1e-6)
+
+                        # F3: cascade reception risk — weighted line stress from neighbors
+                        #   For each neighbor j→i: line_loading[j→i] × loading_ratio[j]
+                        reception = float(sum(line_loading[e] * float(loading_ratio[nbr])
+                                              for nbr, e in zip(nbrs, e_idxs)))
+                        f3[i] = reception / float(len(e_idxs))
+
+                # Clip to reasonable range
+                f2 = np.clip(f2, 0.0, 2.0)
+                f3 = np.clip(f3, 0.0, 2.0)
+
+                # F5: interaction term — internal loading × topological exposure
+                f5 = np.clip(loading_ratio.astype(np.float32) * f4, 0.0, 2.0)
+
+                susc_t = torch.from_numpy(
+                    np.stack([f1, f2, f3, f4, f5], axis=1)
+                ).float()  # (N, 5)
+                susc_parts.append(susc_t)
+
+            cascade_susceptibility = torch.stack(susc_parts, dim=0)  # (T, N, 5)
+        else:
+            # Fallback: zero features when edge data is unavailable
+            cascade_susceptibility = torch.zeros(T, num_nodes, 5, dtype=torch.float32)
+
+        # Final tensor: 115 + 4 + 5 = 124 features
         return torch.cat(
-            [base, delta1, delta2, t_pos, ttf_features], dim=2
-        ).float()  # (T, N, 119)
+            [base, delta1, delta2, t_pos, ttf_features, cascade_susceptibility], dim=2
+        ).float()  # (T, N, 124)
 
     def _process_metadata_format(self, scenario: Dict) -> Dict[str, Any]:
         """

@@ -55,6 +55,10 @@ class PhysicsInformedLoss(nn.Module):
         focal_gamma: float = Settings.Loss.FOCAL_GAMMA,
         base_mva: float = Settings.Dataset.BASE_MVA,
         base_freq: float = Settings.Dataset.BASE_FREQUENCY,
+        # Extra kwargs accepted from train_model.py without error
+        pos_weight: float = 1.0,
+        label_smoothing: float = 0.0,
+        use_logits: bool = True,
         **kwargs
     ):
         """
