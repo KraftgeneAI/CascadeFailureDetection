@@ -17,7 +17,6 @@ def extract_threat_curve(
 
     ### open video stream
     cap = cv2.VideoCapture(video_path)
-
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {video_path}")
 
@@ -32,7 +31,7 @@ def extract_threat_curve(
     frame_index = 0
     detected_frames = 0
 
-    ### iterate over frames
+    ### iterate frames
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -40,13 +39,13 @@ def extract_threat_curve(
 
         frame_index += 1
 
-        ### skip frames for speed
+        ### skip frames for efficiency
         if frame_skip > 1 and frame_index % frame_skip != 0:
             continue
 
         frame_resized = cv2.resize(frame, resize)
 
-        ### run YOLO
+        ### run detection
         try:
             results = model(frame_resized, verbose=False)
         except Exception:
@@ -54,9 +53,10 @@ def extract_threat_curve(
             continue
 
         frame_area = frame_resized.shape[0] * frame_resized.shape[1]
-        frame_stress = 0.0
 
-        ### aggregate detections
+        scores = []
+
+        ### collect detection scores
         for r in results:
             boxes = r.boxes
             if boxes is None:
@@ -65,25 +65,28 @@ def extract_threat_curve(
             for box in boxes:
                 conf = float(box.conf[0])
 
-                ### filter weak detections
+                ### filter low confidence
                 if conf < confidence_threshold:
                     continue
 
                 xyxy = box.xyxy[0].cpu().numpy()
                 x1, y1, x2, y2 = xyxy
 
-                ### compute area ratio
+                ### normalized object size
                 box_area = max(0.0, (x2 - x1) * (y2 - y1))
                 area_ratio = box_area / frame_area
 
-                ### aggressive amplification
-                score = conf * (area_ratio ** 0.3) * 10.0
-                frame_stress += score
+                ### balanced scoring (avoid explosion)
+                score = conf * np.sqrt(area_ratio)
 
-        ### inject strong spike when detection exists
-        if frame_stress > 0:
-            frame_stress = min(frame_stress + 1.0, 5.0)
+                scores.append(score)
+
+        ### aggregate per frame (key fix)
+        if len(scores) > 0:
+            frame_stress = float(np.mean(scores))   # stable aggregation
             detected_frames += 1
+        else:
+            frame_stress = 0.0
 
         threat_values.append(frame_stress)
 
@@ -105,23 +108,20 @@ def extract_threat_curve(
 
     signal = np.clip(signal, 0.0, 1.0)
 
-    ### optional smoothing (disabled by default)
+    ### optional smoothing
     if smooth and len(signal) > 1:
         smoothed = [signal[0]]
-
         for val in signal[1:]:
             prev = smoothed[-1]
             smoothed.append(
                 smoothing_alpha * val + (1 - smoothing_alpha) * prev
             )
-
         signal = np.array(smoothed, dtype=np.float32)
 
-    ### log info
+    ### debug logs
     print(f"[VideoProcessor] Processed frames: {frame_index}")
     print(f"[VideoProcessor] Detection frames: {detected_frames}")
     print(f"[VideoProcessor] Max stress: {float(signal.max()):.4f}")
 
     return signal
-
 #%#
