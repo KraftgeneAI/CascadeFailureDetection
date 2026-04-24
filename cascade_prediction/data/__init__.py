@@ -11,6 +11,7 @@ This package contains:
 
 from .dataset import CascadeDataset
 from .collation import collate_cascade_batch
+from .sliding_window_dataset import SlidingWindowDataset, WINDOW_SIZE, TEMPORAL_KEYS
 from .preprocessing import (
     normalize_power,
     normalize_frequency,
@@ -26,6 +27,9 @@ from .preprocessing import (
 __all__ = [
     # Dataset
     'CascadeDataset',
+    'SlidingWindowDataset',
+    'WINDOW_SIZE',
+    'TEMPORAL_KEYS',
     # Collation
     'collate_cascade_batch',
     # Preprocessing
