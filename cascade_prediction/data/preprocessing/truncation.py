@@ -67,6 +67,9 @@ def calculate_truncation_window(
     else:
         start_idx = 0
     
+    # Clamp end_idx to actual sequence length
+    end_idx = min(end_idx, sequence_length)
+    
     return start_idx, end_idx
 
 

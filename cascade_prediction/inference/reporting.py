@@ -66,7 +66,8 @@ def print_report(res: Dict, cascade_thresh: float, node_thresh: float):
         for node in res["top_nodes"][:5]:
             nid = node["node_id"]
             status = "✓ (Actual)" if nid in actual_nodes else "✗ (Not Actual)"
-            print(f"  - Node {nid:<3}: {node['score']:.4f} {status}")
+            score = node.get('ranking_score', node.get('score', 0.0))
+            print(f"  - Node {nid:<3}: {score:.4f} {status}")
 
     r = res["risk_assessment"]
     def get_lvl(s): return "(Critical)" if s > 0.8 else "(Severe)" if s > 0.6 else "(Medium)" if s > 0.3 else "(Low)"

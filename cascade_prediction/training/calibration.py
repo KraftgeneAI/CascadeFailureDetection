@@ -79,8 +79,6 @@ def calibrate_loss_weights(
         lambda_active_flow=1.0,
         lambda_voltage=1.0,
         lambda_capacity=1.0,
-        pos_weight=1.0,
-        use_logits=model_outputs_logits,
         base_mva=base_mva,
         base_freq=base_freq
     )

@@ -44,6 +44,18 @@ from .loss import PhysicsInformedLoss
 # Import unified model
 from .unified_model import UnifiedCascadePredictionModel
 
+# Import grid state forecaster
+from .grid_state_forecaster import (
+    GridStateForecaster,
+    extract_next_step_targets,
+    assemble_full_scada,
+    assemble_full_equip,
+    SCADA_VAR_IDX,
+    SCADA_CONST_IDX,
+    EQUIP_VAR_IDX,
+    EQUIP_CONST_IDX,
+)
+
 __all__ = [
     # Embeddings
     'EnvironmentalEmbedding',
@@ -67,4 +79,13 @@ __all__ = [
     'PhysicsInformedLoss',
     # Unified Model
     'UnifiedCascadePredictionModel',
+    # Grid State Forecaster
+    'GridStateForecaster',
+    'extract_next_step_targets',
+    'assemble_full_scada',
+    'assemble_full_equip',
+    'SCADA_VAR_IDX',
+    'SCADA_CONST_IDX',
+    'EQUIP_VAR_IDX',
+    'EQUIP_CONST_IDX',
 ]

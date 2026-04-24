@@ -114,9 +114,9 @@ class TestCollation:
         batch = [item1, item2]
         collated = collate_cascade_batch(batch)
         
-        # Should pad to max length (10)
-        assert collated['scada_data'].shape[1] == 10
-        assert collated['temporal_sequence'].shape[1] == 10
+        # Collator truncates to global min length to keep all temporal keys aligned
+        assert collated['scada_data'].shape[1] == 5
+        assert collated['temporal_sequence'].shape[1] == 5
         
         # Check sequence lengths preserved
         assert collated['sequence_length'][0] == 5
@@ -233,11 +233,8 @@ class TestCollation:
         batch = [item1, item2]
         collated = collate_cascade_batch(batch)
         
-        # Should pad to max length
-        assert collated['edge_mask'].shape[1] == 10
-        
-        # Padded values should be zero
-        assert torch.all(collated['edge_mask'][0, 5:] == 0)
+        # Collator truncates to global min length (5)
+        assert collated['edge_mask'].shape[1] == 5
     
     def test_collate_missing_keys(self):
         """Test collating when some items have missing keys."""
