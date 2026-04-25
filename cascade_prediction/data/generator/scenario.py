@@ -396,7 +396,8 @@ def generate_dataset_from_config(
     batch_size: int = Settings.Scenario.DEFAULT_BATCH_SIZE,
     seed: int = Settings.Scenario.DEFAULT_SEED,
     topology_file: Optional[str] = None,
-    start_batch: int = 0
+    start_batch: int = 0,
+    video_path: Optional[str] = None
 ) -> Dict[str, int]:
     """
     Convenience function to generate dataset from configuration.
@@ -436,7 +437,10 @@ def generate_dataset_from_config(
         seed=seed,
         topology_file=topology_file
     )
-    
+    if video_path is not None:
+        print(f"\nLoading video signal from: {video_path}")
+        simulator.env_generator.load_video(video_path)
+
     # Save topology if not provided
     if topology_file is None:
         topology_path = Path(output_dir) / 'grid_topology.pkl'
