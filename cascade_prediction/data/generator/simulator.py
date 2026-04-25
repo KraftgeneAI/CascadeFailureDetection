@@ -220,7 +220,8 @@ class PhysicsBasedGridSimulator:
         self.env_gen = EnvironmentalDataGenerator(
             self.num_nodes, self.positions, self.edge_index.numpy()
         )
-        
+        self.env_gen.load_video("video/wildfire1.mp4")
+
         self.robot_gen = RoboticDataGenerator(
             self.num_nodes, self.equipment_age, self.equipment_condition
         )
@@ -451,18 +452,54 @@ class PhysicsBasedGridSimulator:
 
             # Dynamic failure check: every non-failed node at every timestep
             # node_line_loading = ratio of actual load to base load (ML feature proxy)
+
+            # Environmental + robotic data
+            sat_data, weather_seq, threat_ind = self.env_gen.generate_correlated_environmental_data(
+                list(cumulative_failed_nodes), failed_lines_t, t, cascade_start_time, current_stress
+            )
+
+            vis_data, thermal_data, sensor_data = self.robot_gen.generate_correlated_robotic_data(
+                list(cumulative_failed_nodes), failed_lines_t, t, cascade_start_time, equipment_temps
+            )
+
+            # Compute fire stress with spatial decay + amplification
+            fire_x, fire_y = self.env_gen.fire_location
+            fire_stress = np.zeros(self.num_nodes)
+
+            for n in range(self.num_nodes):
+                dist = np.linalg.norm(self.positions[n] - np.array([fire_x, fire_y]))
+                fire_stress[n] = 2.5 * threat_ind[n, 0] * np.exp(-dist / 20.0)
+
+            # Apply fire influence to system
             node_line_loading = load_values / (self.base_load + 1e-6)
+            node_line_loading = node_line_loading * (1 + 0.4 * fire_stress)
+
+            equipment_temps = equipment_temps + 20 * fire_stress
 
             new_failures: List[Tuple[int, str]] = []
+
             for n in range(self.num_nodes):
                 if n in cumulative_failed_nodes:
                     continue
+
+                # Wildfire trigger
+                if fire_stress[n] > 0.6:
+                    new_failures.append((n, "wildfire"))
+                    continue
+
+                # Original physics-based failure
                 state, reason = self.cascade_sim.check_node_state(
-                    n, node_line_loading[n], voltages[n], equipment_temps[n], current_frequency
+                    n,
+                    node_line_loading[n],
+                    voltages[n],
+                    equipment_temps[n],
+                    current_frequency
                 )
+
                 if state == 2:
                     new_failures.append((n, reason))
 
+            # Keep this part unchanged
             for n, reason in new_failures:
                 if cascade_start_time < 0:
                     cascade_start_time = t
@@ -473,12 +510,6 @@ class PhysicsBasedGridSimulator:
                 print(f"  [FAIL] Node {n} failed at t={t} (reason: {reason})")
 
             # Generate multi-modal data
-            sat_data, weather_seq, threat_ind = self.env_gen.generate_correlated_environmental_data(
-                list(cumulative_failed_nodes), failed_lines_t, t, cascade_start_time, current_stress
-            )
-            vis_data, thermal_data, sensor_data = self.robot_gen.generate_correlated_robotic_data(
-                list(cumulative_failed_nodes), failed_lines_t, t, cascade_start_time, equipment_temps
-            )
 
             current_cascade_timing = self._compute_cascade_timing(t, failure_record)
 

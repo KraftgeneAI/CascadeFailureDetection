@@ -64,6 +64,21 @@ class EnvironmentalDataGenerator:
         self.num_nodes = num_nodes
         self.positions = positions
         self.edge_index = edge_index
+
+        self.video_signal = None
+        self.fire_location = None
+
+    def load_video(self, video_path):
+        from video_processor import extract_threat_curve
+        self.video_signal = extract_threat_curve(video_path)
+
+        x_min, y_min = self.positions.min(axis=0)
+        x_max, y_max = self.positions.max(axis=0)
+
+        self.fire_location = np.array([
+            np.random.uniform(x_min, x_max),
+            np.random.uniform(y_min, y_max)
+        ])
     
     def generate_satellite_imagery(
         self,
@@ -278,10 +293,27 @@ class EnvironmentalDataGenerator:
             Threat levels for 6 hazard types (0.0 to 1.0, dtype=float16)
         """
         threat_indicators = np.zeros((self.num_nodes, 6), dtype=np.float16)
-        
-        # Base threat level correlated with stress
+
+        # Base threat level
         base_threat = stress_level * 0.2
         threat_indicators += base_threat
+
+        # override fire threat using video signal
+        if self.video_signal is not None:
+            t = timestep % len(self.video_signal)
+            base_fire = float(self.video_signal[t])
+
+            for node_idx in range(self.num_nodes):
+                dx = self.positions[node_idx][0] - self.fire_location[0]
+                dy = self.positions[node_idx][1] - self.fire_location[1]
+                dist = (dx ** 2 + dy ** 2) ** 0.5
+
+                fire_stress = base_fire * np.exp(-dist / 20)
+
+                if fire_stress > 0.8:
+                    fire_stress = 1.0
+
+                threat_indicators[node_idx, 0] += fire_stress
         
         # Add precursor signals before cascade
         if timestep >= cascade_start - 15 and cascade_start > 0:

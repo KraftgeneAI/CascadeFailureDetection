@@ -214,7 +214,8 @@ Examples:
         batch_size=args.batch_size,
         seed=args.seed,
         topology_file=args.topology_file,
-        start_batch=args.start_batch
+        start_batch=args.start_batch,
+        video_path=args.video_path
     )
     
     # Print summary
