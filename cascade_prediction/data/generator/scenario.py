@@ -424,7 +424,8 @@ def generate_dataset_from_config(
         Path to saved topology
     start_batch : int
         Starting batch number (for parallel generation)
-    
+    video_path: str
+        Wild fire video path, optional
     Returns:
     --------
     stats : Dict[str, int]
@@ -439,7 +440,7 @@ def generate_dataset_from_config(
     )
     if video_path is not None:
         print(f"\nLoading video signal from: {video_path}")
-        simulator.env_generator.load_video(video_path)
+        simulator.env_gen.load_video(video_path)
 
     # Save topology if not provided
     if topology_file is None:

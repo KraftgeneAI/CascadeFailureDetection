@@ -220,7 +220,6 @@ class PhysicsBasedGridSimulator:
         self.env_gen = EnvironmentalDataGenerator(
             self.num_nodes, self.positions, self.edge_index.numpy()
         )
-        self.env_gen.load_video("video/wildfire1.mp4")
 
         self.robot_gen = RoboticDataGenerator(
             self.num_nodes, self.equipment_age, self.equipment_condition

@@ -1,13 +1,16 @@
 #####################
 import cv2
 import numpy as np
+import os
 from typing import Tuple
 from ultralytics import YOLO
+
+_DEFAULT_MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "best-yolov8n-50epochs.pt")
 
 
 def extract_threat_curve(
     video_path: str,
-    model_path: str = "best-yolov8n-50epochs.pt",
+    model_path: str = _DEFAULT_MODEL,
     resize: Tuple[int, int] = (640, 640),
     confidence_threshold: float = 0.25,
     frame_skip: int = 5,

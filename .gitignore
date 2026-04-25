@@ -21,7 +21,8 @@
 !cascade_prediction/**
 !test/
 !archive/
-
+!video.mp4
+!best-yolov8n-50epochs.pt
 # And exclude the .gitignore file itself
 !.gitignore
 

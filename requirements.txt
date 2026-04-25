@@ -18,3 +18,4 @@ psutil>=5.8.0
 # Optional: Visualization
 matplotlib>=3.4.0
 networkx>=2.6.0
+ultralytics
