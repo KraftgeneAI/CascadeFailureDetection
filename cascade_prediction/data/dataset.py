@@ -305,17 +305,10 @@ class CascadeDataset(Dataset):
                 ea[:, 6] = normalize_power(ea[:, 6], self.base_mva)   # line_flows_q
             data_arrays['edge_attr'].append(to_tensor(ea))
 
-            # Edge stress mask: encode thermal loading stress (pre-cascade window has no
-            # failed nodes, so a binary failure mask is always all-ones and useless).
-            if ea.shape[1] >= 6:
-                # col 5 after normalisation is line_flows_p / base_mva; thermal_limits
-                # col 1 is also normalised — compute loading ratio as |flow| / limit
-                thermal = np.abs(ea[:, 1]) + 1e-6
-                loading_ratio = np.abs(ea[:, 5]) / thermal
-                edge_mask = to_tensor(np.clip(1.0 - loading_ratio, 0.0, 1.0).astype(np.float32))
-            else:
-                edge_mask = to_tensor(np.ones(num_edges, dtype=np.float32))
-            data_arrays['edge_mask'].append(edge_mask)
+            # Edge mask: 0 if either endpoint node has already failed, 1 otherwise.
+            node_labels_t = ts.get('node_labels', np.zeros(num_nodes, dtype=np.float32)).astype(np.float32)
+            edge_failed = np.clip(node_labels_t[edge_index[0]] + node_labels_t[edge_index[1]], 0, 1)
+            data_arrays['edge_mask'].append(to_tensor((1.0 - edge_failed).astype(np.float32)))
         
         # edge_attr is now collected per-timestep inside the loop above → [T, E, 7]
         edge_attr = torch.stack(data_arrays['edge_attr'])  # [T, E, 7]

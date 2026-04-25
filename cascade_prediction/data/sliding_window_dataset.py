@@ -34,6 +34,113 @@ TEMPORAL_KEYS = {
 }
 
 
+def load_scenario(
+    path: str,
+    base_mva: float = Settings.Dataset.BASE_MVA,
+    base_frequency: float = Settings.Dataset.BASE_FREQUENCY,
+) -> Tuple[Optional[Dict], Dict, bool]:
+    """
+    Load and normalise a single scenario pkl file.
+
+    Returns:
+        tensors       — dict with keys: scada [T,N,18], pmu [T,N,8], equip [T,N,10],
+                        p_inj [T,N,1], q_inj [T,N,1], edge_index [2,E],
+                        edge_attr [T,E,7], edge_mask [T,E], seq_len T
+                        Returns None on load failure.
+        metadata      — raw metadata dict from the scenario (failed_nodes, failure_times, …)
+        cascade_label — bool
+    """
+    try:
+        with open(path, 'rb') as f:
+            raw = pickle.load(f)
+    except Exception:
+        return None, {}, False
+
+    if isinstance(raw, list):
+        raw = raw[0] if raw else None
+    if not isinstance(raw, dict) or not raw.get('sequence'):
+        return None, {}, False
+
+    sequence   = raw['sequence']
+    edge_index = raw['edge_index']
+    metadata   = raw.get('metadata', {})
+    T          = len(sequence)
+
+    last_step = sequence[-1]
+    num_nodes = last_step.get(
+        'scada_data', np.zeros((Settings.Dataset.DEFAULT_NUM_NODES, 18))
+    ).shape[0]
+    num_edges = edge_index.shape[1]
+
+    scada_l, pmu_l, equip_l = [], [], []
+    p_inj_l, q_inj_l       = [], []
+    ea_l, mask_l            = [], []
+
+    for ts in sequence:
+        # SCADA
+        s = ts.get('scada_data', np.zeros((num_nodes, 18), dtype=np.float32)).astype(np.float32)
+        if s.shape[1] >= 7:
+            s[:, 2] = normalize_power(s[:, 2], base_mva)
+            s[:, 3] = normalize_power(s[:, 3], base_mva)
+            s[:, 4] = normalize_power(s[:, 4], base_mva)
+            s[:, 5] = s[:, 5] / _TEMP_NORM
+            s[:, 6] = normalize_frequency(s[:, 6], base_frequency)
+        if s.shape[1] > 13:
+            s[:, 12] = 0.0
+            s[:, 13] = 0.0
+        scada_l.append(to_tensor(s))
+
+        # PMU: [0]=voltage_pu [1]=angle [2]=generation [3]=load [4]=temp
+        #      [5]=frequency  [6]=loading_ratio [7]=node_reactive
+        p = ts.get('pmu_sequence', np.zeros((num_nodes, 8), dtype=np.float32)).astype(np.float32)
+        if p.shape[1] >= 8:
+            p[:, 2] = normalize_power(p[:, 2], base_mva)
+            p[:, 3] = normalize_power(p[:, 3], base_mva)
+            p[:, 4] = p[:, 4] / _TEMP_NORM
+            p[:, 5] = normalize_frequency(p[:, 5], base_frequency)
+            p[:, 7] = normalize_power(p[:, 7], base_mva)
+        pmu_l.append(to_tensor(p))
+
+        eq = ts.get('equipment_status', np.zeros((num_nodes, 10), dtype=np.float32)).astype(np.float32)
+        if eq.shape[1] > 2:
+            eq[:, 2] = eq[:, 2] / _TEMP_NORM
+        equip_l.append(to_tensor(eq))
+
+        p_inj_l.append(torch.from_numpy(
+            np.array(ts.get('power_injection',    np.zeros((num_nodes, 1))),
+                     dtype=np.float32).reshape(num_nodes, 1)
+        ))
+        q_inj_l.append(torch.from_numpy(
+            np.array(ts.get('reactive_injection', np.zeros((num_nodes, 1))),
+                     dtype=np.float32).reshape(num_nodes, 1)
+        ))
+
+        ea = ts.get('edge_attr', np.zeros((num_edges, 7), dtype=np.float32)).astype(np.float32)
+        if ea.shape[1] >= 7:
+            ea[:, 1] = normalize_power(ea[:, 1], base_mva)
+            ea[:, 5] = normalize_power(ea[:, 5], base_mva)
+            ea[:, 6] = normalize_power(ea[:, 6], base_mva)
+        ea_l.append(to_tensor(ea))
+
+        node_labels = ts.get('node_labels', np.zeros(num_nodes, dtype=np.float32)).astype(np.float32)
+        edge_failed = np.clip(node_labels[edge_index[0]] + node_labels[edge_index[1]], 0, 1)
+        mask_l.append(to_tensor((1.0 - edge_failed).astype(np.float32)))
+
+    cascade_label = bool(metadata.get('is_cascade', False))
+    tensors = {
+        'scada':      torch.stack(scada_l),
+        'pmu':        torch.stack(pmu_l),
+        'equip':      torch.stack(equip_l),
+        'p_inj':      torch.stack(p_inj_l),
+        'q_inj':      torch.stack(q_inj_l),
+        'edge_index': to_tensor(edge_index).long(),
+        'edge_attr':  torch.stack(ea_l),
+        'edge_mask':  torch.stack(mask_l),
+        'seq_len':    T,
+    }
+    return tensors, metadata, cascade_label
+
+
 class SlidingWindowDataset(Dataset):
     """
     Sliding window dataset for GridStateForecaster training.
@@ -136,103 +243,9 @@ class SlidingWindowDataset(Dataset):
     # ------------------------------------------------------------------
 
     def _load(self, path: str) -> Tuple[Optional[Dict], bool]:
-        """Load and normalise one pkl file. Returns (tensors, cascade_label)."""
-        try:
-            with open(path, 'rb') as f:
-                raw = pickle.load(f)
-        except Exception:
-            return None, False
-
-        if isinstance(raw, list):
-            raw = raw[0] if raw else None
-        if not isinstance(raw, dict) or not raw.get('sequence'):
-            return None, False
-
-        sequence   = raw['sequence']
-        edge_index = raw['edge_index']
-        metadata   = raw.get('metadata', {})
-        T          = len(sequence)
-
-        last_step = sequence[-1]
-        num_nodes = last_step.get(
-            'scada_data', np.zeros((Settings.Dataset.DEFAULT_NUM_NODES, 18))
-        ).shape[0]
-        num_edges = edge_index.shape[1]
-
-        scada_l, pmu_l, equip_l = [], [], []
-        p_inj_l, q_inj_l       = [], []
-        ea_l, mask_l            = [], []
-
-        for ts in sequence:
-            # SCADA
-            s = ts.get('scada_data', np.zeros((num_nodes, 18), dtype=np.float32)).astype(np.float32)
-            if s.shape[1] >= 7:
-                s[:, 2] = normalize_power(s[:, 2], self.base_mva)                        # generation
-                s[:, 3] = normalize_power(s[:, 3], self.base_mva)                        # reactive
-                s[:, 4] = normalize_power(s[:, 4], self.base_mva)                        # load
-                s[:, 5] = s[:, 5] / _TEMP_NORM                     # temperature °C
-                s[:, 6] = normalize_frequency(s[:, 6], self.base_frequency)              # frequency Hz
-            if s.shape[1] > 13:
-                s[:, 12] = 0.0   # zero time_ratio  (consistent with CascadeDataset)
-                s[:, 13] = 0.0   # zero stress_level
-            scada_l.append(to_tensor(s))
-
-            # PMU: [0]=voltage_pu [1]=angle [2]=generation [3]=load [4]=temp
-            #      [5]=frequency  [6]=loading_ratio [7]=node_reactive
-            p = ts.get('pmu_sequence', np.zeros((num_nodes, 8), dtype=np.float32)).astype(np.float32)
-            if p.shape[1] >= 8:
-                p[:, 2] = normalize_power(p[:, 2], self.base_mva)                        # generation MW
-                p[:, 3] = normalize_power(p[:, 3], self.base_mva)                        # load MW
-                p[:, 4] = p[:, 4] / _TEMP_NORM                     # temperature °C
-                p[:, 5] = normalize_frequency(p[:, 5], self.base_frequency)              # frequency Hz
-                p[:, 7] = normalize_power(p[:, 7], self.base_mva)                        # reactive MVAr
-            pmu_l.append(to_tensor(p))
-
-            eq = ts.get('equipment_status', np.zeros((num_nodes, 10), dtype=np.float32)).astype(np.float32)
-            if eq.shape[1] > 2:
-                eq[:, 2] = eq[:, 2] / _TEMP_NORM   # equipment_temps °C (EQUIP_VAR_IDX[0])
-            equip_l.append(to_tensor(eq))
-
-            # Power / reactive injections (node-level physics features)
-            p_inj_l.append(torch.from_numpy(
-                np.array(ts.get('power_injection',    np.zeros((num_nodes, 1), dtype=np.float32)),
-                         dtype=np.float32).reshape(num_nodes, 1)
-            ))
-            q_inj_l.append(torch.from_numpy(
-                np.array(ts.get('reactive_injection', np.zeros((num_nodes, 1), dtype=np.float32)),
-                         dtype=np.float32).reshape(num_nodes, 1)
-            ))
-
-            # Edge attributes
-            ea = ts.get('edge_attr', np.zeros((num_edges, 7), dtype=np.float32)).astype(np.float32)
-            if ea.shape[1] >= 7:
-                ea[:, 1] = normalize_power(ea[:, 1], self.base_mva)
-                ea[:, 5] = normalize_power(ea[:, 5], self.base_mva)
-                ea[:, 6] = normalize_power(ea[:, 6], self.base_mva)
-            ea_l.append(to_tensor(ea))
-
-            # Edge stress mask
-            if ea.shape[1] >= 6:
-                thermal      = np.abs(ea[:, 1]) + 1e-6
-                loading      = np.abs(ea[:, 5]) / thermal
-                mask_l.append(to_tensor(np.clip(1.0 - loading, 0.0, 1.0).astype(np.float32)))
-            else:
-                mask_l.append(torch.ones(num_edges, dtype=torch.float32))
-
-        cascade_label = bool(metadata.get('is_cascade', False))
-
-        tensors = {
-            'scada':      torch.stack(scada_l),           # [T, N, 18]
-            'pmu':        torch.stack(pmu_l),             # [T, N,  8]
-            'equip':      torch.stack(equip_l),           # [T, N, 10]
-            'p_inj':      torch.stack(p_inj_l),           # [T, N,  1]
-            'q_inj':      torch.stack(q_inj_l),           # [T, N,  1]
-            'edge_index': to_tensor(edge_index).long(),   # [2,  E]
-            'edge_attr':  torch.stack(ea_l),              # [T,  E, 7]
-            'edge_mask':  torch.stack(mask_l),            # [T,  E]
-            'seq_len':    T,
-        }
-        return tensors, cascade_label
+        """Thin wrapper — delegates to the module-level load_scenario."""
+        tensors, _, label = load_scenario(path, self.base_mva, self.base_frequency)
+        return tensors, label
 
 
 # ---------------------------------------------------------------------------
