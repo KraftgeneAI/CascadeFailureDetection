@@ -436,11 +436,9 @@ def generate_dataset_from_config(
     simulator = PhysicsBasedGridSimulator(
         num_nodes=num_nodes,
         seed=seed,
-        topology_file=topology_file
+        topology_file=topology_file,
+        video_path=video_path
     )
-    if video_path is not None:
-        print(f"\nLoading video signal from: {video_path}")
-        simulator.env_gen.load_video(video_path)
 
     # Save topology if not provided
     if topology_file is None:

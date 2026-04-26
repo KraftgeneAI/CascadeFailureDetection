@@ -60,7 +60,8 @@ class PhysicsBasedGridSimulator:
         self,
         num_nodes: int = Settings.Scenario.DEFAULT_NUM_NODES,
         seed: int = Settings.Scenario.DEFAULT_SEED,
-        topology_file: Optional[str] = None
+        topology_file: Optional[str] = None,
+        video_path: Optional[str] = None
     ):
         """
         Initialize the physics-based grid simulator.
@@ -73,6 +74,8 @@ class PhysicsBasedGridSimulator:
             Random seed for reproducibility
         topology_file : str, optional
             Path to saved topology file (if None, generates new topology)
+        video_path: str, optional
+            Path to wild-fire video
         """
         self.num_nodes = num_nodes
         self.seed = seed
@@ -218,7 +221,7 @@ class PhysicsBasedGridSimulator:
         # Initialize environmental and robotic generators
         print(f"Initializing environmental and robotic generators...")
         self.env_gen = EnvironmentalDataGenerator(
-            self.num_nodes, self.positions, self.edge_index.numpy()
+            self.num_nodes, self.positions, self.edge_index.numpy(), video_path
         )
 
         self.robot_gen = RoboticDataGenerator(
@@ -454,7 +457,7 @@ class PhysicsBasedGridSimulator:
 
             # Environmental + robotic data
             sat_data, weather_seq, threat_ind = self.env_gen.generate_correlated_environmental_data(
-                list(cumulative_failed_nodes), failed_lines_t, t, cascade_start_time, current_stress
+                list(cumulative_failed_nodes), failed_lines_t, t, cascade_start_time, current_stress, sequence_length
             )
 
             vis_data, thermal_data, sensor_data = self.robot_gen.generate_correlated_robotic_data(
@@ -463,15 +466,9 @@ class PhysicsBasedGridSimulator:
 
             # Compute fire stress with spatial decay + amplification
             fire_x, fire_y = self.env_gen.fire_location
-            fire_stress = np.zeros(self.num_nodes)
+            fire_stress = threat_ind[:,0]
 
-            for n in range(self.num_nodes):
-                dist = np.linalg.norm(self.positions[n] - np.array([fire_x, fire_y]))
-                fire_stress[n] = 2.5 * threat_ind[n, 0] * np.exp(-dist / 20.0)
-
-            # Apply fire influence to system
             node_line_loading = load_values / (self.base_load + 1e-6)
-            node_line_loading = node_line_loading * (1 + 0.4 * fire_stress)
 
             equipment_temps = equipment_temps + 20 * fire_stress
 
@@ -517,7 +514,7 @@ class PhysicsBasedGridSimulator:
                 load_values, equipment_temps, current_frequency, loading_ratios,
                 line_flows, line_flows_q, sat_data, weather_seq, threat_ind,
                 vis_data, thermal_data, sensor_data, cumulative_failed_nodes,
-                current_cascade_timing, sequence_length
+                current_cascade_timing, sequence_length,self.env_gen.fire_location
             )
             sequence.append(timestep_data)
 
@@ -579,7 +576,7 @@ class PhysicsBasedGridSimulator:
         load_values, equipment_temps, current_frequency, loading_ratios,
         line_flows, line_flows_q, sat_data, weather_seq, threat_ind,
         vis_data, thermal_data, sensor_data, cumulative_failed_nodes,
-        current_cascade_timing, sequence_length
+        current_cascade_timing, sequence_length,fire_location
     ) -> Dict:
         """Package all data for a single timestep."""
         return {
@@ -675,6 +672,7 @@ class PhysicsBasedGridSimulator:
             'thermal_limits': self.thermal_limits.astype(np.float32),
             'power_injection': (generation - load_values).astype(np.float32),
             'reactive_injection': (node_reactive).astype(np.float32),
+            'fire_location': fire_location
         }
 
     
