@@ -320,6 +320,8 @@ class TrainingConfig:
     CASCADE_THRESHOLD       = 0.25      # Decision threshold for cascade prediction
     NODE_THRESHOLD          = 0.25      # Decision threshold for node failure
     FBETA                   = 0.5       # Beta for F-beta score (precision-focused)
+    FIRST_FAILURE_WEIGHT    = 5.0       # BCE weight for 0→1 node label transitions
+    ALREADY_FAILED_WEIGHT   = 0.1       # BCE weight for 1→1 node label transitions
 
 
 # ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ Date: April 2026
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, WeightedRandomSampler
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 import argparse
 import json
 import os
@@ -32,13 +32,8 @@ from cascade_prediction.models import (
 )
 from cascade_prediction.data import SlidingWindowDataset, collate_cascade_batch, TEMPORAL_KEYS
 from cascade_prediction.data.generator.config import Settings
+from cascade_prediction.utils import find_best_fbeta
 
-# Under-voltage threshold (per-unit): nodes below this are labelled "failing"
-VOLTAGE_FAILURE_THRESHOLD = 0.9
-
-# Index of voltage within the 13 predicted SCADA variable features
-# SCADA_VAR_IDX[0] = 0 → voltage_pu
-VOLTAGE_OUT_IDX = 0
 
 
 # ---------------------------------------------------------------------------
@@ -74,18 +69,13 @@ def plot_training_curves(history: dict, output_dir: str) -> None:
 
 
 def compute_node_f1(
-    pred_scada_vars: torch.Tensor,   # [B, N, 13]
-    target_scada_vars: torch.Tensor, # [B, N, 13]
+    pred_labels:   torch.Tensor,  # [B, N]  — sigmoid probabilities
+    target_labels: torch.Tensor,  # [B, N]  — binary ground truth
+    threshold: float = 0.5,
 ) -> float:
-    """
-    Binary per-node F1: predicted voltage < threshold vs actual voltage < threshold.
-    Both tensors are on CPU at this point.
-    """
-    pred_voltage   = pred_scada_vars[:, :, VOLTAGE_OUT_IDX].reshape(-1).numpy()
-    actual_voltage = target_scada_vars[:, :, VOLTAGE_OUT_IDX].reshape(-1).numpy()
-
-    pred_fail   = (pred_voltage   < VOLTAGE_FAILURE_THRESHOLD).astype(int)
-    actual_fail = (actual_voltage < VOLTAGE_FAILURE_THRESHOLD).astype(int)
+    """Binary per-node F1 from predicted node_labels probabilities vs ground truth."""
+    pred_fail   = (pred_labels > threshold).int().reshape(-1).numpy()
+    actual_fail = target_labels.int().reshape(-1).numpy()
 
     if actual_fail.sum() == 0 and pred_fail.sum() == 0:
         return 1.0  # Both agree: no failures
@@ -102,7 +92,7 @@ def train_one_epoch(
     max_grad_norm: float,
 ) -> dict:
     model.train()
-    total_loss = total_scada = total_pmu = total_equip = 0.0
+    total_loss = total_scada = total_pmu = total_equip = total_labels = 0.0
 
     for batch in tqdm(loader, desc='  train', leave=False):
         batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
@@ -110,13 +100,15 @@ def train_one_epoch(
 
         optimizer.zero_grad()
 
-        with autocast(enabled=use_amp):
+        with autocast('cuda', enabled=use_amp):
             predictions = model(_make_input_batch(batch))
             targets = extract_next_step_targets(
                 batch['scada_data'],
                 batch['pmu_sequence'],
                 batch['equipment_status'],
+                batch.get('node_labels'),
             )
+            targets['node_label_weights'] = _node_label_weights(batch)
             loss, components = model.compute_loss(predictions, targets)
 
         scaler.scale(loss).backward()
@@ -125,17 +117,19 @@ def train_one_epoch(
         scaler.step(optimizer)
         scaler.update()
 
-        total_loss  += components['total']
-        total_scada += components['loss_scada']
-        total_pmu   += components['loss_pmu']
-        total_equip += components['loss_equip']
+        total_loss   += components['total']
+        total_scada  += components['loss_scada']
+        total_pmu    += components['loss_pmu']
+        total_equip  += components['loss_equip']
+        total_labels += components['loss_labels']
 
     n = len(loader)
     return {
-        'total':      total_loss  / n,
-        'loss_scada': total_scada / n,
-        'loss_pmu':   total_pmu   / n,
-        'loss_equip': total_equip / n,
+        'total':       total_loss   / n,
+        'loss_scada':  total_scada  / n,
+        'loss_pmu':    total_pmu    / n,
+        'loss_equip':  total_equip  / n,
+        'loss_labels': total_labels / n,
     }
 
 
@@ -148,49 +142,78 @@ def validate(
 ) -> tuple:
     """Returns (loss_dict, node_f1)."""
     model.eval()
-    total_loss = total_scada = total_pmu = total_equip = 0.0
-    all_pred_scada = []
-    all_tgt_scada  = []
+    total_loss = total_scada = total_pmu = total_equip = total_labels = 0.0
+    all_pred_labels = []
+    all_tgt_labels  = []
 
     for batch in tqdm(loader, desc='  val  ', leave=False):
         batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                  for k, v in batch.items()}
 
-        with autocast(enabled=use_amp):
+        with autocast('cuda', enabled=use_amp):
             predictions = model(_make_input_batch(batch))
             targets = extract_next_step_targets(
                 batch['scada_data'],
                 batch['pmu_sequence'],
                 batch['equipment_status'],
+                batch.get('node_labels'),
             )
+            targets['node_label_weights'] = _node_label_weights(batch)
             _, components = model.compute_loss(predictions, targets)
 
-        total_loss  += components['total']
-        total_scada += components['loss_scada']
-        total_pmu   += components['loss_pmu']
-        total_equip += components['loss_equip']
+        total_loss   += components['total']
+        total_scada  += components['loss_scada']
+        total_pmu    += components['loss_pmu']
+        total_equip  += components['loss_equip']
+        total_labels += components['loss_labels']
 
-        all_pred_scada.append(predictions['next_scada_vars'].cpu())
-        all_tgt_scada.append(targets['next_scada_vars'].cpu())
+        all_pred_labels.append(predictions['node_labels'].cpu())
+        all_tgt_labels.append(targets['node_labels'].cpu())
 
     n = len(loader)
     loss_dict = {
-        'total':      total_loss  / n,
-        'loss_scada': total_scada / n,
-        'loss_pmu':   total_pmu   / n,
-        'loss_equip': total_equip / n,
+        'total':       total_loss   / n,
+        'loss_scada':  total_scada  / n,
+        'loss_pmu':    total_pmu    / n,
+        'loss_equip':  total_equip  / n,
+        'loss_labels': total_labels / n,
     }
 
-    pred_cat = torch.cat(all_pred_scada, dim=0)
-    tgt_cat  = torch.cat(all_tgt_scada,  dim=0)
-    node_f1  = compute_node_f1(pred_cat, tgt_cat)
+    pred_cat = torch.cat(all_pred_labels, dim=0)
+    tgt_cat  = torch.cat(all_tgt_labels,  dim=0)
 
-    return loss_dict, node_f1
+    _, best_thresh = find_best_fbeta(
+        pred_cat.flatten(), tgt_cat.flatten(),
+        beta=Settings.Training.FBETA,
+    )
+    node_f1 = compute_node_f1(pred_cat, tgt_cat, threshold=best_thresh)
+
+    return loss_dict, node_f1, best_thresh
 
 
 def save_checkpoint(state: dict, path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save(state, path)
+
+
+def _node_label_weights(batch: dict) -> torch.Tensor:
+    """
+    Per-node BCE weights based on label transition in the window.
+      0 → 1  (first failure)   : FIRST_FAILURE_WEIGHT
+      1 → 1  (already failed)  : ALREADY_FAILED_WEIGHT
+      otherwise                : 1.0
+    Returns [B, N] weight tensor on the same device as the batch.
+    """
+    labels = batch['node_labels']            # [B, W+1, N]
+    last_input = labels[:, -2, :]            # [B, N]  last input step
+    target     = labels[:, -1, :]            # [B, N]  target step
+
+    weights = torch.ones_like(target)
+    first_failure  = (last_input < 0.5) & (target > 0.5)
+    already_failed = (last_input > 0.5) & (target > 0.5)
+    weights[first_failure]  = Settings.Training.FIRST_FAILURE_WEIGHT
+    weights[already_failed] = Settings.Training.ALREADY_FAILED_WEIGHT
+    return weights
 
 
 def _make_input_batch(batch: dict) -> dict:
@@ -334,7 +357,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', patience=Settings.Training.SCHEDULER_PATIENCE
     )
-    scaler = GradScaler(enabled=USE_AMP)
+    scaler = GradScaler('cuda', enabled=USE_AMP)
 
     # ------------------------------------------------------------------
     # Resume
@@ -346,7 +369,7 @@ def main():
     history = {
         'train_loss': [], 'val_loss': [],
         'val_f1': [],
-        'val_loss_scada': [], 'val_loss_pmu': [], 'val_loss_equip': [],
+        'val_loss_scada': [], 'val_loss_pmu': [], 'val_loss_equip': [], 'val_loss_labels': [],
     }
 
     if args.resume and os.path.exists(args.resume):
@@ -379,7 +402,7 @@ def main():
         train_metrics = train_one_epoch(
             model, train_loader, optimizer, scaler, DEVICE, USE_AMP, args.grad_clip
         )
-        val_metrics, val_f1 = validate(model, val_loader, DEVICE, USE_AMP)
+        val_metrics, val_f1, best_thresh = validate(model, val_loader, DEVICE, USE_AMP)
 
         scheduler.step(val_metrics['total'])
 
@@ -389,22 +412,29 @@ def main():
         history['val_loss_scada'].append(val_metrics['loss_scada'])
         history['val_loss_pmu'].append(val_metrics['loss_pmu'])
         history['val_loss_equip'].append(val_metrics['loss_equip'])
+        history['val_loss_labels'].append(val_metrics['loss_labels'])
 
-        print(f'  train_loss={train_metrics["total"]:.6f} | '
-              f'val_loss={val_metrics["total"]:.6f}  '
-              f'(scada={val_metrics["loss_scada"]:.4f} '
-              f'pmu={val_metrics["loss_pmu"]:.4f} '
-              f'equip={val_metrics["loss_equip"]:.4f})  '
-              f'val_f1={val_f1:.4f}')
+        print(f'  train : total={train_metrics["total"]:.6f}  '
+              f'scada={train_metrics["loss_scada"]:.4f}  '
+              f'pmu={train_metrics["loss_pmu"]:.4f}  '
+              f'equip={train_metrics["loss_equip"]:.4f}  '
+              f'labels={train_metrics["loss_labels"]:.4f}')
+        print(f'  val   : total={val_metrics["total"]:.6f}  '
+              f'scada={val_metrics["loss_scada"]:.4f}  '
+              f'pmu={val_metrics["loss_pmu"]:.4f}  '
+              f'equip={val_metrics["loss_equip"]:.4f}  '
+              f'labels={val_metrics["loss_labels"]:.4f}  '
+              f'f1={val_f1:.4f}  thresh={best_thresh:.2f}')
 
         checkpoint_state = {
-            'epoch':                epoch,
-            'model_state_dict':     model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'best_val_loss':        best_val_loss,
-            'best_val_f1':          best_val_f1,
-            'history':              history,
-            'args':                 vars(args),
+            'epoch':                  epoch,
+            'model_state_dict':       model.state_dict(),
+            'optimizer_state_dict':   optimizer.state_dict(),
+            'best_val_loss':          best_val_loss,
+            'best_val_f1':            best_val_f1,
+            'node_label_threshold':   best_thresh,
+            'history':                history,
+            'args':                   vars(args),
         }
 
         # Save best val-loss checkpoint

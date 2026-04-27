@@ -74,7 +74,7 @@ def load_scenario(
 
     scada_l, pmu_l, equip_l = [], [], []
     p_inj_l, q_inj_l       = [], []
-    ea_l, mask_l            = [], []
+    ea_l, mask_l, nl_l      = [], [], []
 
     for ts in sequence:
         # SCADA
@@ -122,9 +122,10 @@ def load_scenario(
             ea[:, 6] = normalize_power(ea[:, 6], base_mva)
         ea_l.append(to_tensor(ea))
 
-        node_labels = ts.get('node_labels', np.zeros(num_nodes, dtype=np.float32)).astype(np.float32)
-        edge_failed = np.clip(node_labels[edge_index[0]] + node_labels[edge_index[1]], 0, 1)
+        node_labels_t = ts.get('node_labels', np.zeros(num_nodes, dtype=np.float32)).astype(np.float32)
+        edge_failed = np.clip(node_labels_t[edge_index[0]] + node_labels_t[edge_index[1]], 0, 1)
         mask_l.append(to_tensor((1.0 - edge_failed).astype(np.float32)))
+        nl_l.append(to_tensor(node_labels_t))
 
     cascade_label = bool(metadata.get('is_cascade', False))
     tensors = {
@@ -134,9 +135,10 @@ def load_scenario(
         'p_inj':      torch.stack(p_inj_l),
         'q_inj':      torch.stack(q_inj_l),
         'edge_index': to_tensor(edge_index).long(),
-        'edge_attr':  torch.stack(ea_l),
-        'edge_mask':  torch.stack(mask_l),
-        'seq_len':    T,
+        'edge_attr':   torch.stack(ea_l),
+        'edge_mask':   torch.stack(mask_l),
+        'node_labels': torch.stack(nl_l),   # [T, N]
+        'seq_len':     T,
     }
     return tensors, metadata, cascade_label
 
@@ -177,6 +179,7 @@ class SlidingWindowDataset(Dataset):
         self._cascade_labels: List[bool] = []
         self._cache: Dict[int, Dict[str, object]] = {}  # file_idx → tensors dict
         self._index: List[Tuple[int, int]] = []          # (file_idx, start_t)
+        self.files: List[str] = []                        # file_idx → path
 
         print(f'SlidingWindowDataset: loading {len(files)} files from {data_dir}')
         cache_idx = 0
@@ -190,6 +193,7 @@ class SlidingWindowDataset(Dataset):
                 continue
             self._cascade_labels.append(label)
             self._cache[cache_idx] = tensors
+            self.files.append(path)
             for start_t in range(n_windows):
                 self._index.append((cache_idx, start_t))
             cache_idx += 1
@@ -231,6 +235,9 @@ class SlidingWindowDataset(Dataset):
             'edge_index':       t['edge_index'],
             'edge_attr':        t['edge_attr'][s:e],
             'edge_mask':        t['edge_mask'][s:e],
+            'node_labels':      t['node_labels'][s:e],  # [W+1, N]
+            'file_idx':         file_idx,
+            'start_t':          start_t,
         }
 
     def get_cascade_label(self, idx: int) -> bool:

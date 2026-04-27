@@ -20,6 +20,7 @@ from tqdm import tqdm
 import numpy as np
 
 from cascade_prediction.data.generator.config import Settings
+from cascade_prediction.utils import find_best_f1, find_best_fbeta
 
 
 class Trainer:
@@ -604,42 +605,6 @@ class Trainer:
         global_cascade_probs = torch.cat(all_cascade_probs)
         global_cascade_labels = torch.cat(all_cascade_labels)
         
-        # Helper 1: Best F1 (Standard)
-        def find_best_f1(probs, targets):
-            best_f1, best_thresh = 0.0, 0.5
-            for t in np.arange(0.05, 0.96, 0.05):
-                preds = (probs > t).float()
-                tp = (preds * targets).sum()
-                fp = (preds * (1-targets)).sum()
-                fn = ((1-preds) * targets).sum()
-                f1 = 2*tp / (2*tp + fp + fn + 1e-7)
-                if f1 > best_f1:
-                    best_f1 = f1.item()
-                    best_thresh = t
-            return best_f1, best_thresh
-
-        # Helper 2: Best F-beta Score (Favors Precision)
-        def find_best_fbeta(probs, targets, beta=0.5):
-            best_score, best_thresh = 0.0, 0.5
-            beta_sq = beta**2
-            
-            for t in np.arange(0.05, 0.96, 0.05):
-                preds = (probs > t).float()
-                tp = (preds * targets).sum()
-                fp = (preds * (1-targets)).sum()
-                fn = ((1-preds) * targets).sum()
-                
-                precision = tp / (tp + fp + 1e-7)
-                recall = tp / (tp + fn + 1e-7)
-                
-                # Calculate F-beta Score
-                score = (1 + beta_sq) * (precision * recall) / (beta_sq * precision + recall + 1e-7)
-                
-                if score > best_score:
-                    best_score = score.item()
-                    best_thresh = t
-            return best_score, best_thresh
-
         # --- 1. Find Thresholds ---
         best_c_f1, best_c_thresh = find_best_f1(global_cascade_probs, global_cascade_labels)
         
@@ -994,8 +959,4 @@ class Trainer:
         
         plt.tight_layout()
         
-        plot_path = f"{self.output_dir}/training_curves.png"
-        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-        plt.close()
-        
-        print(f"✓ Training curves saved to {plot_path}")
+        pl

@@ -32,7 +32,7 @@ from cascade_prediction.data import WINDOW_SIZE, load_scenario
 from cascade_prediction.data.sliding_window_dataset import _build_node_features
 from cascade_prediction.data.generator.config import Settings
 
-VOLTAGE_THRESHOLD = 0.9   # per-unit; voltage below this → node failing
+DEFAULT_LABEL_THRESHOLD = 0.5   # fallback when checkpoint has no saved threshold
 
 
 # ---------------------------------------------------------------------------
@@ -45,9 +45,9 @@ def rollout(model, tensors, start_t, device):
     Run autoregressive rollout starting from seed window [start_t : start_t+W].
 
     Returns:
-        pred_voltages [steps, N]  — predicted voltage at each predicted step
-        gt_voltages   [steps, N]  — ground-truth voltage at each predicted step
-        pred_range    range        — absolute timestep indices of predicted steps
+        pred_node_labels [steps, N]  — model node_labels (sigmoid) at each predicted step
+        gt_node_labels   [steps, N]  — ground-truth node_labels from scenario
+        pred_range       range        — absolute timestep indices of predicted steps
     """
     W   = WINDOW_SIZE
     T   = tensors['seq_len']
@@ -63,9 +63,9 @@ def rollout(model, tensors, start_t, device):
     w_ea    = tensors['edge_attr'][start_t : start_t + W].clone()  # [W, E, 7]
     w_mask  = tensors['edge_mask'][start_t : start_t + W].clone()  # [W, E]
 
-    pred_voltages = []
-    gt_voltages   = []
-    pred_range    = range(start_t + W, T)
+    pred_node_labels = []
+    gt_node_labels   = []
+    pred_range       = range(start_t + W, T)
 
     for abs_t in pred_range:
         # Build node features for current window
@@ -105,11 +105,9 @@ def rollout(model, tensors, start_t, device):
         next_p_inj = (next_scada[:, :, 2] - next_scada[:, :, 4]).unsqueeze(-1)  # [1, N, 1]
         next_q_inj = next_scada[:, :, 3].unsqueeze(-1)                           # [1, N, 1]
 
-        # Record predicted voltage [N]
-        pred_voltages.append(out['next_scada_vars'].cpu()[0, :, 0].numpy())  # SCADA_VAR_IDX[0]=col0
-
-        # Record ground-truth voltage [N]
-        gt_voltages.append(tensors['scada'][abs_t, :, 0].numpy())
+        # Record predicted node labels [N] and ground-truth node labels [N]
+        pred_node_labels.append(out['node_labels'].cpu()[0, :].numpy())
+        gt_node_labels.append(tensors['node_labels'][abs_t].numpy())
 
         # Slide window
         w_scada = torch.cat([w_scada[1:], next_scada[0].unsqueeze(0)],  dim=0)
@@ -121,50 +119,49 @@ def rollout(model, tensors, start_t, device):
         w_ea   = torch.cat([w_ea[1:],   w_ea[-1:]], dim=0)
         w_mask = torch.cat([w_mask[1:], w_mask[-1:]], dim=0)
 
-    pred_voltages = np.stack(pred_voltages, axis=0)   # [steps, N]
-    gt_voltages   = np.stack(gt_voltages,   axis=0)   # [steps, N]
-    return pred_voltages, gt_voltages, pred_range
+    pred_node_labels = np.stack(pred_node_labels, axis=0)   # [steps, N]
+    gt_node_labels   = np.stack(gt_node_labels,   axis=0)   # [steps, N]
+    return pred_node_labels, gt_node_labels, pred_range
 
 
 # ---------------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------------
 
-def compute_metrics(pred_voltages, gt_voltages, pred_range, metadata):
+def compute_metrics(pred_node_labels, gt_node_labels, threshold, pred_range, metadata):
     """
     Args:
-        pred_voltages [steps, N]
-        gt_voltages   [steps, N]
-        pred_range    range — absolute timestep indices of predicted steps
-        metadata      dict from scenario pkl
+        pred_node_labels [steps, N]  — sigmoid probabilities from model
+        gt_node_labels   [steps, N]  — binary ground-truth labels
+        threshold        float        — optimal threshold from checkpoint
+        pred_range       range        — absolute timestep indices of predicted steps
+        metadata         dict from scenario pkl
 
     Returns:
         metrics dict
     """
-    steps, N = pred_voltages.shape
+    steps, N = pred_node_labels.shape
     pred_range_list = list(pred_range)
 
-    # Binary failure per node: did voltage ever drop below threshold?
-    pred_fail  = (pred_voltages < VOLTAGE_THRESHOLD).any(axis=0).astype(int)  # [N]
-    gt_fail    = (gt_voltages   < VOLTAGE_THRESHOLD).any(axis=0).astype(int)  # [N]
+    # Binary failure per node: did the label ever cross the threshold?
+    pred_fail = (pred_node_labels > threshold).any(axis=0).astype(int)   # [N]
+    gt_fail   = (gt_node_labels   > 0.5).any(axis=0).astype(int)         # [N]
 
     precision = precision_score(gt_fail, pred_fail, zero_division=0)
     recall    = recall_score(gt_fail,    pred_fail, zero_division=0)
     f1        = f1_score(gt_fail,        pred_fail, zero_division=0)
 
     # --- Failure timestep per node ---
-    # actual_fail_t[n] = first predicted-range step where gt < threshold, or -1
-    # pred_fail_t[n]   = first predicted-range step where pred < threshold, or -1
-    def first_fail_t(voltages):
+    def first_fail_t(labels, thresh):
         result = np.full(N, -1, dtype=int)
         for t in range(steps):
             for n in range(N):
-                if result[n] == -1 and voltages[t, n] < VOLTAGE_THRESHOLD:
+                if result[n] == -1 and labels[t, n] > thresh:
                     result[n] = pred_range_list[t]
         return result
 
-    gt_fail_t   = first_fail_t(gt_voltages)
-    pred_fail_t = first_fail_t(pred_voltages)
+    gt_fail_t   = first_fail_t(gt_node_labels,   0.5)
+    pred_fail_t = first_fail_t(pred_node_labels, threshold)
 
     # Cross-reference with metadata failure_times (ground truth from simulator)
     meta_fail_nodes = list(metadata.get('failed_nodes',  []))
@@ -279,22 +276,24 @@ def main():
 
     # --- Load model ---
     print(f'\nLoading checkpoint: {args.checkpoint}')
-    ckpt  = torch.load(args.checkpoint, map_location=DEVICE)
-    model = GridStateForecaster().to(DEVICE)
+    ckpt      = torch.load(args.checkpoint, map_location=DEVICE, weights_only=False)
+    threshold = ckpt.get('node_label_threshold', DEFAULT_LABEL_THRESHOLD)
+    model     = GridStateForecaster().to(DEVICE)
     model.load_state_dict(ckpt['model_state_dict'])
     model.eval()
+    print(f'  Node label threshold: {threshold:.2f}')
 
     # --- Rollout ---
     print(f'\nRunning rollout from t={args.start_t} (seed: '
           f'{args.start_t}–{args.start_t + WINDOW_SIZE - 1}, '
           f'predicting: {args.start_t + WINDOW_SIZE}–{T - 1})...')
 
-    pred_voltages, gt_voltages, pred_range = rollout(
+    pred_node_labels, gt_node_labels, pred_range = rollout(
         model, tensors, args.start_t, DEVICE
     )
 
     # --- Metrics ---
-    metrics = compute_metrics(pred_voltages, gt_voltages, pred_range, metadata)
+    metrics = compute_metrics(pred_node_labels, gt_node_labels, threshold, pred_range, metadata)
     print_results(metrics, N, args.start_t, pred_range)
 
 

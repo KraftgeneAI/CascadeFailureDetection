@@ -157,6 +157,12 @@ class GridStateForecaster(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(self.fused_dim // 2, N_EQUIP_VAR),
         )
+        self.label_decoder = nn.Sequential(
+            nn.Linear(self.fused_dim, self.fused_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(self.fused_dim // 2, 1),
+        )  # outputs raw logits — Sigmoid applied externally
 
     # ------------------------------------------------------------------
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
@@ -252,25 +258,32 @@ class GridStateForecaster(nn.Module):
             h = layer_norm(h + gnn_layer(h, batch['edge_index'], edge_embedded, edge_mask=final_mask))
 
         # --- Decode next-step variable features ---
+        label_logits = self.label_decoder(h).squeeze(-1)   # [B, N] raw logits
         return {
-            'next_scada_vars': self.scada_decoder(h),   # [B, N, 13]
-            'next_pmu':        self.pmu_decoder(h),     # [B, N,  8]
-            'next_equip_vars': self.equip_decoder(h),   # [B, N,  3]
+            'next_scada_vars':  self.scada_decoder(h),             # [B, N, 13]
+            'next_pmu':         self.pmu_decoder(h),               # [B, N,  8]
+            'next_equip_vars':  self.equip_decoder(h),             # [B, N,  3]
+            'node_label_logits': label_logits,                     # [B, N] for loss
+            'node_labels':      torch.sigmoid(label_logits),       # [B, N] for inference / F1
         }
 
     # ------------------------------------------------------------------
+    LABEL_LOSS_WEIGHT = 0.5
+
     def compute_loss(
         self,
         predictions: Dict[str, torch.Tensor],
         targets: Dict[str, torch.Tensor],
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
-        MSE loss on each predicted output against ground-truth next-step values.
+        MSE loss on regression outputs + transition-weighted BCE on node_labels.
 
         targets must contain:
-            next_scada_vars  [B, N, 13]
-            next_pmu         [B, N,  8]
-            next_equip_vars  [B, N,  3]
+            next_scada_vars      [B, N, 13]
+            next_pmu             [B, N,  8]
+            next_equip_vars      [B, N,  3]
+            node_labels          [B, N]
+            node_label_weights   [B, N]   — per-node BCE weights (optional)
         """
         mse = nn.functional.mse_loss
 
@@ -278,13 +291,24 @@ class GridStateForecaster(nn.Module):
         loss_pmu   = mse(predictions['next_pmu'],        targets['next_pmu'])
         loss_equip = mse(predictions['next_equip_vars'], targets['next_equip_vars'])
 
-        total = loss_scada + loss_pmu + loss_equip
+        # Per-node weighted BCE
+        bce_per_node = nn.functional.binary_cross_entropy_with_logits(
+            predictions['node_label_logits'], targets['node_labels'],
+            reduction='none',
+        )   # [B, N]
+        weights = targets.get('node_label_weights')
+        if weights is not None:
+            bce_per_node = bce_per_node * weights
+        loss_labels = bce_per_node.mean()
+
+        total = loss_scada + loss_pmu + loss_equip + self.LABEL_LOSS_WEIGHT * loss_labels
 
         return total, {
-            'loss_scada': loss_scada.item(),
-            'loss_pmu':   loss_pmu.item(),
-            'loss_equip': loss_equip.item(),
-            'total':      total.item(),
+            'loss_scada':  loss_scada.item(),
+            'loss_pmu':    loss_pmu.item(),
+            'loss_equip':  loss_equip.item(),
+            'loss_labels': loss_labels.item(),
+            'total':       total.item(),
         }
 
 
@@ -296,6 +320,7 @@ def extract_next_step_targets(
     scada: torch.Tensor,
     pmu: torch.Tensor,
     equip: torch.Tensor,
+    node_labels: Optional[torch.Tensor] = None,
 ) -> Dict[str, torch.Tensor]:
     """
     Given full ground-truth tensors [B, T, N, F], return the variable
@@ -304,11 +329,14 @@ def extract_next_step_targets(
     Use during training: call with the T+1 timestep tensors while the
     model sees only timesteps 0..T-1.
     """
-    return {
+    targets = {
         'next_scada_vars': scada[:, -1, :, :][:, :, SCADA_VAR_IDX],
         'next_pmu':        pmu[:, -1, :, :],
         'next_equip_vars': equip[:, -1, :, :][:, :, EQUIP_VAR_IDX],
     }
+    if node_labels is not None:
+        targets['node_labels'] = node_labels[:, -1, :]   # [B, N]
+    return targets
 
 
 def assemble_full_scada(

@@ -176,7 +176,44 @@ class TestGridStateForecasterForward:
         batch = _make_batch()
         with torch.no_grad():
             out = model(batch)
-        assert set(out.keys()) == {'next_scada_vars', 'next_pmu', 'next_equip_vars'}
+        assert set(out.keys()) == {
+            'next_scada_vars', 'next_pmu', 'next_equip_vars',
+            'node_label_logits', 'node_labels',
+        }
+
+    def test_node_label_logits_shape(self):
+        model = _make_model()
+        batch = _make_batch()
+        with torch.no_grad():
+            out = model(batch)
+        assert out['node_label_logits'].shape == (BATCH, NODES), \
+            f"Expected ({BATCH}, {NODES}), got {out['node_label_logits'].shape}"
+
+    def test_node_labels_shape(self):
+        model = _make_model()
+        batch = _make_batch()
+        with torch.no_grad():
+            out = model(batch)
+        assert out['node_labels'].shape == (BATCH, NODES)
+
+    def test_node_labels_in_unit_range(self):
+        """node_labels = sigmoid(logits) must lie in (0, 1)."""
+        model = _make_model()
+        batch = _make_batch()
+        with torch.no_grad():
+            out = model(batch)
+        labels = out['node_labels']
+        assert torch.all(labels >= 0.0) and torch.all(labels <= 1.0), \
+            f"node_labels out of [0,1]: min={labels.min()}, max={labels.max()}"
+
+    def test_node_labels_consistent_with_logits(self):
+        """node_labels must equal sigmoid(node_label_logits)."""
+        model = _make_model()
+        batch = _make_batch()
+        with torch.no_grad():
+            out = model(batch)
+        expected = torch.sigmoid(out['node_label_logits'])
+        assert torch.allclose(out['node_labels'], expected)
 
     def test_next_scada_vars_shape(self):
         model = _make_model()
@@ -376,14 +413,16 @@ class TestGridStateForecasterComputeLoss:
     @pytest.fixture
     def predictions_and_targets(self):
         preds = {
-            'next_scada_vars': _rand(BATCH, NODES, N_SCADA_VAR),
-            'next_pmu':        _rand(BATCH, NODES, N_PMU),
-            'next_equip_vars': _rand(BATCH, NODES, N_EQUIP_VAR),
+            'next_scada_vars':  _rand(BATCH, NODES, N_SCADA_VAR),
+            'next_pmu':         _rand(BATCH, NODES, N_PMU),
+            'next_equip_vars':  _rand(BATCH, NODES, N_EQUIP_VAR),
+            'node_label_logits': _rand(BATCH, NODES),   # raw logits
         }
         tgts = {
             'next_scada_vars': _rand(BATCH, NODES, N_SCADA_VAR),
             'next_pmu':        _rand(BATCH, NODES, N_PMU),
             'next_equip_vars': _rand(BATCH, NODES, N_EQUIP_VAR),
+            'node_labels':     torch.randint(0, 2, (BATCH, NODES)).float(),
         }
         return preds, tgts
 
@@ -410,7 +449,9 @@ class TestGridStateForecasterComputeLoss:
         model = _make_model()
         preds, tgts = predictions_and_targets
         _, loss_dict = model.compute_loss(preds, tgts)
-        assert set(loss_dict.keys()) == {'loss_scada', 'loss_pmu', 'loss_equip', 'total'}
+        assert set(loss_dict.keys()) == {
+            'loss_scada', 'loss_pmu', 'loss_equip', 'loss_labels', 'total'
+        }
 
     def test_loss_dict_values_are_floats(self, predictions_and_targets):
         model = _make_model()
@@ -420,47 +461,74 @@ class TestGridStateForecasterComputeLoss:
             assert isinstance(v, float), f"loss_dict['{k}'] is not a float"
 
     def test_total_equals_sum_of_components(self, predictions_and_targets):
+        """total = loss_scada + loss_pmu + loss_equip + 0.5 * loss_labels"""
         model = _make_model()
         preds, tgts = predictions_and_targets
         total, loss_dict = model.compute_loss(preds, tgts)
-        expected = loss_dict['loss_scada'] + loss_dict['loss_pmu'] + loss_dict['loss_equip']
+        expected = (
+            loss_dict['loss_scada']
+            + loss_dict['loss_pmu']
+            + loss_dict['loss_equip']
+            + model.LABEL_LOSS_WEIGHT * loss_dict['loss_labels']
+        )
         assert total.item() == pytest.approx(expected, rel=1e-5)
 
-    def test_perfect_prediction_zero_loss(self):
-        """When predictions == targets, every component loss must be 0."""
+    def test_perfect_prediction_zero_mse_losses(self):
+        """When regression predictions == targets the three MSE components are 0.
+        (The BCE label loss can never be exactly 0 for finite logits, so it is
+        excluded from the zero-loss assertion here.)
+        """
         model = _make_model()
-        x = _rand(BATCH, NODES, N_SCADA_VAR)
+        x_s = _rand(BATCH, NODES, N_SCADA_VAR)
+        x_p = _rand(BATCH, NODES, N_PMU)
+        x_e = _rand(BATCH, NODES, N_EQUIP_VAR)
         preds = {
-            'next_scada_vars': x.clone(),
-            'next_pmu':        _rand(BATCH, NODES, N_PMU),
-            'next_equip_vars': _rand(BATCH, NODES, N_EQUIP_VAR),
+            'next_scada_vars':  x_s.clone(),
+            'next_pmu':         x_p.clone(),
+            'next_equip_vars':  x_e.clone(),
+            'node_label_logits': _rand(BATCH, NODES),
         }
         tgts = {
-            'next_scada_vars': x.clone(),
-            'next_pmu':        preds['next_pmu'].clone(),
-            'next_equip_vars': preds['next_equip_vars'].clone(),
+            'next_scada_vars': x_s.clone(),
+            'next_pmu':        x_p.clone(),
+            'next_equip_vars': x_e.clone(),
+            'node_labels':     torch.zeros(BATCH, NODES),
         }
-        total, loss_dict = model.compute_loss(preds, tgts)
-        assert total.item() == pytest.approx(0.0, abs=1e-6)
+        _, loss_dict = model.compute_loss(preds, tgts)
         assert loss_dict['loss_scada'] == pytest.approx(0.0, abs=1e-6)
         assert loss_dict['loss_pmu']   == pytest.approx(0.0, abs=1e-6)
         assert loss_dict['loss_equip'] == pytest.approx(0.0, abs=1e-6)
 
     def test_larger_error_yields_larger_loss(self):
         model = _make_model()
+        shared_logits = _rand(BATCH, NODES)
+        shared_labels = torch.zeros(BATCH, NODES)
         zero_pred = {
-            'next_scada_vars': torch.zeros(BATCH, NODES, N_SCADA_VAR),
-            'next_pmu':        torch.zeros(BATCH, NODES, N_PMU),
-            'next_equip_vars': torch.zeros(BATCH, NODES, N_EQUIP_VAR),
+            'next_scada_vars':   torch.zeros(BATCH, NODES, N_SCADA_VAR),
+            'next_pmu':          torch.zeros(BATCH, NODES, N_PMU),
+            'next_equip_vars':   torch.zeros(BATCH, NODES, N_EQUIP_VAR),
+            'node_label_logits': shared_logits,
         }
-        tgt_close = {k: v + 0.1 for k, v in zero_pred.items()}
-        tgt_far   = {k: v + 10.0 for k, v in zero_pred.items()}
+        # Only vary the MSE targets; keep label targets identical so
+        # loss_labels is the same and doesn't affect the comparison.
+        tgt_close = {
+            'next_scada_vars': torch.zeros(BATCH, NODES, N_SCADA_VAR) + 0.1,
+            'next_pmu':        torch.zeros(BATCH, NODES, N_PMU) + 0.1,
+            'next_equip_vars': torch.zeros(BATCH, NODES, N_EQUIP_VAR) + 0.1,
+            'node_labels':     shared_labels,
+        }
+        tgt_far = {
+            'next_scada_vars': torch.zeros(BATCH, NODES, N_SCADA_VAR) + 10.0,
+            'next_pmu':        torch.zeros(BATCH, NODES, N_PMU) + 10.0,
+            'next_equip_vars': torch.zeros(BATCH, NODES, N_EQUIP_VAR) + 10.0,
+            'node_labels':     shared_labels,
+        }
         loss_close, _ = model.compute_loss(zero_pred, tgt_close)
         loss_far,   _ = model.compute_loss(zero_pred, tgt_far)
         assert loss_far.item() > loss_close.item()
 
     def test_loss_is_differentiable(self):
-        """Total loss must support .backward() for training."""
+        """Total loss (MSE + BCE) must support .backward() for training."""
         model = GridStateForecaster(
             embedding_dim=EMB, num_gnn_layers=1, heads=HEADS, dropout=0.0
         ).train()
@@ -470,6 +538,7 @@ class TestGridStateForecasterComputeLoss:
             'next_scada_vars': _rand(BATCH, NODES, N_SCADA_VAR),
             'next_pmu':        _rand(BATCH, NODES, N_PMU),
             'next_equip_vars': _rand(BATCH, NODES, N_EQUIP_VAR),
+            'node_labels':     torch.randint(0, 2, (BATCH, NODES)).float(),
         }
         total, _ = model.compute_loss(out, tgts)
         total.backward()
@@ -491,9 +560,25 @@ class TestExtractNextStepTargets:
         equip = _rand(BATCH, T, NODES, EQUIP_F)
         return scada, pmu, equip
 
-    def test_output_keys(self, full_tensors):
+    def test_output_keys_without_labels(self, full_tensors):
+        """Without node_labels argument, only 3 keys are returned."""
         tgts = extract_next_step_targets(*full_tensors)
         assert set(tgts.keys()) == {'next_scada_vars', 'next_pmu', 'next_equip_vars'}
+
+    def test_output_keys_with_labels(self, full_tensors):
+        """With node_labels provided, a 4th key is added."""
+        scada, pmu, equip = full_tensors
+        node_labels = torch.randint(0, 2, (BATCH, T, NODES)).float()
+        tgts = extract_next_step_targets(scada, pmu, equip, node_labels=node_labels)
+        assert set(tgts.keys()) == {'next_scada_vars', 'next_pmu', 'next_equip_vars', 'node_labels'}
+
+    def test_node_labels_extracts_last_timestep(self, full_tensors):
+        """node_labels target must be the last timestep slice [:, -1, :]."""
+        scada, pmu, equip = full_tensors
+        node_labels = torch.randint(0, 2, (BATCH, T, NODES)).float()
+        tgts = extract_next_step_targets(scada, pmu, equip, node_labels=node_labels)
+        assert tgts['node_labels'].shape == (BATCH, NODES)
+        assert torch.allclose(tgts['node_labels'], node_labels[:, -1, :])
 
     def test_scada_var_shape(self, full_tensors):
         tgts = extract_next_step_targets(*full_tensors)
