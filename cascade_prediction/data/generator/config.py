@@ -378,6 +378,7 @@ class LossConfig:
     LAMBDA_VOLTAGE      = 0.3
     LAMBDA_CAPACITY     = 0.05
     LAMBDA_PARENT       = 0.3   # Weight for causal parent prediction loss (reduced from 0.5)
+    PARENT_NON_TRIGGER_WEIGHT = 5.0  # Cross-entropy class weight for actual-parent labels (vs trigger=1.0)
 
     # Focal loss parameters
     FOCAL_ALPHA         = 0.85          # PhysicsInformedLoss default

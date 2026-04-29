@@ -85,10 +85,15 @@ class TestCollation:
         assert collated['scada_data'].shape[0] == 2
     
     def test_collate_variable_length_sequences(self):
-        """Test collating sequences of different lengths."""
+        """Test collating sequences of different lengths.
+
+        The collator truncates all temporal keys to the *minimum* sequence
+        length in the batch (global_min_len = 5 here).  Sequence-length
+        values are stored separately and are NOT truncated.
+        """
         num_nodes = 30
         num_edges = 50
-        
+
         item1 = {
             'scada_data': torch.randn(5, num_nodes, 12),
             'edge_index': torch.randint(0, num_nodes, (2, num_edges)),
@@ -99,7 +104,7 @@ class TestCollation:
             'sequence_length': 5,
             'graph_properties': {}
         }
-        
+
         item2 = {
             'scada_data': torch.randn(10, num_nodes, 12),
             'edge_index': torch.randint(0, num_nodes, (2, num_edges)),
@@ -110,15 +115,15 @@ class TestCollation:
             'sequence_length': 10,
             'graph_properties': {}
         }
-        
+
         batch = [item1, item2]
         collated = collate_cascade_batch(batch)
-        
-        # Should pad to max length (10)
-        assert collated['scada_data'].shape[1] == 10
-        assert collated['temporal_sequence'].shape[1] == 10
-        
-        # Check sequence lengths preserved
+
+        # Collator truncates to the minimum length (5), not pad to max
+        assert collated['scada_data'].shape[1] == 5
+        assert collated['temporal_sequence'].shape[1] == 5
+
+        # sequence_length values are stored verbatim (not truncated)
         assert collated['sequence_length'][0] == 5
         assert collated['sequence_length'][1] == 10
     
@@ -211,33 +216,39 @@ class TestCollation:
         assert collated['satellite_data'].dim() == 6  # [B, T, N, C, H, W]
         assert collated['visual_data'].dim() == 6
     
-    def test_collate_edge_mask_padding(self):
-        """Test edge mask padding for variable lengths."""
+    def test_collate_edge_mask_truncation(self):
+        """Test edge mask handling for variable lengths.
+
+        The collator truncates all temporal tensors to the minimum T in the
+        batch.  With item1 at T=5 and item2 at T=10, both are truncated to
+        T=5.  No zero-padding occurs; the caller should rely on
+        sequence_length to know which timesteps are valid.
+        """
         num_nodes = 30
         num_edges = 50
-        
+
         item1 = {
             'edge_index': torch.randint(0, num_nodes, (2, num_edges)),
             'edge_mask': torch.ones(5, num_edges),
             'node_failure_labels': torch.zeros(num_nodes),
             'graph_properties': {}
         }
-        
+
         item2 = {
             'edge_index': torch.randint(0, num_nodes, (2, num_edges)),
             'edge_mask': torch.ones(10, num_edges),
             'node_failure_labels': torch.zeros(num_nodes),
             'graph_properties': {}
         }
-        
+
         batch = [item1, item2]
         collated = collate_cascade_batch(batch)
-        
-        # Should pad to max length
-        assert collated['edge_mask'].shape[1] == 10
-        
-        # Padded values should be zero
-        assert torch.all(collated['edge_mask'][0, 5:] == 0)
+
+        # Both items truncated to min length (5)
+        assert collated['edge_mask'].shape[1] == 5
+
+        # All retained timesteps should be ones (no padding zeros injected)
+        assert torch.all(collated['edge_mask'] == 1)
     
     def test_collate_missing_keys(self):
         """Test collating when some items have missing keys."""

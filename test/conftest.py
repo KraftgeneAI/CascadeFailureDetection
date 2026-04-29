@@ -87,7 +87,7 @@ def mock_timestep_data():
     num_edges = 50
     
     return {
-        'scada_data': np.random.randn(num_nodes, 14).astype(np.float32),
+        'scada_data': np.random.randn(num_nodes, 18).astype(np.float32),
         'pmu_sequence': np.random.randn(num_nodes, 8).astype(np.float32),
         'weather_sequence': np.random.randn(num_nodes, 10, 8).astype(np.float32),
         'satellite_data': np.random.randn(num_nodes, 12, 16, 16).astype(np.float16),

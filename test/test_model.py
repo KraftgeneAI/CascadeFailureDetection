@@ -431,9 +431,11 @@ class TestUnifiedModel:
         for _ in range(10):
             batch = make_full_batch()
 
-            # Build minimal targets matching PhysicsInformedLoss expectations
+            # Build minimal targets matching PhysicsInformedLoss expectations.
+            # The trainer renames 'node_failure_labels' → 'failure_label' before
+            # calling compute_loss, so physics_informed.py expects 'failure_label'.
             targets = {
-                'node_failure_labels': (torch.rand(B, N) > 0.8).float(),
+                'failure_label':       (torch.rand(B, N) > 0.8).float(),
                 'cascade_timing':      torch.rand(B, N),
                 'voltages':            torch.rand(B, N),
                 'angles':              torch.rand(B, N),

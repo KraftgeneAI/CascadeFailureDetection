@@ -84,7 +84,6 @@ class CascadePredictor:
         pred_timing_minutes = pred_timing_normed * original_seq_len * DT_MINUTES
 
         final_risk_scores = outputs["risk_scores"][0].mean(dim=0).cpu().numpy().tolist()
-        final_sys_state = {}
 
         max_probs = {n: float(probs[n]) for n in range(len(probs))}
         risky_nodes = [n for n, p in max_probs.items() if p > self.node_threshold]
@@ -109,8 +108,17 @@ class CascadePredictor:
         parent_logits_tensor = outputs["parent_logits"].squeeze(0).cpu()  # [N, N+1]
         num_nodes = parent_logits_tensor.shape[0]
         predicted_parents = parent_logits_tensor.argmax(dim=-1).tolist()  # list[int], len=N
+
+        # Actual parent labels from the dataset: [N] long
+        # Values: -1 = did not fail, N = trigger node, j = node j caused this node
+        actual_parent_labels = (
+            batch_dev["parent_labels"][0].cpu().tolist()
+            if "parent_labels" in batch_dev else None
+        )
+
         cascade_sequence = self._build_causal_sequence(
-            risky_nodes, predicted_parents, pred_timing_minutes, num_nodes
+            risky_nodes, predicted_parents, pred_timing_minutes,
+            num_nodes, actual_parent_labels,
         )
 
         return {
@@ -123,7 +131,6 @@ class CascadePredictor:
             "top_nodes": ranked_nodes,
             "cascade_path": cascade_path,
             "cascade_sequence": cascade_sequence,   # causal chain with parent links
-            "system_state": final_sys_state,
         }
 
     def _build_cascade_path(self, ranked_nodes: List[Dict]) -> List[Dict]:
@@ -150,16 +157,17 @@ class CascadePredictor:
         predicted_parents: List[int],
         pred_timing_minutes: "np.ndarray",
         num_nodes: int,
+        actual_parent_labels: List[int] = None,
     ) -> List[Dict]:
         """
         Build an ordered causal sequence from predicted parents.
 
-        Each high-risk node is assigned its predicted parent (or None if it is
-        a trigger), then the sequence is sorted by predicted failure time.
+        Each high-risk node gets its predicted parent (or None for trigger),
+        plus the actual parent if ground-truth parent_labels are available.
 
         Returns list of dicts:
-          { order, node_id, parent_id, ranking_score, pred_time_minutes }
-        where parent_id is None for trigger nodes.
+          { order, node_id, pred_parent_id, actual_parent_id, pred_time_minutes }
+        where *_parent_id is None for trigger nodes (index N) or unknown (-1).
         """
         if not risky_nodes:
             return []
@@ -167,25 +175,28 @@ class CascadePredictor:
         risky_set = set(risky_nodes)
         sequence = []
         for node in risky_nodes:
-            raw_parent = predicted_parents[node]
-            # index == num_nodes  →  trigger (no parent)
-            # index not in risky_set  →  predicted parent is a non-failing node
-            #   (shouldn't happen often, but treat as trigger to be safe)
-            if raw_parent == num_nodes or raw_parent not in risky_set:
-                parent_id = None
-            else:
-                parent_id = raw_parent
+            # Predicted parent
+            raw_pred = predicted_parents[node]
+            pred_parent_id = (
+                None if raw_pred == num_nodes or raw_pred not in risky_set
+                else raw_pred
+            )
+
+            # Actual parent from ground-truth labels
+            actual_parent_id = None
+            if actual_parent_labels is not None:
+                raw_actual = actual_parent_labels[node]
+                if raw_actual >= 0 and raw_actual != num_nodes:
+                    actual_parent_id = raw_actual  # specific node caused this
 
             sequence.append({
-                "node_id": node,
-                "parent_id": parent_id,
+                "node_id":          node,
+                "pred_parent_id":   pred_parent_id,
+                "actual_parent_id": actual_parent_id,
                 "pred_time_minutes": float(pred_timing_minutes[node]),
             })
 
-        # Sort by predicted failure time
         sequence.sort(key=lambda x: x["pred_time_minutes"])
-
-        # Assign sequential order numbers
         for rank, step in enumerate(sequence, start=1):
             step["order"] = rank
 

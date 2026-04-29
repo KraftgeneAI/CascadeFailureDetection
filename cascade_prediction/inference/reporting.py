@@ -54,12 +54,6 @@ def print_report(res: Dict, cascade_thresh: float, node_thresh: float):
         print(f"  {'Spread (min)':<28} | {max_pt-min_pt:>12.2f} | {max_at-min_at:>12.2f}")
         print(f"  {'Nodes at risk':<28} | {len(pred_path):>12} | {len(act_path):>12}")
 
-    print("\n--- 4. Critical Information ---")
-    print(f"System Frequency: {res['system_state']['frequency']:.2f} Hz")
-    v_all = res["system_state"]["voltages"]
-    if v_all:
-        print(f"Voltage Range:    [{min(v_all):.3f}, {max(v_all):.3f}] p.u.")
-
     if pred and res["top_nodes"]:
         print("\nTop 5 High-Risk Nodes:")
         actual_nodes = set(gt.get("failed_nodes", []))
@@ -121,5 +115,21 @@ def print_report(res: Dict, cascade_thresh: float, node_thresh: float):
             caught_pct = f"{caught_so_far / actual_seen * 100:.0f}%"
 
         print(f"  {p_seq:<5} | {p_node:<10} | {p_score:>6} | {p_time:>9} | {a_seq:<8} | {a_node:<10} | {a_time:>8} | {caught_pct:>8}")
+
+    print("\n--- 6. Causal Parent Analysis ---")
+    causal_seq = res.get("cascade_sequence", [])
+    if causal_seq:
+        def fmt_parent(pid):
+            return f"Node {pid}" if pid is not None else "Trigger"
+
+        print(f"  {'#':<4} | {'Node':<8} | {'Pred Parent':<14} | {'Actual Parent':<14} | Match")
+        print(f"  {'-'*4}-+-{'-'*8}-+-{'-'*14}-+-{'-'*14}-+------")
+        for step in causal_seq:
+            pred_p   = fmt_parent(step.get("pred_parent_id"))
+            actual_p = fmt_parent(step.get("actual_parent_id"))
+            match    = "✓" if step.get("pred_parent_id") == step.get("actual_parent_id") else "✗"
+            print(f"  {step['order']:<4} | Node {step['node_id']:<3} | {pred_p:<14} | {actual_p:<14} | {match}")
+    else:
+        print("  No failing nodes predicted.")
 
     print("=" * 80 + "\n")

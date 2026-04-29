@@ -146,55 +146,22 @@ class Trainer:
     def _prepare_targets(self, batch_device: Dict) -> Dict[str, torch.Tensor]:
         """
         Prepare targets dictionary from batch data.
-        
-        Args:
-            batch_device: Batch data dictionary on device
-        
-        Returns:
-            Dictionary of target tensors for loss calculation
-        """
-        # Extract features from the last valid timestep of each sequence
-        # scada_data shape: [B, T, N, F]
-        # sequence_length shape: [B]
-        
-        if 'scada_data' in batch_device and 'sequence_length' in batch_device:
-            B = batch_device['scada_data'].shape[0]
-            N = batch_device['scada_data'].shape[2]
-            
-            # Get the indices of the last valid timesteps (0-based indexing).
-            # Clamp to actual T after truncation — sequence_length may exceed the
-            # collated T when the batch was truncated to global_min_len.
-            T = batch_device['scada_data'].shape[1]
-            last_step_indices = (batch_device['sequence_length'] - 1).clamp(0, T - 1)  # [B]
-            
-            # Create batch indices for advanced indexing
-            batch_indices = torch.arange(B, device=last_step_indices.device)  # [B]
-            
-            # Extract voltages and reactive power from last valid timestep
-            # Use advanced indexing: [batch_indices, last_step_indices, :, feature_idx]
-            voltages = batch_device['scada_data'][batch_indices, last_step_indices, :, 0:1]  # [B, N, 1]
-            node_reactive_power = batch_device['scada_data'][batch_indices, last_step_indices, :, 3:4]  # [B, N, 1]
-            # SCADA col 6 = system frequency (Hz), same value across nodes — take mean.
-            # Shape: [B, N] → mean over nodes → [B] → [B, 1, 1] to match FrequencyHead output.
-            freq_raw = batch_device['scada_data'][batch_indices, last_step_indices, :, 6]  # [B, N]
-            ground_truth_frequency = freq_raw.mean(dim=1).view(-1, 1, 1)  # [B, 1, 1]
-        else:
-            voltages = None
-            node_reactive_power = None
-            ground_truth_frequency = None
 
-        targets = {
-            'failure_label': batch_device['node_failure_labels'],
+        Aligned with UnifiedCascadePredictionModel.forward() which outputs:
+            failure_probability  [B, N, 1]  → needs failure_label    [B, N]
+            cascade_timing       [B, N, 1]  → needs cascade_timing    [B, N]
+            risk_scores          [B, N, 7]  → needs ground_truth_risk [B, N, 7]
+            parent_logits        [B, N, N+1]→ needs parent_labels     [B, N]
+
+        Physics auxiliary heads (voltage, reactive, line_flows, frequency,
+        temperature) were removed from the model, so their targets are omitted.
+        """
+        return {
+            'failure_label':    batch_device['node_failure_labels'],
             'ground_truth_risk': batch_device.get('ground_truth_risk'),
-            'cascade_timing': batch_device.get('cascade_timing'),
-            'parent_labels': batch_device.get('parent_labels'),
-            'voltages': voltages,
-            'node_reactive_power': node_reactive_power,
-            'line_reactive_power': batch_device['edge_attr'][:, -1, :, 6:7] if 'edge_attr' in batch_device else None,
-            'active_power_line_flows': batch_device['edge_attr'][:, -1, :, 5:6] if 'edge_attr' in batch_device else None,
-            'ground_truth_frequency': ground_truth_frequency,
+            'cascade_timing':   batch_device.get('cascade_timing'),
+            'parent_labels':    batch_device.get('parent_labels'),
         }
-        return targets
     
     def _validate_model_outputs(self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]):
         """Validate that model outputs match expected format."""
@@ -969,14 +936,14 @@ class Trainer:
         axes[2, 0].set_title('7-D Risk Score MSE')
         axes[2, 0].legend()
         axes[2, 0].grid(True, alpha=0.3)
-        
+
         axes[2, 1].plot(epochs, self.history['learning_rate'], 'g-', label='Learning Rate', linewidth=2)
         axes[2, 1].set_xlabel('Epoch')
         axes[2, 1].set_ylabel('LR')
         axes[2, 1].set_title('Learning Rate Schedule')
         axes[2, 1].legend()
         axes[2, 1].grid(True, alpha=0.3)
-        
+
         axes[2, 2].plot(epochs, self.history['train_cascade_acc'], 'b-', label='Train Cascade', linewidth=2)
         axes[2, 2].plot(epochs, self.history['val_cascade_acc'], 'r-', label='Val Cascade', linewidth=2)
         axes[2, 2].plot(epochs, self.history['train_node_acc'], 'b--', label='Train Node', linewidth=2, alpha=0.6)
@@ -986,11 +953,11 @@ class Trainer:
         axes[2, 2].set_title('Accuracy Comparison')
         axes[2, 2].legend()
         axes[2, 2].grid(True, alpha=0.3)
-        
+
         plt.tight_layout()
-        
+
         plot_path = f"{self.output_dir}/training_curves.png"
         plt.savefig(plot_path, dpi=150, bbox_inches='tight')
         plt.close()
-        
+
         print(f"✓ Training curves saved to {plot_path}")
