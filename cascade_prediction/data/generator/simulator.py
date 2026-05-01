@@ -272,6 +272,7 @@ class PhysicsBasedGridSimulator:
             * np.random.rand()
         )
 
+        self.env_gen.update_fire_location()
         # Generate time series — failures emerge dynamically from physics
         scenario_data = self._generate_time_series(
             stress_level, sequence_length, ambient_temp_base
@@ -457,7 +458,8 @@ class PhysicsBasedGridSimulator:
 
             # Environmental + robotic data
             sat_data, weather_seq, threat_ind = self.env_gen.generate_correlated_environmental_data(
-                list(cumulative_failed_nodes), failed_lines_t, t, cascade_start_time, current_stress, sequence_length
+                list(cumulative_failed_nodes), failed_lines_t, t, cascade_start_time, current_stress, sequence_length, 
+                stress_level > Settings.Scenario.CASCADE_STRESS_MIN
             )
 
             vis_data, thermal_data, sensor_data = self.robot_gen.generate_correlated_robotic_data(
@@ -465,7 +467,6 @@ class PhysicsBasedGridSimulator:
             )
 
             # Compute fire stress with spatial decay + amplification
-            fire_x, fire_y = self.env_gen.fire_location
             fire_stress = threat_ind[:,0]
 
             node_line_loading = load_values / (self.base_load + 1e-6)

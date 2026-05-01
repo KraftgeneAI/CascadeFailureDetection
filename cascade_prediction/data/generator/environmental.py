@@ -68,13 +68,8 @@ class EnvironmentalDataGenerator:
         self.edge_index = edge_index
 
         self.video_signal = None
-        x_min, y_min = self.positions.min(axis=0)
-        x_max, y_max = self.positions.max(axis=0)
 
-        self.fire_location = np.array([
-            np.random.uniform(x_min, x_max),
-            np.random.uniform(y_min, y_max)
-        ])
+        self.update_fire_location()
         if video_path is not None:
             self.load_video(video_path)
 
@@ -82,6 +77,11 @@ class EnvironmentalDataGenerator:
         from video_processor import extract_threat_curve
         self.video_signal = extract_threat_curve(video_path)
     
+    def update_fire_location(self):
+        fire_node_index = np.random.randint(0,len(self.positions))
+
+        self.fire_location = self.positions[fire_node_index]
+
     def generate_satellite_imagery(
         self,
         failed_nodes: List[int],
@@ -264,7 +264,8 @@ class EnvironmentalDataGenerator:
         cascade_start: int,
         stress_level: float,
         sequence_length: int,
-        precursor_duration: int = 15
+        precursor_duration: int = 15,
+        is_cascade: bool = False
     ) -> np.ndarray:
         """
         Generate threat indicators for various hazard types.
@@ -299,7 +300,7 @@ class EnvironmentalDataGenerator:
         threat_indicators = np.zeros((self.num_nodes, 6), dtype=np.float16)
 
         # override fire threat using video signal
-        if self.video_signal is not None:
+        if self.video_signal is not None and is_cascade:
             t = (int)(timestep / sequence_length * len(self.video_signal))
             base_fire = float(self.video_signal[t])
 
@@ -324,7 +325,8 @@ class EnvironmentalDataGenerator:
         timestep: int,
         cascade_start: int,
         stress_level: float,
-        sequence_length: int
+        sequence_length: int,
+        is_cascade: bool = False
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Generate all environmental data in one call.
@@ -370,7 +372,8 @@ class EnvironmentalDataGenerator:
         )
         
         threat_indicators = self.generate_threat_indicators(
-            failed_nodes, failed_lines, timestep, cascade_start, stress_level,sequence_length, precursor_duration 
+            failed_nodes, failed_lines, timestep, cascade_start, stress_level,sequence_length, precursor_duration,
+            is_cascade 
         )
         
         return satellite_data, weather_sequence, threat_indicators
