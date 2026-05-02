@@ -482,7 +482,7 @@ class PhysicsBasedGridSimulator:
             # Environmental + robotic data
             sat_data, weather_seq, threat_ind = self.env_gen.generate_correlated_environmental_data(
                 list(cumulative_failed_nodes), failed_lines_t, t, cascade_start_time, current_stress, sequence_length, 
-                stress_level > Settings.Scenario.CASCADE_STRESS_MIN,scenario_precursor_duration
+                scenario_precursor_duration,stress_level > Settings.Scenario.CASCADE_STRESS_MIN
             )
 
             vis_data, thermal_data, sensor_data = self.robot_gen.generate_correlated_robotic_data(

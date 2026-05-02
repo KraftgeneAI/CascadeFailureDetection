@@ -494,17 +494,18 @@ class TestEnvironmentalDataGenerator:
         stress_level = 0.9
         
         threats = env_gen.generate_threat_indicators(
-            failed_nodes, failed_lines, timestep, cascade_start, stress_level
+            failed_nodes, failed_lines, timestep, cascade_start, stress_level,
+            sequence_length=30,
         )
-        
+
         # Should be (num_nodes, 6)
         assert threats.shape == (30, 6)
         assert threats.dtype == np.float16
-        
+
         # Should be in [0, 1] range
         assert np.all(threats >= 0)
         assert np.all(threats <= 1)
-    
+
     def test_correlated_environmental_data(self, env_gen):
         """Test complete environmental data generation."""
         failed_nodes = [0]
@@ -512,9 +513,10 @@ class TestEnvironmentalDataGenerator:
         timestep = 10
         cascade_start = 5
         stress_level = 0.8
-        
+
         sat_data, weather, threats = env_gen.generate_correlated_environmental_data(
-            failed_nodes, failed_lines, timestep, cascade_start, stress_level
+            failed_nodes, failed_lines, timestep, cascade_start, stress_level,
+            sequence_length=30,
         )
         
         assert sat_data.shape == (30, 12, 16, 16)
