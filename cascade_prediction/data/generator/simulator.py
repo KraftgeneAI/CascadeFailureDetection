@@ -232,6 +232,8 @@ class PhysicsBasedGridSimulator:
             self.frequency_failure_threshold, self.frequency_damage_threshold
         )
         
+        self.video_path = video_path
+
         # Initialize environmental and robotic generators
         print(f"Initializing environmental and robotic generators...")
         self.env_gen = EnvironmentalDataGenerator(
@@ -330,6 +332,7 @@ class PhysicsBasedGridSimulator:
             'num_nodes': self.num_nodes,
             'num_edges': len(self.edge_index[0]),
             'base_mva': Settings.PowerSystem.SN_MVA,
+            'video_path': self.video_path,
         }
 
         return scenario_data
