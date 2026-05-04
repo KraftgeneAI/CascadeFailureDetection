@@ -1,282 +1,226 @@
 """
-Predictor Module
-===============
-Provides the CascadePredictor class for inference on cascade scenarios.
+CascadePredictor
+================
+Inference service for cascade failure prediction.
+Loads a trained UnifiedCascadePredictionModel and runs prediction
+on a single scenario using the same CascadeDataset pipeline as training.
 """
 
-import torch
-from torch.utils.data import DataLoader
 import pickle
-import glob
-from typing import Dict, List, Optional
-from pathlib import Path
-from tqdm import tqdm
+import torch
+import numpy as np
+from typing import Dict, List
 
-from ..models import UnifiedCascadePredictionModel
-from ..data import collate_cascade_batch
-from .dataset import ScenarioInferenceDataset
+from ..models.unified_model import UnifiedCascadePredictionModel
+from ..data.dataset import CascadeDataset
+from ..data.collation import collate_cascade_batch
+from ..data.generator.config import Settings
 
 
 class CascadePredictor:
-    """
-    Predictor for cascade failure scenarios.
-    
-    Loads a trained model and performs inference on test scenarios,
-    predicting failure probabilities, cascade paths, and risk assessments.
-    
-    Args:
-        model_path: Path to trained model checkpoint
-        topology_path: Path to grid topology file
-        device: Device to run inference on (cuda/cpu)
-        base_mva: Base MVA for power normalization
-        base_freq: Base frequency for normalization
-    """
-    
     def __init__(
         self,
         model_path: str,
-        topology_path: str,
-        device: torch.device,
-        base_mva: float = 100.0,
-        base_freq: float = 60.0
+        topology_path: str = None,
+        device: torch.device = None,
+        base_mva: float = Settings.Dataset.BASE_MVA,
+        base_freq: float = Settings.Dataset.BASE_FREQUENCY,
     ):
-        self.device = device
+        self.device = device or torch.device("cpu")
         self.base_mva = base_mva
         self.base_freq = base_freq
-        
-        # Load topology
-        with open(topology_path, 'rb') as f:
-            topology = pickle.load(f)
-            self.edge_index = topology['edge_index']
-        
-        # Load model
+
         print(f"Loading model from {model_path}...")
-        checkpoint = torch.load(model_path, map_location=device)
-        
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
         self.model = UnifiedCascadePredictionModel(
-            embedding_dim=128,
-            hidden_dim=128,
-            num_gnn_layers=3,
-            heads=4,
-            dropout=0.1
+            embedding_dim=Settings.Model.EMBEDDING_DIM,
+            hidden_dim=Settings.Model.HIDDEN_DIM,
+            num_gnn_layers=Settings.Model.NUM_GNN_LAYERS,
+            heads=Settings.Model.HEADS,
+            dropout=Settings.Model.GAT_DROPOUT,
         )
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.model.to(device)
+        self.model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        self.model.to(self.device)
         self.model.eval()
-        
-        # Load thresholds
-        self.cascade_threshold = checkpoint.get('cascade_threshold', 0.1)
-        self.node_threshold = checkpoint.get('node_threshold', 0.35)
-        
-        print(f"✓ Model loaded. Thresholds: Cascade={self.cascade_threshold:.2f}, "
-              f"Node={self.node_threshold:.2f}")
-    
+
+        self.cascade_threshold = checkpoint.get("cascade_threshold", Settings.Training.CASCADE_THRESHOLD)
+        self.node_threshold = checkpoint.get("node_threshold", Settings.Training.NODE_THRESHOLD)
+        print(f"✓ Model loaded. Thresholds: Cascade={self.cascade_threshold:.2f}, Node={self.node_threshold:.2f}")
+
     def predict_scenario(
         self,
         data_path: str,
         scenario_idx: int,
-        window_size: int = 30,
-        batch_size: int = 32
+        window_size: int = Settings.Simulation.DEFAULT_SEQUENCE_LENGTH,
+        batch_size: int = Settings.Training.BATCH_SIZE,
     ) -> Dict:
-        """
-        Predict cascade failure for a specific scenario.
-        
-        Args:
-            data_path: Path to directory containing scenario files
-            scenario_idx: Index of scenario to predict
-            window_size: Sliding window size for inference
-            batch_size: Batch size for inference
-            
-        Returns:
-            Dictionary containing prediction results
-        """
-        # Load scenario
-        scenario = self._load_scenario(data_path, scenario_idx)
-        
-        # Create dataset and dataloader
-        dataset = ScenarioInferenceDataset(
-            scenario, 
-            window_size,
+        dataset = CascadeDataset(
+            data_path,
+            mode="full_sequence",
             base_mva=self.base_mva,
-            base_frequency=self.base_freq
+            base_frequency=self.base_freq,
         )
-        loader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            collate_fn=collate_cascade_batch,
-            shuffle=False
-        )
-        
-        print(f"Running inference on {len(dataset)} steps...")
-        
-        # Run inference
-        predictions = self._run_inference(loader)
-        
-        # Analyze results
-        results = self._analyze_predictions(predictions, scenario)
-        
-        return results
-    
-    def _load_scenario(self, data_path: str, scenario_idx: int) -> Dict:
-        """Load a scenario from disk."""
-        files = sorted(glob.glob(f"{data_path}/scenario_*.pkl"))
-        if not files:
-            files = sorted(glob.glob(f"{data_path}/scenarios_batch_*.pkl"))
-        
-        if not files:
-            raise FileNotFoundError(f"No scenario files found in {data_path}")
-        
-        target_file = files[scenario_idx]
-        print(f"Loading: {target_file}")
-        
-        with open(target_file, 'rb') as f:
-            data = pickle.load(f)
-        
-        scenario = data[0] if isinstance(data, list) else data
-        scenario['edge_index'] = self.edge_index
-        
-        return scenario
-    
-    def _run_inference(self, loader: DataLoader) -> Dict:
-        """Run inference on all timesteps."""
-        max_probs = {}
-        first_time = {}
-        final_risk_scores = None
-        final_sys_state = None
-        
-        current_t = 0
-        
+
+        print(f"Running inference on scenario {scenario_idx} / {len(dataset) - 1}...")
+        item = dataset[scenario_idx]
+        if not item:
+            raise ValueError(f"Scenario {scenario_idx} could not be loaded from {data_path}")
+
+        original_seq_len = int(item.get("original_sequence_length", Settings.Simulation.DEFAULT_SEQUENCE_LENGTH))
+
+        batch = collate_cascade_batch([item])
+        batch_dev = {
+            k: (v.to(self.device) if isinstance(v, torch.Tensor) else v)
+            for k, v in batch.items()
+        }
+
         with torch.no_grad():
-            for i, batch in enumerate(tqdm(loader)):
-                # Move batch to device
-                batch_dev = {
-                    k: v.to(self.device) if isinstance(v, torch.Tensor) else v
-                    for k, v in batch.items()
+            outputs = self.model(batch_dev)
+
+        probs = outputs["failure_probability"].squeeze(-1).squeeze(0).sigmoid().cpu().numpy()  # [N]
+
+        DT_MINUTES = Settings.Thermal.DT_MINUTES
+        pred_timing_normed = outputs["cascade_timing"].squeeze(-1).squeeze(0).cpu().numpy()  # [N]
+        pred_timing_minutes = pred_timing_normed * original_seq_len * DT_MINUTES
+
+        final_risk_scores = outputs["risk_scores"][0].mean(dim=0).cpu().numpy().tolist()
+
+        max_probs = {n: float(probs[n]) for n in range(len(probs))}
+        risky_nodes = [n for n, p in max_probs.items() if p > self.node_threshold]
+
+        ranked_nodes = sorted(
+            [
+                {
+                    "node_id": n,
+                    "score": max_probs[n],
+                    "pred_time_minutes": float(pred_timing_minutes[n]),
                 }
-                
-                # Forward pass
-                outputs = self.model(batch_dev)
-                
-                # Extract failure probabilities
-                probs = outputs['failure_probability'].squeeze(-1).cpu().numpy()
-                if len(probs.shape) == 1:
-                    probs = probs.reshape(1, -1)
-                
-                # Track maximum probabilities and first occurrence times
-                for b in range(probs.shape[0]):
-                    t = current_t + 1
-                    step_probs = probs[b]
-                    
-                    for n, p in enumerate(step_probs):
-                        p = float(p)
-                        if n not in max_probs or p > max_probs[n]:
-                            max_probs[n] = p
-                            first_time[n] = t
-                    
-                    current_t += 1
-                
-                # Save final outputs
-                if i == len(loader) - 1:
-                    final_risk_scores = outputs['risk_scores'][-1].mean(dim=0).cpu().numpy().tolist()
-                    final_sys_state = {
-                        'frequency': float(outputs['frequency'].mean().item()),
-                        'voltages': outputs['voltages'][-1].reshape(-1).cpu().numpy().tolist()
-                    }
-        
+                for n in risky_nodes
+            ],
+            key=lambda x: x["pred_time_minutes"],
+        )
+
+        cascade_path = self._build_cascade_path(ranked_nodes)
+        ground_truth = self._load_ground_truth(dataset, scenario_idx)
+
+        # ── Causal parent decoding ────────────────────────────────────────────
+        # parent_logits: [B, N, N+1]  (index N = "trigger / no parent")
+        parent_logits_tensor = outputs["parent_logits"].squeeze(0).cpu()  # [N, N+1]
+        num_nodes = parent_logits_tensor.shape[0]
+        predicted_parents = parent_logits_tensor.argmax(dim=-1).tolist()  # list[int], len=N
+
+        # Actual parent labels from the dataset: [N] long
+        # Values: -1 = did not fail, N = trigger node, j = node j caused this node
+        actual_parent_labels = (
+            batch_dev["parent_labels"][0].cpu().tolist()
+            if "parent_labels" in batch_dev else None
+        )
+
+        cascade_sequence = self._build_causal_sequence(
+            risky_nodes, predicted_parents, pred_timing_minutes,
+            num_nodes, actual_parent_labels,
+        )
+
         return {
-            'max_probs': max_probs,
-            'first_time': first_time,
-            'risk_scores': final_risk_scores,
-            'system_state': final_sys_state
+            "inference_time": 0.0,
+            "cascade_detected": bool(risky_nodes),
+            "cascade_probability": ranked_nodes[0]["score"] if ranked_nodes else 0.0,
+            "ground_truth": ground_truth,
+            "high_risk_nodes": risky_nodes,
+            "risk_assessment": final_risk_scores,
+            "top_nodes": ranked_nodes,
+            "cascade_path": cascade_path,
+            "cascade_sequence": cascade_sequence,   # causal chain with parent links
         }
-    
-    def _analyze_predictions(self, predictions: Dict, scenario: Dict) -> Dict:
-        """Analyze predictions and format results."""
-        max_probs = predictions['max_probs']
-        first_time = predictions['first_time']
-        
-        # Identify risky nodes
-        risky_nodes = [
-            n for n, p in max_probs.items() 
-            if p > self.node_threshold
-        ]
-        
-        # Rank nodes by score
-        ranked_nodes = []
-        for n in risky_nodes:
-            ranked_nodes.append({
-                'node_id': n,
-                'score': max_probs[n],
-                'peak_time': first_time[n]
-            })
-        
-        ranked_nodes.sort(key=lambda x: -x['score'])
-        
-        # Generate cascade path with ranking
-        cascade_path = self._generate_cascade_path(ranked_nodes)
-        
-        # Extract ground truth
-        ground_truth = self._extract_ground_truth(scenario)
-        
-        # Format results
-        results = {
-            'inference_time': 0.0,
-            'cascade_detected': bool(ranked_nodes),
-            'cascade_probability': ranked_nodes[0]['score'] if ranked_nodes else 0.0,
-            'ground_truth': ground_truth,
-            'high_risk_nodes': risky_nodes,
-            'risk_assessment': predictions['risk_scores'] if predictions['risk_scores'] else [0.0] * 7,
-            'top_nodes': ranked_nodes,
-            'cascade_path': cascade_path,
-            'system_state': predictions['system_state'] if predictions['system_state'] else {
-                'frequency': 0.0,
-                'voltages': []
-            }
-        }
-        
-        return results
-    
-    def _generate_cascade_path(self, ranked_nodes: List[Dict]) -> List[Dict]:
-        """Generate cascade path with ranking order."""
+
+    def _build_cascade_path(self, ranked_nodes: List[Dict]) -> List[Dict]:
         cascade_path = []
-        
         if not ranked_nodes:
             return cascade_path
-        
         current_rank = 1
-        last_score = ranked_nodes[0]['score']
-        
+        last_time = ranked_nodes[0]["pred_time_minutes"]
         for node in ranked_nodes:
-            # Increment rank if score difference is significant
-            if (last_score - node['score']) > 0.002:
+            if node["pred_time_minutes"] > last_time + 0.5:
                 current_rank += 1
-                last_score = node['score']
-            
+                last_time = node["pred_time_minutes"]
             cascade_path.append({
-                'order': current_rank,
-                'node_id': node['node_id'],
-                'ranking_score': node['score']
+                "order": current_rank,
+                "node_id": node["node_id"],
+                "ranking_score": node["score"],
+                "pred_time_minutes": node["pred_time_minutes"],
             })
-        
         return cascade_path
-    
-    def _extract_ground_truth(self, scenario: Dict) -> Dict:
-        """Extract ground truth information from scenario."""
-        meta = scenario.get('metadata', {})
-        
+
+    def _build_causal_sequence(
+        self,
+        risky_nodes: List[int],
+        predicted_parents: List[int],
+        pred_timing_minutes: "np.ndarray",
+        num_nodes: int,
+        actual_parent_labels: List[int] = None,
+    ) -> List[Dict]:
+        """
+        Build an ordered causal sequence from predicted parents.
+
+        Each high-risk node gets its predicted parent (or None for trigger),
+        plus the actual parent if ground-truth parent_labels are available.
+
+        Returns list of dicts:
+          { order, node_id, pred_parent_id, actual_parent_id, pred_time_minutes }
+        where *_parent_id is None for trigger nodes (index N) or unknown (-1).
+        """
+        if not risky_nodes:
+            return []
+
+        risky_set = set(risky_nodes)
+        sequence = []
+        for node in risky_nodes:
+            # Predicted parent
+            raw_pred = predicted_parents[node]
+            pred_parent_id = (
+                None if raw_pred == num_nodes or raw_pred not in risky_set
+                else raw_pred
+            )
+
+            # Actual parent from ground-truth labels
+            actual_parent_id = None
+            if actual_parent_labels is not None:
+                raw_actual = actual_parent_labels[node]
+                if raw_actual >= 0 and raw_actual != num_nodes:
+                    actual_parent_id = raw_actual  # specific node caused this
+
+            sequence.append({
+                "node_id":          node,
+                "pred_parent_id":   pred_parent_id,
+                "actual_parent_id": actual_parent_id,
+                "pred_time_minutes": float(pred_timing_minutes[node]),
+            })
+
+        sequence.sort(key=lambda x: x["pred_time_minutes"])
+        for rank, step in enumerate(sequence, start=1):
+            step["order"] = rank
+
+        return sequence
+
+    def _load_ground_truth(self, dataset: CascadeDataset, scenario_idx: int) -> Dict:
+        with open(dataset.scenario_files[scenario_idx], "rb") as f:
+            raw = pickle.load(f)
+        meta = (raw[0] if isinstance(raw, list) else raw).get("metadata", {})
+
+        GT_DT = Settings.Thermal.DT_MINUTES
         gt_path = []
-        if 'failed_nodes' in meta and 'failure_times' in meta:
-            gt_path = sorted([
-                {
-                    'node_id': int(n),
-                    'time_minutes': float(t)
-                }
-                for n, t in zip(meta['failed_nodes'], meta['failure_times'])
-            ], key=lambda x: x['time_minutes'])
-        
+        if "failed_nodes" in meta and "failure_times" in meta:
+            gt_path = sorted(
+                [
+                    {"node_id": int(n), "time_minutes": float(t) * GT_DT}
+                    for n, t in zip(meta["failed_nodes"], meta["failure_times"])
+                ],
+                key=lambda x: x["time_minutes"],
+            )
+
         return {
-            'is_cascade': meta.get('is_cascade'),
-            'failed_nodes': meta.get('failed_nodes', []),
-            'cascade_path': gt_path,
-            'ground_truth_risk': meta.get('ground_truth_risk', [])
+            "is_cascade": meta.get("is_cascade"),
+            "failed_nodes": meta.get("failed_nodes", []),
+            "cascade_path": gt_path,
+            "ground_truth_risk": meta.get("ground_truth_risk", []),
         }

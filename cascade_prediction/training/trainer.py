@@ -146,48 +146,22 @@ class Trainer:
     def _prepare_targets(self, batch_device: Dict) -> Dict[str, torch.Tensor]:
         """
         Prepare targets dictionary from batch data.
-        
-        Args:
-            batch_device: Batch data dictionary on device
-        
-        Returns:
-            Dictionary of target tensors for loss calculation
+
+        Aligned with UnifiedCascadePredictionModel.forward() which outputs:
+            failure_probability  [B, N, 1]  → needs failure_label    [B, N]
+            cascade_timing       [B, N, 1]  → needs cascade_timing    [B, N]
+            risk_scores          [B, N, 7]  → needs ground_truth_risk [B, N, 7]
+            parent_logits        [B, N, N+1]→ needs parent_labels     [B, N]
+
+        Physics auxiliary heads (voltage, reactive, line_flows, frequency,
+        temperature) were removed from the model, so their targets are omitted.
         """
-        # Extract features from the last valid timestep of each sequence
-        # scada_data shape: [B, T, N, F]
-        # sequence_length shape: [B]
-        
-        if 'scada_data' in batch_device and 'sequence_length' in batch_device:
-            B = batch_device['scada_data'].shape[0]
-            N = batch_device['scada_data'].shape[2]
-            
-            # Get the indices of the last valid timesteps (0-based indexing).
-            # Clamp to actual T after truncation — sequence_length may exceed the
-            # collated T when the batch was truncated to global_min_len.
-            T = batch_device['scada_data'].shape[1]
-            last_step_indices = (batch_device['sequence_length'] - 1).clamp(0, T - 1)  # [B]
-            
-            # Create batch indices for advanced indexing
-            batch_indices = torch.arange(B, device=last_step_indices.device)  # [B]
-            
-            # Extract voltages and reactive power from last valid timestep
-            # Use advanced indexing: [batch_indices, last_step_indices, :, feature_idx]
-            voltages = batch_device['scada_data'][batch_indices, last_step_indices, :, 0:1]  # [B, N, 1]
-            node_reactive_power = batch_device['scada_data'][batch_indices, last_step_indices, :, 3:4]  # [B, N, 1]
-        else:
-            voltages = None
-            node_reactive_power = None
-        
-        targets = {
-            'failure_label': batch_device['node_failure_labels'],
+        return {
+            'failure_label':    batch_device['node_failure_labels'],
             'ground_truth_risk': batch_device.get('ground_truth_risk'),
-            'cascade_timing': batch_device.get('cascade_timing'),
-            'voltages': voltages,
-            'node_reactive_power': node_reactive_power,
-            'line_reactive_power': batch_device['edge_attr'][:, -1, :, 6:7] if 'edge_attr' in batch_device else None,
-            'active_power_line_flows': batch_device['edge_attr'][:, -1, :, 5:6] if 'edge_attr' in batch_device else None,
+            'cascade_timing':   batch_device.get('cascade_timing'),
+            'parent_labels':    batch_device.get('parent_labels'),
         }
-        return targets
     
     def _validate_model_outputs(self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]):
         """Validate that model outputs match expected format."""
@@ -230,14 +204,8 @@ class Trainer:
 
         print("Checking required outputs for loss calculation...")
         check_shape('failure_probability', ('B', 'N', 1))
-        check_shape('voltages', ('B', 'N', 1))
-        check_shape('angles', ('B', 'N', 1))
-        check_shape('line_flows', ('B', 'E', 1))
-        check_shape('frequency', ('B', 1, 1))
         check_shape('risk_scores', ('B', 'N', 7))
         check_shape('cascade_timing', ('B', 'N', 1))
-        check_shape('temperature', ('B', 'N', 1))
-        check_shape('reactive_nodes', ('B', 'N', 1))
 
         if 'temporal_sequence' in batch:
             if batch['temporal_sequence'].dim() > 0:
@@ -256,7 +224,7 @@ class Trainer:
     def _calculate_metrics(self, outputs, batch):
         """Helper to calculate all metrics for a batch."""
         
-        node_probs = outputs['failure_probability'].squeeze(-1)  # [B, N]
+        node_probs = outputs['failure_probability'].squeeze(-1).sigmoid()  # [B, N]
         node_pred = (node_probs > self.node_threshold).float()  # [B, N]
         node_labels = batch['node_failure_labels']  # [B, N]
         
@@ -276,57 +244,61 @@ class Trainer:
         
         risk_mse = 0.0
         if 'risk_scores' in outputs and 'ground_truth_risk' in batch and batch['ground_truth_risk'] is not None:
-            pred_risk_agg = torch.mean(outputs['risk_scores'], dim=1)  # [B, N, 7] -> [B, 7]
-            target_risk = batch['ground_truth_risk']  # [B, 7]
+            pred_risk_agg = outputs['risk_scores']  # [B, N, 7]
+            target_risk = batch['ground_truth_risk']  # [B, N, 7]
             risk_mse = nn.functional.mse_loss(pred_risk_agg, target_risk).item()
         
-        pairwise_acc = 0.0
+        # ── IMPROVED TIMING METRIC (v2) ─────────────────────────────────────
+        # Previous implementation computed pairwise ordering accuracy, which
+        # was always 0.0 because:
+        #   (a) most failing nodes share the same absolute failure timestep,
+        #       causing all pairs to be skipped by the "t[u]==t[v]" guard;
+        #   (b) the metric denominator (total_pairs) was therefore 0 for the
+        #       vast majority of batches, so valid_timing_nodes never became >0.
+        #
+        # New metric: Mean Absolute Error (MAE) in normalised [0,1] space over
+        # all failing nodes in the batch.  An additional "denormalised MAE in
+        # timesteps" is computed by multiplying by DEFAULT_SEQUENCE_LENGTH so
+        # the number is human-interpretable in training logs.
+        # ─────────────────────────────────────────────────────────────────────
+        from cascade_prediction.data.generator.config import Settings as _S
+
+        time_mae_normed = 0.0
         valid_timing_nodes = 0
-        
+
         if 'cascade_timing' in outputs and 'cascade_timing' in batch:
-            pred_times = outputs['cascade_timing'].squeeze(-1)
-            target_times = batch['cascade_timing']
-            
-            correct_pairs = 0
-            total_pairs = 0
-            
+            pred_times = outputs['cascade_timing'].squeeze(-1)   # [B, N]
+            target_times = batch['cascade_timing']               # [B, N]
+
+            total_abs_err = 0.0
+            total_valid = 0
+
             for b in range(pred_times.shape[0]):
                 p = pred_times[b]
                 t = target_times[b]
-                mask = t >= 0
-                
-                if mask.sum() < 2:
+                mask = (t >= 0)
+                n_valid = mask.sum().item()
+
+                if n_valid == 0:
                     continue
-                
-                # Get indices of failed nodes
-                idx = torch.where(mask)[0]
-                
-                # Compare every pair
-                for i in range(len(idx)):
-                    for j in range(i + 1, len(idx)):
-                        u, v = idx[i], idx[j]
-                        
-                        # Skip if ground truth times are identical
-                        if t[u] == t[v]:
-                            continue
-                        
-                        total_pairs += 1
-                        
-                        # Check if order matches
-                        if (t[u] < t[v] and p[u] < p[v]) or (t[u] > t[v] and p[u] > p[v]):
-                            correct_pairs += 1
-            
-            if total_pairs > 0:
-                pairwise_acc = correct_pairs / total_pairs
+
+                # MAE over failing nodes (normalised [0,1] space)
+                abs_err = (p[mask] - t[mask]).abs().sum().item()
+                total_abs_err += abs_err
+                total_valid += n_valid
+
+            if total_valid > 0:
+                time_mae_normed = total_abs_err / total_valid
                 valid_timing_nodes = 1
-        
+
         return {
             'cascade_tp': cascade_tp, 'cascade_fp': cascade_fp,
             'cascade_tn': cascade_tn, 'cascade_fn': cascade_fn,
             'node_tp': node_tp, 'node_fp': node_fp,
             'node_tn': node_tn, 'node_fn': node_fn,
             'risk_mse': risk_mse,
-            'time_mae': pairwise_acc,
+            # time_mae now holds normalised MAE (multiply by seq_len for steps)
+            'time_mae': time_mae_normed,
             'valid_timing_nodes': valid_timing_nodes
         }
     
@@ -562,7 +534,7 @@ class Trainer:
                 total_timing_loss_sum += loss_components.get('timing', 0.0)
                 
                 # 4. Collect probabilities and labels for threshold optimization
-                node_probs = outputs['failure_probability'].squeeze(-1)  # [B, N]
+                node_probs = outputs['failure_probability'].squeeze(-1).sigmoid()  # [B, N]
                 node_labels = batch_device['node_failure_labels']  # [B, N]
                 
                 # Flatten and collect
@@ -597,7 +569,7 @@ class Trainer:
         # Helper 1: Best F1 (Standard)
         def find_best_f1(probs, targets):
             best_f1, best_thresh = 0.0, 0.5
-            for t in np.arange(0.05, 0.96, 0.05):
+            for t in np.arange(0.05, 0.96, 0.01):
                 preds = (probs > t).float()
                 tp = (preds * targets).sum()
                 fp = (preds * (1-targets)).sum()
@@ -613,7 +585,7 @@ class Trainer:
             best_score, best_thresh = 0.0, 0.5
             beta_sq = beta**2
             
-            for t in np.arange(0.05, 0.96, 0.05):
+            for t in np.arange(0.05, 0.96, 0.01):
                 preds = (probs > t).float()
                 tp = (preds * targets).sum()
                 fp = (preds * (1-targets)).sum()
@@ -964,14 +936,14 @@ class Trainer:
         axes[2, 0].set_title('7-D Risk Score MSE')
         axes[2, 0].legend()
         axes[2, 0].grid(True, alpha=0.3)
-        
+
         axes[2, 1].plot(epochs, self.history['learning_rate'], 'g-', label='Learning Rate', linewidth=2)
         axes[2, 1].set_xlabel('Epoch')
         axes[2, 1].set_ylabel('LR')
         axes[2, 1].set_title('Learning Rate Schedule')
         axes[2, 1].legend()
         axes[2, 1].grid(True, alpha=0.3)
-        
+
         axes[2, 2].plot(epochs, self.history['train_cascade_acc'], 'b-', label='Train Cascade', linewidth=2)
         axes[2, 2].plot(epochs, self.history['val_cascade_acc'], 'r-', label='Val Cascade', linewidth=2)
         axes[2, 2].plot(epochs, self.history['train_node_acc'], 'b--', label='Train Node', linewidth=2, alpha=0.6)
@@ -981,11 +953,11 @@ class Trainer:
         axes[2, 2].set_title('Accuracy Comparison')
         axes[2, 2].legend()
         axes[2, 2].grid(True, alpha=0.3)
-        
+
         plt.tight_layout()
-        
+
         plot_path = f"{self.output_dir}/training_curves.png"
         plt.savefig(plot_path, dpi=150, bbox_inches='tight')
         plt.close()
-        
+
         print(f"✓ Training curves saved to {plot_path}")

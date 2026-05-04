@@ -45,9 +45,9 @@ class PhysicsBasedGridSimulator:
     
     SCENARIO TYPES:
     ---------------
-    - NORMAL (stress 0.3-0.7): Grid operates safely, no failures
-    - STRESSED (stress 0.8-0.9): High load but no failures (near-miss scenarios)
-    - CASCADE (stress > 0.9): Failures propagate through grid
+    - NORMAL   (stress 0.00–0.55): Grid operates safely, no failures expected
+    - STRESSED (stress 0.55–0.72): High load but no cascade (near-miss scenarios)
+    - CASCADE  (stress 0.72–1.00): Failures propagate through the grid
     
     MULTI-MODAL DATA:
     -----------------
@@ -60,7 +60,8 @@ class PhysicsBasedGridSimulator:
         self,
         num_nodes: int = Settings.Scenario.DEFAULT_NUM_NODES,
         seed: int = Settings.Scenario.DEFAULT_SEED,
-        topology_file: Optional[str] = None
+        topology_file: Optional[str] = None,
+        video_path: Optional[str] = None
     ):
         """
         Initialize the physics-based grid simulator.
@@ -73,6 +74,8 @@ class PhysicsBasedGridSimulator:
             Random seed for reproducibility
         topology_file : str, optional
             Path to saved topology file (if None, generates new topology)
+        video_path: str, optional
+            Path to wild-fire video
         """
         self.num_nodes = num_nodes
         self.seed = seed
@@ -85,8 +88,22 @@ class PhysicsBasedGridSimulator:
         
         if topology_file:
             topo_data = topo_gen.load_topology(topology_file)
+            if topo_data is None:
+                # File not found — generate a new topology and save it
+                print(f"  Topology file not found, generating new topology and saving to {topology_file}...")
+                topo_data = topo_gen.generate_topology()
+                import pickle, pathlib
+                pathlib.Path(topology_file).parent.mkdir(parents=True, exist_ok=True)
+                with open(topology_file, 'wb') as f:
+                    pickle.dump({
+                        'adjacency_matrix': topo_data['adjacency_matrix'],
+                        'edge_index': topo_data['edge_index'].numpy() if hasattr(topo_data['edge_index'], 'numpy') else topo_data['edge_index'],
+                        'positions': topo_data['positions'],
+                    }, f)
+                print(f"  Saved new topology to {topology_file}")
             self.adjacency_matrix = topo_data['adjacency_matrix']
-            self.edge_index = topo_data['edge_index']
+            ei = topo_data['edge_index']
+            self.edge_index = torch.from_numpy(ei).long() if isinstance(ei, np.ndarray) else ei.long()
             self.positions = topo_data['positions']
             self.num_nodes = self.adjacency_matrix.shape[0]
         else:
@@ -218,7 +235,7 @@ class PhysicsBasedGridSimulator:
         # Initialize environmental and robotic generators
         print(f"Initializing environmental and robotic generators...")
         self.env_gen = EnvironmentalDataGenerator(
-            self.num_nodes, self.positions, self.edge_index.numpy()
+            self.num_nodes, self.positions, self.edge_index.numpy(), video_path
         )
 
         self.robot_gen = RoboticDataGenerator(
@@ -249,9 +266,9 @@ class PhysicsBasedGridSimulator:
         -----------
         stress_level : float
             Grid stress level (0.0 to 1.0)
-            - 0.3-0.7: Normal operation
-            - 0.8-0.9: Stressed operation
-            - 0.9-1.0: Critical stress (cascade likely)
+            - 0.00–0.55: Normal operation
+            - 0.55–0.72: Stressed operation (near-miss)
+            - 0.72–1.00: Critical stress (cascade likely)
         sequence_length : int
             Number of timesteps to simulate (default: 30)
         
@@ -269,6 +286,7 @@ class PhysicsBasedGridSimulator:
             * np.random.rand()
         )
 
+        self.env_gen.update_fire_location()
         # Generate time series — failures emerge dynamically from physics
         scenario_data = self._generate_time_series(
             stress_level, sequence_length, ambient_temp_base
@@ -284,22 +302,22 @@ class PhysicsBasedGridSimulator:
         cascade_start_time = scenario_data.pop('actual_cascade_start')
         is_cascade = len(failed_nodes) > 0
 
-        # Compute risk vector
-        if is_cascade:
-            ground_truth_risk = self._compute_risk_vector(
-                stress_level,
-                failure_reasons[0] if failure_reasons else 'none',
-                len(failed_nodes)
-            )
-        else:
+        # Compute per-node 7-dim risk vectors from last-timestep physics state.
+        # Both cascade and non-cascade scenarios use the same per-node formulas so
+        # the risk head receives consistent supervision across all scenario types.
+        if not is_cascade:
             if stress_level > Settings.Scenario.STRESSED_STRESS_MAX:
                 print(f"  [STRESSED] No failures at stress={stress_level:.3f}")
             else:
                 print(f"  [NORMAL] No failures")
-            ground_truth_risk = np.array([
-                stress_level, stress_level*0.7, stress_level*0.5,
-                0.1, 0.1, 0.1, stress_level
-            ], dtype=np.float32)
+
+        last_sequence = scenario_data['sequence']
+        ground_truth_risk = self._compute_node_risk_vectors(
+            last_sequence,
+            failed_nodes,
+            failure_times,
+            sequence_length,
+        )
 
         scenario_data['metadata'] = {
             'cascade_start_time': cascade_start_time,
@@ -317,20 +335,19 @@ class PhysicsBasedGridSimulator:
         return scenario_data
     
     def _get_heat_generation(self, loading_ratios: np.ndarray) -> np.ndarray:
+        """
+        Compute per-node heat generation from line loading ratios.
+
+        Heat is proportional to I²R.  We use (apparent loading ratio)² as a
+        dimensionless current² proxy so the scale stays consistent with the
+        thermal model tuning regardless of the chosen resistance units.
+        Each line's heat is split equally between its two endpoint nodes.
+        """
         src, dst = self.edge_index
-
+        heat_per_line = loading_ratios ** 2          # dimensionless, 0–(several) range
         heat_generation = np.zeros(self.num_nodes)
-
-        for i in range(self.num_edges):
-            s, d = src[i].item(), dst[i].item()
-            # Heat is proportional to I²R, but resistance is now in Ohms (4-38 Ω).
-            # We use loading_ratio² as the relative current² proxy, normalized by
-            # a fixed reference resistance (1 Ω) so heat stays in a consistent
-            # dimensionless scale that the thermal model was tuned for.
-            heat = loading_ratios[i] ** 2  # dimensionless, ~0-1 range
-            heat_generation[s] += heat / 2
-            heat_generation[d] += heat / 2
-
+        np.add.at(heat_generation, src.numpy(), heat_per_line / 2)
+        np.add.at(heat_generation, dst.numpy(), heat_per_line / 2)
         return heat_generation
 
     def _generate_time_series(
@@ -349,13 +366,17 @@ class PhysicsBasedGridSimulator:
         self.thermal_sim.reset_temperatures()
         self.frequency_sim.reset_ufls()
 
+        # Draw once per scenario so precursor signals are temporally coherent
+        # across all timesteps (same window edge for every call this scenario).
+        scenario_precursor_duration = int(np.random.randint(8, 20))
+
         generation = np.zeros(self.num_nodes)
         load_values = np.zeros(self.num_nodes)
         cumulative_failed_nodes: set = set()
         prev_voltages: Optional[np.ndarray] = None
 
-        # failure_record: node → (absolute timestep of failure, reason string)
-        failure_record: Dict[int, Tuple[int, str]] = {}
+        # failure_record: node → (absolute timestep of failure, reason string, parent node id or None)
+        failure_record: Dict[int, Tuple[int, str, Optional[int]]] = {}
         cascade_start_time = -1
 
         # Stress ramp: rise from 60% to 100% of stress_level over first RAMP_FRACTION of sequence
@@ -437,8 +458,10 @@ class PhysicsBasedGridSimulator:
                     print(f"  [REJECT] Power flow unstable at t={t} with no prior state. Rejecting.")
                     return None
 
-            # Update physics
-            loading_ratios = np.abs(line_flows) / (self.thermal_limits + 1e-6)
+            # Update physics — use apparent power (S = √(P²+Q²)) for loading
+            # ratios so both active and reactive current contribute to thermal
+            # loading, consistent with how propagate_cascade_physics works.
+            loading_ratios = np.sqrt(line_flows**2 + line_flows_q**2) / (self.thermal_limits + 1e-6)
             heat_generation = self._get_heat_generation(loading_ratios)
 
             current_frequency, load_values = self.frequency_sim.update_frequency(
@@ -449,29 +472,28 @@ class PhysicsBasedGridSimulator:
             self.thermal_sim.ambient_temperature = ambient_temp
             equipment_temps = self.thermal_sim.update_temperatures(heat_generation, 1.0)
 
-            # Dynamic failure check: every non-failed node at every timestep
-            # node_line_loading = ratio of actual load to base load (ML feature proxy)
+            # ----------------------------------------------------------------
+            # Step 1 — Identify trigger failures.
+            # Use the load-ratio proxy (actual load / base load) as the
+            # initial threshold check.  This is fast and well-calibrated with
+            # the existing NodeConfig failure thresholds.
+            # ----------------------------------------------------------------
 
             # Environmental + robotic data
             sat_data, weather_seq, threat_ind = self.env_gen.generate_correlated_environmental_data(
-                list(cumulative_failed_nodes), failed_lines_t, t, cascade_start_time, current_stress
+                list(cumulative_failed_nodes), failed_lines_t, t, cascade_start_time, current_stress, sequence_length, 
+                scenario_precursor_duration,stress_level > Settings.Scenario.CASCADE_STRESS_MIN
             )
 
             vis_data, thermal_data, sensor_data = self.robot_gen.generate_correlated_robotic_data(
-                list(cumulative_failed_nodes), failed_lines_t, t, cascade_start_time, equipment_temps
+                list(cumulative_failed_nodes), failed_lines_t, t, cascade_start_time, equipment_temps,
+                scenario_precursor_duration
             )
 
             # Compute fire stress with spatial decay + amplification
-            fire_x, fire_y = self.env_gen.fire_location
-            fire_stress = np.zeros(self.num_nodes)
+            fire_stress = threat_ind[:,0]
 
-            for n in range(self.num_nodes):
-                dist = np.linalg.norm(self.positions[n] - np.array([fire_x, fire_y]))
-                fire_stress[n] = 2.5 * threat_ind[n, 0] * np.exp(-dist / 20.0)
-
-            # Apply fire influence to system
             node_line_loading = load_values / (self.base_load + 1e-6)
-            node_line_loading = node_line_loading * (1 + 0.4 * fire_stress)
 
             equipment_temps = equipment_temps + 20 * fire_stress
 
@@ -498,17 +520,41 @@ class PhysicsBasedGridSimulator:
                 if state == 2:
                     new_failures.append((n, reason))
 
-            # Keep this part unchanged
-            for n, reason in new_failures:
-                if cascade_start_time < 0:
-                    cascade_start_time = t
-                failure_record[n] = (t, reason)
-                cumulative_failed_nodes.add(n)
-                generation[n] = 0.0
-                load_values[n] = 0.0
-                print(f"  [FAIL] Node {n} failed at t={t} (reason: {reason})")
-
-            # Generate multi-modal data
+            # ----------------------------------------------------------------
+            # Step 2 — Physics-based cascade propagation.
+            # When trigger failures exist, recompute AC power flow after each
+            # new failure to find every downstream node that overloads next.
+            # This models real-world cascade speed (many nodes can trip within
+            # the same simulation minute) and is consistent with the power flow
+            # physics used throughout the rest of the simulation.
+            # ----------------------------------------------------------------
+            if new_failures:
+                target_max_failures = min(
+                    len(new_failures) + int(self.num_nodes * Settings.Simulation.CASCADE_MAX_SPREAD_FRACTION),
+                    self.num_nodes
+                )
+                cascade_sequence = self.cascade_sim.propagate_cascade_physics(
+                    initial_failed_nodes=new_failures,
+                    generation=generation.copy(),  # propagator uses internal copies
+                    load=load_values.copy(),
+                    current_temperature=equipment_temps,
+                    current_frequency=current_frequency,
+                    target_num_failures=target_max_failures,
+                    power_flow_simulator=self.power_flow_sim,
+                    edge_index=self.edge_index.numpy(),
+                    thermal_limits=self.thermal_limits
+                )
+                # Record every failure from this cascade wave (initial + propagated)
+                for fail_node, fail_time_offset, fail_reason, fail_parent in cascade_sequence:
+                    if fail_node not in cumulative_failed_nodes:
+                        if cascade_start_time < 0:
+                            cascade_start_time = t
+                        failure_record[fail_node] = (t, fail_reason, fail_parent)
+                        cumulative_failed_nodes.add(fail_node)
+                        generation[fail_node] = 0.0
+                        load_values[fail_node] = 0.0
+                        print(f"  [FAIL] Node {fail_node} failed at t={t} "
+                              f"(reason: {fail_reason}, cascade offset: {fail_time_offset:.2f} min)")
 
             current_cascade_timing = self._compute_cascade_timing(t, failure_record)
 
@@ -517,7 +563,7 @@ class PhysicsBasedGridSimulator:
                 load_values, equipment_temps, current_frequency, loading_ratios,
                 line_flows, line_flows_q, sat_data, weather_seq, threat_ind,
                 vis_data, thermal_data, sensor_data, cumulative_failed_nodes,
-                current_cascade_timing, sequence_length
+                current_cascade_timing, sequence_length,self.env_gen.fire_location
             )
             sequence.append(timestep_data)
 
@@ -525,6 +571,7 @@ class PhysicsBasedGridSimulator:
         failed_nodes_out    = sorted(failure_record.keys(), key=lambda n: failure_record[n][0])
         failure_times_out   = [failure_record[n][0] for n in failed_nodes_out]
         failure_reasons_out = [failure_record[n][1] for n in failed_nodes_out]
+        failure_parents_out = [failure_record[n][2] for n in failed_nodes_out]
 
         if failed_nodes_out:
             print(f"  [CASCADE] {len(failed_nodes_out)} nodes failed. First failure at t={cascade_start_time}.")
@@ -534,43 +581,116 @@ class PhysicsBasedGridSimulator:
             result['failed_nodes']        = failed_nodes_out
             result['failure_times']       = failure_times_out
             result['failure_reasons']     = failure_reasons_out
+            result['failure_parents']     = failure_parents_out
             result['actual_cascade_start'] = cascade_start_time
         return result
     
-    def _compute_risk_vector(
+    def _compute_node_risk_vectors(
         self,
-        stress_level: float,
-        initial_reason: str,
-        num_failed: int
+        sequence: List[Dict],
+        failed_nodes: List[int],
+        failure_times: List[int],
+        sequence_length: int,
     ) -> np.ndarray:
-        """Compute 7-dimensional risk vector."""
-        risk_vec = np.zeros(7, dtype=np.float32)
-        risk_vec[0] = stress_level  # threat_severity
-        
-        if 'loading' in initial_reason or 'temperature' in initial_reason:
-            risk_vec[1] = 0.8  # vulnerability
-            risk_vec[2] = 0.7  # operational_impact
-            risk_vec[6] = 0.7  # urgency
-        elif 'voltage' in initial_reason or 'frequency' in initial_reason:
-            risk_vec[1] = 0.7  # vulnerability
-            risk_vec[2] = 0.9  # operational_impact
-            risk_vec[6] = 0.9  # urgency
-        
-        risk_vec[3] = 0.5 + 0.5 * (num_failed / self.num_nodes)  # cascade_probability
-        
-        return risk_vec
+        """
+        Compute per-node 7-dimensional risk vectors from simulation state.
+
+        Returns shape [num_nodes, 7] — one risk vector per node — using only
+        quantities that are naturally per-node so that the RiskHead receives
+        genuine per-node supervision rather than a collapsed scenario average.
+
+        Dimensions
+        ----------
+        [0] threat_severity   : max(loading_ratio, temp_ratio) clipped to [0, 1].
+                                How much physical stress this node is currently under.
+        [1] vulnerability     : 1 - equipment_condition.
+                                Equipment degradation; higher = more fragile.
+        [2] impact_severity   : base_load[n] / max(base_load).
+                                Load importance; losing a large bus is worse.
+        [3] cascade_probability: 1.0 for nodes that actually failed; loading_ratio
+                                 (clipped) for all others — a physics-grounded proxy
+                                 for how close this node is to tipping.
+        [4] response_capability: clip(1 - loading_ratio, 0, 1).
+                                Available headroom; near-full nodes have little room.
+        [5] safety_margin     : clip(min(voltage_margin, temp_margin, load_margin), 0, 1)
+                                where each margin is positive when safe, 0 at threshold.
+        [6] urgency           : 1 - (failure_time / sequence_length) for failed nodes,
+                                0 for non-failed. Earlier failures → higher urgency.
+
+        All values are clipped to [0, 1].
+
+        SCADA column reference (last timestep)
+        ----------------------------------------
+        col 14: voltage_ratio  = voltage / voltage_failure_threshold  (>1 = safe)
+        col 15: temp_ratio     = temp    / temp_failure_threshold      (<1 = safe)
+        col 17: loading_ratio  = loading / loading_failure_threshold   (<1 = safe)
+        col  8: equipment_condition  (0 = fully degraded, 1 = perfect)
+        col 10: base_load (MW)
+        """
+        # ── Last timestep SCADA ────────────────────────────────────────────────
+        last_scada = sequence[-1]['scada_data']          # [N, 18]
+
+        voltage_ratio  = last_scada[:, 14].astype(np.float32)   # >1 safe
+        temp_ratio     = last_scada[:, 15].astype(np.float32)   # <1 safe
+        loading_ratio  = last_scada[:, 17].astype(np.float32)   # <1 safe
+
+        # ── Static node properties ─────────────────────────────────────────────
+        equipment_condition = self.equipment_condition.astype(np.float32)   # [N]
+        base_load           = self.base_load.astype(np.float32)             # [N]
+        max_load            = float(base_load.max()) if base_load.max() > 0 else 1.0
+
+        # ── Failure record look-up ─────────────────────────────────────────────
+        failed_set = set(failed_nodes)
+        # Map node index → failure timestep
+        node_failure_time = {n: t for n, t in zip(failed_nodes, failure_times)}
+
+        # ── Build per-node vectors ─────────────────────────────────────────────
+        risk = np.zeros((self.num_nodes, 7), dtype=np.float32)
+
+        # dim[0] — threat_severity
+        risk[:, 0] = np.clip(np.maximum(loading_ratio, temp_ratio), 0.0, 1.0)
+
+        # dim[1] — vulnerability
+        risk[:, 1] = np.clip(1.0 - equipment_condition, 0.0, 1.0)
+
+        # dim[2] — impact_severity
+        risk[:, 2] = np.clip(base_load / max_load, 0.0, 1.0)
+
+        # dim[3] — cascade_probability
+        cascade_prob = np.clip(loading_ratio, 0.0, 1.0)
+        for n in failed_set:
+            cascade_prob[n] = 1.0
+        risk[:, 3] = cascade_prob
+
+        # dim[4] — response_capability (available headroom)
+        risk[:, 4] = np.clip(1.0 - loading_ratio, 0.0, 1.0)
+
+        # dim[5] — safety_margin  (minimum across three failure modes)
+        voltage_margin = voltage_ratio - 1.0          # positive = safe
+        temp_margin    = 1.0 - temp_ratio             # positive = safe
+        load_margin    = 1.0 - loading_ratio          # positive = safe
+        min_margin     = np.minimum(np.minimum(voltage_margin, temp_margin), load_margin)
+        risk[:, 5] = np.clip(min_margin, 0.0, 1.0)
+
+        # dim[6] — urgency (early failures are most urgent)
+        urgency = np.zeros(self.num_nodes, dtype=np.float32)
+        for n, t_fail in node_failure_time.items():
+            urgency[n] = np.clip(1.0 - (t_fail / max(sequence_length, 1)), 0.0, 1.0)
+        risk[:, 6] = urgency
+
+        return risk
     
     def _compute_cascade_timing(
         self,
         t: int,
-        failure_record: Dict[int, Tuple[int, str]]
+        failure_record: Dict[int, Tuple[int, str, Optional[int]]]
     ) -> np.ndarray:
         """
         Time since failure for each node.
         -1.0 = not yet failed; 0.0 = failed this timestep; positive = timesteps since failure.
         """
         timing = np.full(self.num_nodes, -1.0, dtype=np.float32)
-        for n, (ft, _) in failure_record.items():
+        for n, (ft, _, _p) in failure_record.items():
             timing[n] = float(t - ft)
         return timing
     
@@ -579,7 +699,7 @@ class PhysicsBasedGridSimulator:
         load_values, equipment_temps, current_frequency, loading_ratios,
         line_flows, line_flows_q, sat_data, weather_seq, threat_ind,
         vis_data, thermal_data, sensor_data, cumulative_failed_nodes,
-        current_cascade_timing, sequence_length
+        current_cascade_timing, sequence_length,fire_location
     ) -> Dict:
         """Package all data for a single timestep."""
         return {
@@ -675,6 +795,7 @@ class PhysicsBasedGridSimulator:
             'thermal_limits': self.thermal_limits.astype(np.float32),
             'power_injection': (generation - load_values).astype(np.float32),
             'reactive_injection': (node_reactive).astype(np.float32),
+            'fire_location': fire_location
         }
 
     

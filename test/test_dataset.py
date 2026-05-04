@@ -32,12 +32,12 @@ class TestCascadeDataset:
         num_nodes = 30
         num_edges = 50
         sequence_length = 10
-        
+
         # Create sequence
         sequence = []
         for t in range(sequence_length):
             timestep = {
-                'scada_data': np.random.randn(num_nodes, 14).astype(np.float32),
+                'scada_data': np.random.randn(num_nodes, 18).astype(np.float32),
                 'pmu_sequence': np.random.randn(num_nodes, 8).astype(np.float32),
                 'weather_sequence': np.random.randn(num_nodes, 10, 8).astype(np.float32),
                 'satellite_data': np.random.randn(num_nodes, 12, 16, 16).astype(np.float32),
@@ -80,11 +80,11 @@ class TestCascadeDataset:
         num_nodes = 30
         num_edges = 50
         sequence_length = 10
-        
+
         sequence = []
         for t in range(sequence_length):
             timestep = {
-                'scada_data': np.random.randn(num_nodes, 14).astype(np.float32),
+                'scada_data': np.random.randn(num_nodes, 18).astype(np.float32),
                 'pmu_sequence': np.random.randn(num_nodes, 8).astype(np.float32),
                 'weather_sequence': np.random.randn(num_nodes, 10, 8).astype(np.float32),
                 'satellite_data': np.random.randn(num_nodes, 12, 16, 16).astype(np.float32),
@@ -209,8 +209,11 @@ class TestCascadeDataset:
         
         assert 'edge_mask' in item
         assert item['edge_mask'].dim() >= 1
-        # Edge mask should be binary
-        assert torch.all((item['edge_mask'] == 0) | (item['edge_mask'] == 1))
+        # Edge mask is a continuous stress signal in [0, 1]:
+        #   1.0 = fully healthy line, 0.0 = thermally overloaded line.
+        # (Changed from binary in the branch; binary assertion removed.)
+        assert item['edge_mask'].min() >= 0.0
+        assert item['edge_mask'].max() <= 1.0
     
     def test_graph_properties_extraction(self, temp_data_dir, mock_cascade_scenario):
         """Test graph properties extraction."""

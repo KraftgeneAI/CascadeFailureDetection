@@ -19,7 +19,8 @@ _TEMPORAL_KEYS = {
     'scada_data', 'weather_sequence', 'threat_indicators',
     'equipment_status', 'pmu_sequence', 'sensor_data', 'edge_mask',
     'temporal_sequence',
-    'edge_attr',   # now [T, E, 7] — per-timestep line flows
+    'edge_attr',        # [T, E, 7] — per-timestep line flows
+    'node_features',    # [T, N, 115] — per-node MLP feature tensor
 }
 
 
@@ -80,6 +81,12 @@ def collate_cascade_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor
                 [item['sequence_length'] for item in batch],
                 dtype=torch.long
             )
+
+        elif key == 'parent_labels':
+            # Long tensor [N] — must not be cast to float32
+            items = [item[key] for item in batch if key in item]
+            if items:
+                batch_dict[key] = torch.stack(items, dim=0)   # [B, N] long
 
         elif key == 'graph_properties':
             graph_props_batch = {}

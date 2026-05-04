@@ -48,7 +48,7 @@ class EnvironmentalDataGenerator:
     All data is correlated with grid stress level and failure events.
     """
     
-    def __init__(self, num_nodes: int, positions: np.ndarray, edge_index: np.ndarray):
+    def __init__(self, num_nodes: int, positions: np.ndarray, edge_index: np.ndarray, video_path: str=None):
         """
         Initialize the environmental data generator.
         
@@ -60,26 +60,28 @@ class EnvironmentalDataGenerator:
             Geographic positions of nodes (for spatial correlation)
         edge_index : np.ndarray, shape (2, num_edges)
             Edge connectivity (source, destination) pairs
+        video_path: str
+            video path of the wild fire.
         """
         self.num_nodes = num_nodes
         self.positions = positions
         self.edge_index = edge_index
 
         self.video_signal = None
-        self.fire_location = None
+
+        self.update_fire_location()
+        if video_path is not None:
+            self.load_video(video_path)
 
     def load_video(self, video_path):
         from video_processor import extract_threat_curve
         self.video_signal = extract_threat_curve(video_path)
-
-        x_min, y_min = self.positions.min(axis=0)
-        x_max, y_max = self.positions.max(axis=0)
-
-        self.fire_location = np.array([
-            np.random.uniform(x_min, x_max),
-            np.random.uniform(y_min, y_max)
-        ])
     
+    def update_fire_location(self):
+        fire_node_index = np.random.randint(0,len(self.positions))
+
+        self.fire_location = self.positions[fire_node_index]
+
     def generate_satellite_imagery(
         self,
         failed_nodes: List[int],
@@ -261,7 +263,9 @@ class EnvironmentalDataGenerator:
         timestep: int,
         cascade_start: int,
         stress_level: float,
-        precursor_duration: int = 15
+        sequence_length: int,
+        precursor_duration: int = 15,
+        is_cascade: bool = False
     ) -> np.ndarray:
         """
         Generate threat indicators for various hazard types.
@@ -286,7 +290,8 @@ class EnvironmentalDataGenerator:
             Timestep when cascade begins (-1 if no cascade)
         stress_level : float
             Overall grid stress (0.0 to 1.0)
-        
+        sequence_length : int
+            Total sequence length
         Returns:
         --------
         threat_indicators : np.ndarray, shape (num_nodes, 6)
@@ -294,13 +299,9 @@ class EnvironmentalDataGenerator:
         """
         threat_indicators = np.zeros((self.num_nodes, 6), dtype=np.float16)
 
-        # Base threat level
-        base_threat = stress_level * 0.2
-        threat_indicators += base_threat
-
         # override fire threat using video signal
-        if self.video_signal is not None:
-            t = timestep % len(self.video_signal)
+        if self.video_signal is not None and is_cascade:
+            t = (int)(timestep / sequence_length * len(self.video_signal))
             base_fire = float(self.video_signal[t])
 
             for node_idx in range(self.num_nodes):
@@ -310,42 +311,7 @@ class EnvironmentalDataGenerator:
 
                 fire_stress = base_fire * np.exp(-dist / 20)
 
-                if fire_stress > 0.8:
-                    fire_stress = 1.0
-
                 threat_indicators[node_idx, 0] += fire_stress
-        
-        # Add precursor signals before cascade
-        if timestep >= cascade_start - 15 and cascade_start > 0:
-            precursor_strength = 1.0 - (cascade_start - timestep) / precursor_duration
-            precursor_strength = max(0, precursor_strength)
-            
-            if failed_nodes:
-                fire_center = self.positions[failed_nodes[0]]
-                
-                for node_idx in range(self.num_nodes):
-                    distance = np.linalg.norm(self.positions[node_idx] - fire_center)
-                    fire_threat = precursor_strength * 0.8 * np.exp(-distance / 25)
-                    threat_indicators[node_idx, 0] += fire_threat
-        
-        # Add failure signatures after cascade starts
-        if timestep >= cascade_start and cascade_start > 0 and (failed_nodes or failed_lines):
-            # Fire/heat threat at failed nodes
-            for node in failed_nodes:
-                threat_indicators[node, 0] += 0.6
-                
-                # Spread to nearby nodes
-                distances = np.linalg.norm(self.positions - self.positions[node], axis=1)
-                nearby = np.where(distances < 30)[0]
-                for nearby_node in nearby:
-                    threat_indicators[nearby_node, 0] += 0.3 * np.exp(-distances[nearby_node] / 20)
-            
-            # Equipment damage on failed lines
-            src, dst = self.edge_index
-            for line in failed_lines:
-                s, d = src[line].item(), dst[line].item()
-                threat_indicators[s, 5] += 0.5
-                threat_indicators[d, 5] += 0.5
         
         # Clip to valid range
         threat_indicators = np.clip(threat_indicators, 0, 1)
@@ -358,18 +324,23 @@ class EnvironmentalDataGenerator:
         failed_lines: List[int],
         timestep: int,
         cascade_start: int,
-        stress_level: float
+        stress_level: float,
+        sequence_length: int,
+        precursor_duration: int = None,
+        is_cascade: bool = False
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Generate all environmental data in one call.
-        
+
         This is a convenience method that calls all three generation methods
         and returns the complete environmental data package.
-        
-        IMPORTANT: Uses a single precursor_duration value for all three data types
-        to ensure consistent precursor signal timing across satellite, weather, and
-        threat data.
-        
+
+        IMPORTANT: ``precursor_duration`` must be drawn once per scenario (not
+        per timestep) and passed in here so that the precursor signal window is
+        the same across every timestep of the same scenario.  If the caller
+        omits it a random value is drawn as a fallback, but this breaks temporal
+        coherence and should only be done in isolation testing.
+
         Parameters:
         -----------
         failed_nodes : List[int]
@@ -382,7 +353,16 @@ class EnvironmentalDataGenerator:
             Timestep when cascade begins (-1 if no cascade)
         stress_level : float
             Overall grid stress (0.0 to 1.0)
+        sequence_length: int
+            total sequence length
+        precursor_duration : int, optional
+            Number of timesteps before cascade_start over which precursor
+            signals ramp up.  Should be fixed for the whole scenario.
+            Defaults to a random draw in [8, 20] if not provided.
+        is_cascade: bool
+            Whether this is a cascade senario.
         
+
         Returns:
         --------
         satellite_data : np.ndarray, shape (num_nodes, 12, 16, 16)
@@ -392,19 +372,20 @@ class EnvironmentalDataGenerator:
         threat_indicators : np.ndarray, shape (num_nodes, 6)
             Threat levels for 6 hazard types
         """
-        # Calculate precursor_duration once for consistent timing across all data types
-        precursor_duration = np.random.randint(8, 20)
-        
+        if precursor_duration is None:
+            precursor_duration = int(np.random.randint(8, 20))
+
         satellite_data = self.generate_satellite_imagery(
             failed_nodes, timestep, cascade_start, stress_level, precursor_duration
         )
-        
+
         weather_sequence = self.generate_weather_sequence(
             timestep, stress_level
         )
-        
+
         threat_indicators = self.generate_threat_indicators(
-            failed_nodes, failed_lines, timestep, cascade_start, stress_level, precursor_duration
+            failed_nodes, failed_lines, timestep, cascade_start, stress_level,sequence_length, precursor_duration,
+            is_cascade 
         )
-        
+
         return satellite_data, weather_sequence, threat_indicators

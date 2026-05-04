@@ -22,9 +22,13 @@
 !test/
 !archive/
 !video.mp4
+!wildfire.mp4
+!best-yolov8n-finetuned.pt
 !best-yolov8n-50epochs.pt
 # And exclude the .gitignore file itself
 !.gitignore
+# Allow git configuration files
+!.gitattributes
 
 # Ignore Python cache directories (even in allowed directories)
 **/__pycache__/

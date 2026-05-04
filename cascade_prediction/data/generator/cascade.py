@@ -169,7 +169,7 @@ class CascadeSimulator:
                 if failure_state == 2:  # Full failure
                     failure_time = current_time + np.random.uniform(
                         Settings.Cascade.FAILURE_DELAY_MIN, Settings.Cascade.FAILURE_DELAY_MAX)
-                    failure_sequence.append((neighbor, failure_time, reason))
+                    failure_sequence.append((neighbor, failure_time, reason, current_node))
                     failed_nodes.add(neighbor)
                     visited.add(neighbor)
 
@@ -221,14 +221,18 @@ class CascadeSimulator:
         Returns:
             List of (node_id, failure_time, reason) tuples
         """
+        # Work on local copies so the caller's arrays are never mutated.
+        generation = generation.copy()
+        load = load.copy()
+
         # Initialize
         failed_nodes = set(node[0] for node in initial_failed_nodes)
         failed_reasons = [node[1] for node in initial_failed_nodes]
         failure_sequence = [
-            (fail_node, 0.0, fail_reason)
+            (fail_node, 0.0, fail_reason, None)
             for fail_node, fail_reason in zip(failed_nodes, failed_reasons)
         ]
-        
+
         queue = [(node[0], 0.0) for node in initial_failed_nodes]
         visited = set(node[0] for node in initial_failed_nodes)
         
@@ -289,8 +293,8 @@ class CascadeSimulator:
                 if failure_state == 2:  # Full failure
                     physical_delay = np.random.uniform(Settings.Cascade.FAILURE_DELAY_MIN, Settings.Cascade.FAILURE_DELAY_MAX)
                     failure_time = current_time + physical_delay
-                    
-                    failure_sequence.append((neighbor, failure_time, reason))
+
+                    failure_sequence.append((neighbor, failure_time, reason, current_node))
                     failed_nodes.add(neighbor)
                     queue.append((neighbor, failure_time))
                     

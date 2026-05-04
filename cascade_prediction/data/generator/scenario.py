@@ -291,15 +291,16 @@ class ScenarioOrchestrator:
         scenario : Dict or None
             Generated scenario or None if failed
         """
+        # Determine stress level based on type
+        if scenario_type == 'cascade':
+            stress_level = np.random.uniform(Settings.Scenario.CASCADE_STRESS_MIN, Settings.Scenario.CASCADE_STRESS_MAX)
+        elif scenario_type == 'stressed':
+            stress_level = np.random.uniform(Settings.Scenario.STRESSED_STRESS_MIN, Settings.Scenario.STRESSED_STRESS_MAX)
+        else:  # normal
+            stress_level = np.random.uniform(Settings.Scenario.NORMAL_STRESS_MIN, Settings.Scenario.NORMAL_STRESS_MAX)
+        
         for retry in range(max_retries):
-            # Determine stress level based on type
-            if scenario_type == 'cascade':
-                stress_level = np.random.uniform(Settings.Scenario.CASCADE_STRESS_MIN, Settings.Scenario.CASCADE_STRESS_MAX)
-            elif scenario_type == 'stressed':
-                stress_level = np.random.uniform(Settings.Scenario.STRESSED_STRESS_MIN, Settings.Scenario.STRESSED_STRESS_MAX)
-            else:  # normal
-                stress_level = np.random.uniform(Settings.Scenario.NORMAL_STRESS_MIN, Settings.Scenario.NORMAL_STRESS_MAX)
-            
+
             # Generate scenario
             scenario = self.simulator.generate_scenario(
                 stress_level=stress_level,
@@ -317,11 +318,13 @@ class ScenarioOrchestrator:
             if scenario_type == 'cascade' and not is_cascade:
                 if retry < max_retries - 1:
                     print(f"  [RETRY {retry+1}] Wanted cascade, got normal. Increasing stress...")
+                    stress_level+=0.05
                 continue
             
             if scenario_type in ['normal', 'stressed'] and is_cascade:
                 if retry < max_retries - 1:
                     print(f"  [RETRY {retry+1}] Wanted {scenario_type}, got cascade. Decreasing stress...")
+                    stress_level-=0.05
                 continue
             
             # Success!
@@ -397,6 +400,9 @@ def generate_dataset_from_config(
     seed: int = Settings.Scenario.DEFAULT_SEED,
     topology_file: Optional[str] = None,
     start_batch: int = 0,
+    train_ratio: float = Settings.Dataset.TRAIN_RATIO,
+    val_ratio: float = Settings.Dataset.VAL_RATIO,
+    test_ratio: float = Settings.Dataset.TEST_RATIO,
     video_path: Optional[str] = None
 ) -> Dict[str, int]:
     """
@@ -424,6 +430,12 @@ def generate_dataset_from_config(
         Path to saved topology
     start_batch : int
         Starting batch number (for parallel generation)
+    train_ratio : float
+        Fraction of data for training
+    val_ratio : float
+        Fraction of data for validation
+    test_ratio : float
+        Fraction of data for testing
     video_path: str
         Wild fire video path, optional
     Returns:
@@ -436,11 +448,9 @@ def generate_dataset_from_config(
     simulator = PhysicsBasedGridSimulator(
         num_nodes=num_nodes,
         seed=seed,
-        topology_file=topology_file
+        topology_file=topology_file,
+        video_path=video_path
     )
-    if video_path is not None:
-        print(f"\nLoading video signal from: {video_path}")
-        simulator.env_gen.load_video(video_path)
 
     # Save topology if not provided
     if topology_file is None:
@@ -459,7 +469,10 @@ def generate_dataset_from_config(
     orchestrator = ScenarioOrchestrator(
         simulator=simulator,
         output_dir=output_dir,
-        batch_size=batch_size
+        batch_size=batch_size,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
     )
     
     # Generate dataset

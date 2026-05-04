@@ -15,6 +15,7 @@ from .prediction_heads import (
     ActivePowerLineFlowHead,
     RiskHead,
     TimingHead,
+    ParentPredictionHead,
 )
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     'ActivePowerLineFlowHead',
     'RiskHead',
     'TimingHead',
+    'ParentPredictionHead',
 ]

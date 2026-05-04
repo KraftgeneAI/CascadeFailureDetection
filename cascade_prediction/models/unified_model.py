@@ -23,6 +23,7 @@ from .embeddings import (
     EnvironmentalEmbedding,
     InfrastructureEmbedding,
     RoboticEmbedding,
+    NodeFeatureMLP,
 )
 
 # Import layers
@@ -34,15 +35,9 @@ from .layers import (
 # Import prediction heads
 from .heads import (
     FailureProbabilityHead,
-    VoltageHead,
-    AngleHead,
-    FrequencyHead,
-    TemperatureHead,
-    LineFlowHead,
-    ReactiveFlowHead,
-    ActivePowerLineFlowHead,
     RiskHead,
     TimingHead,
+    ParentPredictionHead,
 )
 
 # Import loss
@@ -83,11 +78,15 @@ class UnifiedCascadePredictionModel(nn.Module):
         super(UnifiedCascadePredictionModel, self).__init__()
         
         # Multi-modal embeddings
-        self.env_embedding = EnvironmentalEmbedding(embedding_dim=embedding_dim)
+        self.env_embedding   = EnvironmentalEmbedding(embedding_dim=embedding_dim)
         self.infra_embedding = InfrastructureEmbedding(embedding_dim=embedding_dim)
         self.robot_embedding = RoboticEmbedding(embedding_dim=embedding_dim)
-        
-        # Multi-modal fusion with attention
+
+        # 115-feature node MLP (SCADA+PMU+equip+inj + temporal deltas + t_pos)
+        self.node_feature_mlp = NodeFeatureMLP(embedding_dim=embedding_dim)
+
+        # Multi-modal fusion with attention — now 4 modalities
+        # (env, infra, robot, node_features)
         self.fusion_attention = nn.MultiheadAttention(
             embed_dim=embedding_dim,
             num_heads=heads,
@@ -130,18 +129,16 @@ class UnifiedCascadePredictionModel(nn.Module):
             nn.Dropout(dropout)
         )
         
-        # Multi-task prediction heads
+        # Multi-task prediction heads — only the core cascade-specific heads.
+        # Physics auxiliary heads (voltage, angle, line flows, reactive power,
+        # frequency, temperature, active power flows) have been removed: they
+        # were trained on zeroed-out modalities and added gradient noise without
+        # contributing useful signal.
         self.failure_prob_head = FailureProbabilityHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
         self.failure_time_head = TimingHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
-        self.voltage_head = VoltageHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
-        self.angle_head = AngleHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
-        self.line_flow_head = LineFlowHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
-        self.reactive_nodes_head = ReactiveFlowHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
-        self.frequency_head = FrequencyHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
-        self.temperature_head = TemperatureHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
-        self.active_power_line_flow_head = ActivePowerLineFlowHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
         self.risk_head = RiskHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
-        
+        self.parent_head = ParentPredictionHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
+
         # Physics-informed loss
         self.physics_loss = PhysicsInformedLoss()
     
@@ -177,6 +174,14 @@ class UnifiedCascadePredictionModel(nn.Module):
             batch['sensor_data']
         )
         
+        # 115-feature node embedding — (B, T, N, D) or (B, N, D)
+        node_feat_raw = batch.get('node_features')
+        if node_feat_raw is not None:
+            node_emb = self.node_feature_mlp(node_feat_raw)
+        else:
+            # Fallback: zero embedding if key not present (backward-compatible)
+            node_emb = torch.zeros_like(env_emb)
+
         has_temporal = env_emb.dim() == 4  # [B, T, N, D]
         
         # Prepare edge attributes
@@ -204,16 +209,15 @@ class UnifiedCascadePredictionModel(nn.Module):
             
             fused_list = []
             for t in range(T):
-                # Select timestep t for robot embedding
-                robot_feat_t = robot_emb[:, t, :, :]
-                
+                # Select timestep t for each modality
                 multi_modal_t = torch.stack([
                     env_emb[:, t, :, :],
                     infra_emb[:, t, :, :],
-                    robot_feat_t
+                    robot_emb[:, t, :, :],
+                    node_emb[:, t, :, :],   # 115-feature MLP embedding
                 ], dim=2)
-                
-                multi_modal_flat = multi_modal_t.reshape(B * N, 3, D)
+
+                multi_modal_flat = multi_modal_t.reshape(B * N, 4, D)
                 fused_t, _ = self.fusion_attention(
                     multi_modal_flat, multi_modal_flat, multi_modal_flat
                 )
@@ -284,8 +288,15 @@ class UnifiedCascadePredictionModel(nn.Module):
                 robot_emb_expanded = robot_emb.unsqueeze(1).expand(-1, N, -1)
             else:
                 robot_emb_expanded = robot_emb
-            
-            multi_modal = torch.stack([env_emb, infra_emb, robot_emb_expanded], dim=2)
+
+            if node_emb.dim() == 2:
+                node_emb_expanded = node_emb.unsqueeze(1).expand(-1, N, -1)
+            else:
+                node_emb_expanded = node_emb
+
+            multi_modal = torch.stack(
+                [env_emb, infra_emb, robot_emb_expanded, node_emb_expanded], dim=2
+            )
             B, N, M, D = multi_modal.shape
             multi_modal_flat = multi_modal.reshape(B * N, M, D)
             
@@ -313,27 +324,11 @@ class UnifiedCascadePredictionModel(nn.Module):
             h = layer_norm(h + h_new)
 
         # Multi-task predictions
-        failure_prob = self.failure_prob_head(h)
-        temperature = self.temperature_head(h)
+        failure_prob   = self.failure_prob_head(h)
         failure_timing = self.failure_time_head(h)
-        voltages = self.voltage_head(h)
-        angles = self.angle_head(h)
-        
-        h_global = h.mean(dim=1, keepdim=True)
-        frequency = self.frequency_head(h_global)
-        
-        # Edge-based predictions
-        src, dst = batch['edge_index']
-        h_src = h[:, src, :]
-        h_dst = h[:, dst, :]
-        edge_features = torch.cat([h_src, h_dst], dim=-1)
-        
-        line_flows = self.line_flow_head(edge_features)
-        active_power_line_flows = self.active_power_line_flow_head(edge_features)
-        reactive_nodes = self.reactive_nodes_head(h)
-        
-        risk_scores = self.risk_head(h)
-        
+        risk_scores    = self.risk_head(h)
+        parent_logits  = self.parent_head(h)   # [B, N, N+1]
+
         # Check for NaN values
         if torch.isnan(failure_prob).any():
             logging.error("[ERROR] NaN detected in failure_prob!")
@@ -341,18 +336,9 @@ class UnifiedCascadePredictionModel(nn.Module):
         return {
             'failure_probability': failure_prob,
             'cascade_timing': failure_timing,
-            'voltages': voltages,
-            'angles': angles,
-            'line_flows': line_flows, #line_reactive_power
-            'active_power_line_flows': active_power_line_flows,
-            'temperature': temperature,
-            'reactive_nodes': reactive_nodes,
-            'frequency': frequency,
             'risk_scores': risk_scores,
+            'parent_logits': parent_logits,
             'node_embeddings': h,
-            'env_embedding': env_emb,
-            'infra_embedding': infra_emb,
-            'robot_embedding': robot_emb,
             'fused_embedding': fused
         }
     

@@ -21,6 +21,7 @@ import gc
 from pathlib import Path
 
 from cascade_prediction.data.generator import generate_dataset_from_config
+from cascade_prediction.data.generator.config import Settings
 
 
 def main():
@@ -131,7 +132,8 @@ Examples:
         help='Output directory'
     )
     parser.add_argument(
-        '--topology-file', type=str, default=None,
+        '--topology-file', type=str,
+        default=Settings.Dataset.DEFAULT_TOPOLOGY_FILE,
         help='Path to grid topology pickle file'
     )
     
@@ -215,6 +217,9 @@ Examples:
         seed=args.seed,
         topology_file=args.topology_file,
         start_batch=args.start_batch,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        test_ratio=args.test_ratio,
         video_path=args.video_path
     )
     
