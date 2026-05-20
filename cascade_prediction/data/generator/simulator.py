@@ -61,11 +61,11 @@ class PhysicsBasedGridSimulator:
         num_nodes: int = Settings.Scenario.DEFAULT_NUM_NODES,
         seed: int = Settings.Scenario.DEFAULT_SEED,
         topology_file: Optional[str] = None,
-        video_path: Optional[str] = None
+        video_folder: Optional[str] = None
     ):
         """
         Initialize the physics-based grid simulator.
-        
+
         Parameters:
         -----------
         num_nodes : int
@@ -74,8 +74,9 @@ class PhysicsBasedGridSimulator:
             Random seed for reproducibility
         topology_file : str, optional
             Path to saved topology file (if None, generates new topology)
-        video_path: str, optional
-            Path to wild-fire video
+        video_folder : str, optional
+            Path to folder containing wildfire videos. Each cascade scenario
+            will pick one video from this folder at random.
         """
         self.num_nodes = num_nodes
         self.seed = seed
@@ -232,12 +233,13 @@ class PhysicsBasedGridSimulator:
             self.frequency_failure_threshold, self.frequency_damage_threshold
         )
         
-        self.video_path = video_path
+        self.video_folder = video_folder
+        self.video_path = None  # Set per cascade scenario via set_video()
 
-        # Initialize environmental and robotic generators
+        # Initialize environmental and robotic generators (no video at init)
         print(f"Initializing environmental and robotic generators...")
         self.env_gen = EnvironmentalDataGenerator(
-            self.num_nodes, self.positions, self.edge_index.numpy(), video_path
+            self.num_nodes, self.positions, self.edge_index.numpy(), None
         )
 
         self.robot_gen = RoboticDataGenerator(
@@ -245,7 +247,22 @@ class PhysicsBasedGridSimulator:
         )
         
         print(f"[OK] Initialized grid: {self.num_nodes} nodes, {self.num_edges} edges")
-    
+
+    def set_video(self, video_path: Optional[str]) -> None:
+        """
+        Set the wildfire video for the next scenario.
+
+        Parameters:
+        -----------
+        video_path : str or None
+            Absolute path to a video file, or None to clear.
+        """
+        self.video_path = video_path
+        if video_path is not None:
+            self.env_gen.load_video(video_path)
+        else:
+            self.env_gen.video_signal = None
+
     def generate_scenario(
         self,
         stress_level: float,
@@ -507,7 +524,7 @@ class PhysicsBasedGridSimulator:
                     continue
 
                 # Wildfire trigger
-                if fire_stress[n] > 0.6:
+                if fire_stress[n] > 0.15:
                     new_failures.append((n, "wildfire"))
                     continue
 

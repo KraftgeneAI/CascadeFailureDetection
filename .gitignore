@@ -21,6 +21,8 @@
 !cascade_prediction/**
 !test/
 !archive/
+!videos/
+!videos/**
 !video.mp4
 !wildfire.mp4
 !best-yolov8n-finetuned.pt
