@@ -162,10 +162,11 @@ Examples:
     )
 
     parser.add_argument(
-        '--video-path',
+        '--video-folder',
         type=str,
         default=None,
-        help='Optional path to wildfire video for external stress signal'
+        help='Optional path to folder of wildfire videos (.mp4/.avi/.mov). '
+             'Each cascade scenario picks one video at random.'
     )
     args = parser.parse_args()
     
@@ -220,7 +221,7 @@ Examples:
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
         test_ratio=args.test_ratio,
-        video_path=args.video_path
+        video_folder=args.video_folder
     )
     
     # Print summary

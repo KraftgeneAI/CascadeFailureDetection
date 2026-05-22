@@ -57,9 +57,9 @@ def extract_threat_curve(
 
         frame_area = frame_resized.shape[0] * frame_resized.shape[1]
 
-        scores = []
+        total_box_area = 0.0
 
-        ### collect detection scores
+        ### sum all box areas above confidence threshold
         for r in results:
             boxes = r.boxes
             if boxes is None:
@@ -68,25 +68,16 @@ def extract_threat_curve(
             for box in boxes:
                 conf = float(box.conf[0])
 
-                ### filter low confidence
                 if conf < confidence_threshold:
                     continue
 
                 xyxy = box.xyxy[0].cpu().numpy()
                 x1, y1, x2, y2 = xyxy
+                total_box_area += max(0.0, (x2 - x1) * (y2 - y1))
 
-                ### normalized object size
-                box_area = max(0.0, (x2 - x1) * (y2 - y1))
-                area_ratio = box_area / frame_area
-
-                ### balanced scoring (avoid explosion)
-                score = conf * np.sqrt(area_ratio)
-
-                scores.append(score)
-
-        ### aggregate per frame (key fix)
-        if len(scores) > 0:
-            frame_stress = float(np.mean(scores))   # stable aggregation
+        ### fire size = fraction of frame covered by fire
+        if total_box_area > 0:
+            frame_stress = float(min(total_box_area / frame_area, 1.0))
             detected_frames += 1
         else:
             frame_stress = 0.0
@@ -99,15 +90,6 @@ def extract_threat_curve(
         raise ValueError("No frames processed.")
 
     signal = np.array(threat_values, dtype=np.float32)
-
-    ### normalize to [0, 1]
-    max_val = signal.max()
-    min_val = signal.min()
-
-    if max_val > min_val:
-        signal = (signal - min_val) / (max_val - min_val)
-    else:
-        signal = np.zeros_like(signal)
 
     signal = np.clip(signal, 0.0, 1.0)
 
