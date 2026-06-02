@@ -682,6 +682,7 @@ class Trainer:
             'history': self.history,
             'best_val_loss': self.best_val_loss,
             'best_val_mae': self.best_val_mae,
+            'best_val_timing_loss': self.best_val_timing_loss,
             'cascade_threshold': self.cascade_threshold,
             'node_threshold': self.node_threshold
         }
@@ -721,7 +722,8 @@ class Trainer:
         self.history = checkpoint.get('history', self.history)
         self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         self.best_val_mae = checkpoint.get('best_val_mae', float('inf'))
-        
+        self.best_val_timing_loss = checkpoint.get('best_val_timing_loss',float('inf'))
+
         # Load thresholds if available
         self.cascade_threshold = checkpoint.get('cascade_threshold', Settings.Training.CASCADE_THRESHOLD)
         self.node_threshold = checkpoint.get('node_threshold', Settings.Training.NODE_THRESHOLD)
@@ -813,10 +815,8 @@ class Trainer:
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'val_loss': val_metrics['loss'],
                     'val_timing_loss': val_metrics['timing_loss'], 
-                    
                     'cascade_threshold': self.cascade_threshold,
                     'node_threshold': self.node_threshold,
-                    
                     'history': self.history
                 }, f"{self.output_dir}/best_model.pth")
                 print(f"  ✓ Saved best model (New best Val Loss: {val_metrics['loss']:.4f})")
@@ -826,6 +826,9 @@ class Trainer:
                     print(f"\nEarly stopping at epoch {epoch + 1}")
                     break
 
+            if val_metrics['timing_loss'] < self.best_val_timing_loss:
+                self.best_val_timing_loss=val_metrics['timing_loss']
+                
             # Save latest checkpoint (always includes the current fixed thresholds)
             torch.save({
                 'epoch': epoch,
