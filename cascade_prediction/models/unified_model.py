@@ -38,6 +38,9 @@ from .heads import (
     RiskHead,
     TimingHead,
     ParentPredictionHead,
+    VoltageHead,
+    TemperatureHead,
+    ActivePowerLineFlowHead,
 )
 
 # Import loss
@@ -129,15 +132,22 @@ class UnifiedCascadePredictionModel(nn.Module):
             nn.Dropout(dropout)
         )
         
-        # Multi-task prediction heads — only the core cascade-specific heads.
-        # Physics auxiliary heads (voltage, angle, line flows, reactive power,
-        # frequency, temperature, active power flows) have been removed: they
-        # were trained on zeroed-out modalities and added gradient noise without
-        # contributing useful signal.
+        # ── Long-range heads (fed from LSTM cell state c_T) ─────────────────
+        # c_T accumulates stress across the full input window → correct for
+        # predicting *eventual* cascade outcomes whose horizon is unknown.
         self.failure_prob_head = FailureProbabilityHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
         self.failure_time_head = TimingHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
-        self.risk_head = RiskHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
-        self.parent_head = ParentPredictionHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
+        self.risk_head         = RiskHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
+        self.parent_head       = ParentPredictionHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_HIGH)
+
+        # ── Short-range physics heads (fed from LSTM hidden state h_T) ──────
+        # h_T reflects the most recent grid dynamics → used to predict the
+        # physics state at the next timestep (T), which is held out of the
+        # LSTM input window as a self-supervised physics target.
+        self.voltage_head = VoltageHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
+        self.temp_head    = TemperatureHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
+        # Flow head takes concatenated (src, dst) node embeddings → [B, E, 2*D]
+        self.flow_head    = ActivePowerLineFlowHead(hidden_dim, dropout=Settings.Model.HEAD_DROPOUT_LOW)
 
         # Physics-informed loss
         self.physics_loss = PhysicsInformedLoss()
@@ -206,17 +216,16 @@ class UnifiedCascadePredictionModel(nn.Module):
         # Process temporal sequences
         if has_temporal:
             B, T, N, D = env_emb.shape
-            
+
+            # ── Build fused embeddings for all T timesteps ───────────────────
             fused_list = []
             for t in range(T):
-                # Select timestep t for each modality
                 multi_modal_t = torch.stack([
                     env_emb[:, t, :, :],
                     infra_emb[:, t, :, :],
                     robot_emb[:, t, :, :],
-                    node_emb[:, t, :, :],   # 115-feature MLP embedding
+                    node_emb[:, t, :, :],
                 ], dim=2)
-
                 multi_modal_flat = multi_modal_t.reshape(B * N, 4, D)
                 fused_t, _ = self.fusion_attention(
                     multi_modal_flat, multi_modal_flat, multi_modal_flat
@@ -224,66 +233,70 @@ class UnifiedCascadePredictionModel(nn.Module):
                 fused_t = fused_t.mean(dim=1).reshape(B, N, D)
                 fused_t = self.fusion_norm(fused_t)
                 fused_list.append(fused_t)
-            
-            fused_sequence = torch.stack(fused_list, dim=1)
-            fused = fused_sequence[:, -1, :, :]
-            
+
+            fused_sequence = torch.stack(fused_list, dim=1)   # [B, T, N, D]
+            fused = fused_sequence[:, -1, :, :]               # last fused (for non-temporal fallback)
+
+            # ── LSTM processes T-1 timesteps; timestep T-1 is the physics target ──
+            # h_T captures short-range dynamics  → physics heads
+            # c_T accumulates long-range stress   → cascade heads
+            T_in = max(T - 1, 1)   # guard: never run 0 steps
+
             h_states = []
             lstm_state = None
-            
-            for t in range(T):
-                x_t = fused_sequence[:, t, :, :]
-                
-                # Select edge attributes for this timestep.
-                # [B, T, E, F] → use timestep t; [B, E, F] → reuse same for all t.
-                if edge_attr_input.dim() == 4:
-                    edge_attr_t = edge_attr_input[:, t, :, :]   # [B, E, F]
-                else:
-                    edge_attr_t = edge_attr_input               # [B, E, F] static
-                edge_embedded_t = self.edge_embedding(edge_attr_t)  # [B, E, hidden]
 
-                # Handle edge mask dimensions
+            for t in range(T_in):
+                x_t = fused_sequence[:, t, :, :]
+
+                if edge_attr_input.dim() == 4:
+                    edge_attr_t = edge_attr_input[:, t, :, :]
+                else:
+                    edge_attr_t = edge_attr_input
+                edge_embedded_t = self.edge_embedding(edge_attr_t)
+
                 if edge_mask_input is not None and edge_mask_input.dim() == 3:
                     mask_t = edge_mask_input[:, t, :]
                 else:
                     mask_t = edge_mask_input
-                
+
                 h_t, lstm_state = self.temporal_gnn(
                     x_t, batch['edge_index'], edge_embedded_t,
                     edge_mask=mask_t,
                     h_prev=lstm_state
                 )
                 h_states.append(h_t)
-            
-            # Use last timestep's edge embedding for the downstream GNN layers
+
+            # ── Extract cell state c_T for long-range cascade heads ──────────
+            # lstm_state = (h_new, c_new); each [LSTM_NUM_LAYERS, B*N, hidden_dim]
+            _, c_lstm = lstm_state
+            c_final = c_lstm[-1].reshape(B, N, self.temporal_gnn.hidden_dim)  # [B, N, D]
+
+            # ── Use last processed timestep's edge embedding for GNN layers ──
+            last_t = T_in - 1
             if edge_attr_input.dim() == 4:
-                edge_embedded = self.edge_embedding(edge_attr_input[:, -1, :, :])
+                edge_embedded = self.edge_embedding(edge_attr_input[:, last_t, :, :])
             else:
                 edge_embedded = self.edge_embedding(edge_attr_input)
-            
-            h_stack = torch.stack(h_states, dim=2)
-            
+
+            h_stack = torch.stack(h_states, dim=2)   # [B, N, T_in, D]
+
             if 'sequence_length' in batch:
                 lengths = batch['sequence_length']
-                # Move lengths to CPU to avoid CUDA illegal memory access
                 lengths_cpu = lengths.cpu()
                 h_final_list = []
                 for b in range(B):
-                    valid_idx = int(lengths_cpu[b]) - 1
-                    
-                    if valid_idx < 0:
-                        valid_idx = 0
-                    if valid_idx >= T:
-                        valid_idx = T - 1
+                    valid_idx = min(int(lengths_cpu[b]) - 1, T_in - 1)
+                    valid_idx = max(valid_idx, 0)
                     h_final_list.append(h_stack[b, :, valid_idx, :])
                 h = torch.stack(h_final_list, dim=0)
             else:
                 h = h_stack[:, :, -1, :]
         
         else:
-            # Non-temporal processing
+            # Non-temporal processing — no c_final; cascade heads fall back to h
+            c_final = None
             B, N, D = env_emb.shape
-            
+
             if robot_emb.dim() == 2:
                 robot_emb_expanded = robot_emb.unsqueeze(1).expand(-1, N, -1)
             else:
@@ -299,47 +312,64 @@ class UnifiedCascadePredictionModel(nn.Module):
             )
             B, N, M, D = multi_modal.shape
             multi_modal_flat = multi_modal.reshape(B * N, M, D)
-            
+
             fused, _ = self.fusion_attention(
                 multi_modal_flat, multi_modal_flat, multi_modal_flat
             )
             fused = fused.mean(dim=1).reshape(B, N, D)
             fused = self.fusion_norm(fused)
-            
+
             edge_embedded = self.edge_embedding(edge_attr_input)
-            
+
             h, _ = self.temporal_gnn(
                 fused, batch['edge_index'], edge_embedded,
                 edge_mask=edge_mask_input
             )
         
-        # Extract final edge mask
+        # ── Final edge mask ──────────────────────────────────────────────────
         final_mask = edge_mask_input[:, -1, :] if (
             edge_mask_input is not None and edge_mask_input.dim() == 3
         ) else edge_mask_input
-        
-        # Apply additional GNN layers
-        for i, (gnn_layer, layer_norm) in enumerate(zip(self.gnn_layers, self.layer_norms)):
+
+        # ── Additional sheaf layers refine spatial representation in h ───────
+        for gnn_layer, layer_norm in zip(self.gnn_layers, self.layer_norms):
             h_new = gnn_layer(h, batch['edge_index'], edge_embedded, edge_mask=final_mask)
             h = layer_norm(h + h_new)
 
-        # Multi-task predictions
-        failure_prob   = self.failure_prob_head(h)
-        failure_timing = self.failure_time_head(h)
-        risk_scores    = self.risk_head(h)
-        parent_logits  = self.parent_head(h)   # [B, N, N+1]
+        # ── Long-range cascade predictions (from c_T cell state) ─────────────
+        # In the non-temporal path, c_final is not available; fall back to h.
+        long_range_rep = c_final if has_temporal else h
 
-        # Check for NaN values
+        failure_prob   = self.failure_prob_head(long_range_rep)
+        failure_timing = self.failure_time_head(long_range_rep)
+        risk_scores    = self.risk_head(long_range_rep)
+        parent_logits  = self.parent_head(long_range_rep)    # [B, N, N+1]
+
+        # ── Short-range physics predictions (from h — spatially refined h_T) ─
+        voltage_pred = self.voltage_head(h)   # [B, N, 1]  — predict V at timestep T
+        temp_pred    = self.temp_head(h)      # [B, N, 1]  — predict temp at timestep T
+
+        # Flow head takes concatenated (src, dst) embeddings per edge
+        src_idx, dst_idx = batch['edge_index'][0], batch['edge_index'][1]
+        edge_h = torch.cat([h[:, src_idx, :], h[:, dst_idx, :]], dim=-1)  # [B, E, 2D]
+        flow_pred = self.flow_head(edge_h)    # [B, E, 1]  — predict P_ij at timestep T
+
         if torch.isnan(failure_prob).any():
             logging.error("[ERROR] NaN detected in failure_prob!")
-        
+
         return {
+            # Long-range cascade outputs
             'failure_probability': failure_prob,
-            'cascade_timing': failure_timing,
-            'risk_scores': risk_scores,
-            'parent_logits': parent_logits,
-            'node_embeddings': h,
-            'fused_embedding': fused
+            'cascade_timing':      failure_timing,
+            'risk_scores':         risk_scores,
+            'parent_logits':       parent_logits,
+            # Short-range physics outputs (only in temporal mode)
+            'voltage_pred':        voltage_pred if has_temporal else None,
+            'temp_pred':           temp_pred    if has_temporal else None,
+            'flow_pred':           flow_pred    if has_temporal else None,
+            # Embeddings (for debugging / downstream use)
+            'node_embeddings':     h,
+            'fused_embedding':     fused,
         }
     
     def compute_loss(

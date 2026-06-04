@@ -147,21 +147,40 @@ class Trainer:
         """
         Prepare targets dictionary from batch data.
 
-        Aligned with UnifiedCascadePredictionModel.forward() which outputs:
-            failure_probability  [B, N, 1]  → needs failure_label    [B, N]
-            cascade_timing       [B, N, 1]  → needs cascade_timing    [B, N]
-            risk_scores          [B, N, 7]  → needs ground_truth_risk [B, N, 7]
-            parent_logits        [B, N, N+1]→ needs parent_labels     [B, N]
+        Cascade targets (long-range, supervised against c_T cell state):
+            failure_label     [B, N]
+            cascade_timing    [B, N]
+            ground_truth_risk [B, N, 7]
+            parent_labels     [B, N]
 
-        Physics auxiliary heads (voltage, reactive, line_flows, frequency,
-        temperature) were removed from the model, so their targets are omitted.
+        Physics targets (short-range, supervised against h_T hidden state):
+            physics_voltage_target [B, N]  — V at held-out timestep T
+            physics_temp_target    [B, N]  — temperature at held-out timestep T
+            physics_flow_target    [B, E]  — line flow at held-out timestep T
         """
-        return {
-            'failure_label':    batch_device['node_failure_labels'],
+        targets = {
+            'failure_label':     batch_device['node_failure_labels'],
             'ground_truth_risk': batch_device.get('ground_truth_risk'),
-            'cascade_timing':   batch_device.get('cascade_timing'),
-            'parent_labels':    batch_device.get('parent_labels'),
+            'cascade_timing':    batch_device.get('cascade_timing'),
+            'parent_labels':     batch_device.get('parent_labels'),
         }
+
+        # Physics supervision: held-out last timestep of raw SCADA / edge_attr.
+        # The LSTM sees timesteps 0..T-2; timestep T-1 is the prediction target.
+        scada     = batch_device.get('scada_data')   # [B, T, N, 18]
+        edge_attr = batch_device.get('edge_attr')    # [B, T, E, 7] or [B, E, 7]
+
+        if scada is not None and scada.dim() == 4:
+            targets['physics_voltage_target'] = scada[:, -1, :, 0]   # p.u. voltage
+            targets['physics_temp_target']    = scada[:, -1, :, 5]   # temperature °C
+
+        if edge_attr is not None:
+            if edge_attr.dim() == 4:
+                targets['physics_flow_target'] = edge_attr[:, -1, :, 5]   # MW active flow
+            elif edge_attr.dim() == 3:
+                targets['physics_flow_target'] = edge_attr[:, :, 5]
+
+        return targets
     
     def _validate_model_outputs(self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]):
         """Validate that model outputs match expected format."""

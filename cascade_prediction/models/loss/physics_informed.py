@@ -20,11 +20,14 @@ from cascade_prediction.data.generator.config import Settings
 
 class PhysicsInformedLoss(nn.Module):
     """
-    Loss function combining four active prediction tasks:
-    1. Failure prediction (focal loss)
-    2. Risk assessment (MSE)
-    3. Cascade timing (regression + ranking)
-    4. Causal parent prediction (masked cross-entropy)
+    Loss function combining:
+    1. Failure prediction (focal loss)           — long-range, from c_T
+    2. Risk assessment (MSE)                     — long-range, from c_T
+    3. Cascade timing (regression + ranking)     — long-range, from c_T
+    4. Causal parent prediction (cross-entropy)  — long-range, from c_T
+    5. Voltage prediction (MSE)                  — short-range physics, from h_T
+    6. Temperature prediction (MSE)              — short-range physics, from h_T
+    7. Line flow prediction (MSE)                — short-range physics, from h_T
     """
 
     def __init__(
@@ -36,6 +39,9 @@ class PhysicsInformedLoss(nn.Module):
         focal_alpha: float = Settings.Loss.FOCAL_ALPHA,
         focal_gamma: float = Settings.Loss.FOCAL_GAMMA,
         parent_non_trigger_weight: float = Settings.Loss.PARENT_NON_TRIGGER_WEIGHT,
+        lambda_voltage: float = Settings.PhysicsPred.LAMBDA_VOLTAGE,
+        lambda_temp: float = Settings.PhysicsPred.LAMBDA_TEMP,
+        lambda_flow: float = Settings.PhysicsPred.LAMBDA_FLOW,
         **kwargs,  # absorbs removed auxiliary-head params from legacy call sites
     ):
         super().__init__()
@@ -45,6 +51,9 @@ class PhysicsInformedLoss(nn.Module):
             'risk':       lambda_risk,
             'timing':     lambda_timing,
             'parent':     lambda_parent,
+            'voltage':    lambda_voltage,
+            'temp':       lambda_temp,
+            'flow':       lambda_flow,
         }
         self.focal_alpha = focal_alpha
         self.focal_gamma = focal_gamma
@@ -139,6 +148,57 @@ class PhysicsInformedLoss(nn.Module):
 
         return torch.stack(losses).mean() if losses else torch.tensor(0.0, device=predicted.device)
 
+    def physics_supervision_loss(
+        self,
+        predictions: Dict[str, torch.Tensor],
+        targets: Dict[str, torch.Tensor],
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        MSE losses comparing short-range physics predictions (from h_T)
+        against the ground-truth physics values at the held-out timestep T.
+
+        Targets are extracted from the raw SCADA / edge_attr tensors by the
+        trainer and stored under the keys below.  If a target is absent the
+        corresponding term is silently skipped.
+
+        Keys expected in targets:
+          'physics_voltage_target' : [B, N]  — scada[:, -1, :, 0]  (p.u. voltage)
+          'physics_temp_target'    : [B, N]  — scada[:, -1, :, 5]  (°C temperature)
+          'physics_flow_target'    : [B, E]  — edge_attr[:, -1, :, 5] (MW line flow)
+        """
+        total = torch.tensor(0.0, device=next(iter(predictions.values()),
+                                              torch.zeros(1)).device)
+        loss_dict: Dict[str, float] = {}
+
+        def _mse(pred: Optional[torch.Tensor],
+                 target: Optional[torch.Tensor],
+                 key: str, lam: float):
+            nonlocal total
+            if pred is None or target is None:
+                return
+            p = pred.squeeze(-1)   # [B, N] or [B, E]
+            if p.shape != target.shape:
+                return
+            L = F.mse_loss(p, target.float())
+            total = total + lam * L
+            loss_dict[key] = L.item()
+
+        _mse(predictions.get('voltage_pred'),
+             targets.get('physics_voltage_target'),
+             'voltage_pred', self.lambdas['voltage'])
+
+        raw_temp = targets.get('physics_temp_target')
+        temp_target_normed = (raw_temp / 100.0) if raw_temp is not None else None
+        _mse(predictions.get('temp_pred'),
+             temp_target_normed,
+             'temp_pred', self.lambdas['temp'])
+
+        _mse(predictions.get('flow_pred'),
+             targets.get('physics_flow_target'),
+             'flow_pred', self.lambdas['flow'])
+
+        return total, loss_dict
+
     def forward(
         self,
         predictions: Dict[str, torch.Tensor],
@@ -202,6 +262,11 @@ class PhysicsInformedLoss(nn.Module):
                 )
                 total_loss = total_loss + self.lambdas['parent'] * L_parent
                 loss_dict['parent'] = L_parent.item()
+
+        # --- 5. PHYSICS SUPERVISION (short-range, from h_T) ---
+        phys_loss, phys_dict = self.physics_supervision_loss(predictions, targets)
+        total_loss = total_loss + phys_loss
+        loss_dict.update(phys_dict)
 
         loss_dict['total'] = total_loss.item()
         return total_loss, loss_dict

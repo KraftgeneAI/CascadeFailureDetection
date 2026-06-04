@@ -70,7 +70,7 @@ class VoltageHead(nn.Module):
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, 1),
-            nn.ReLU()  # Allows prediction of any positive voltage
+            nn.Softplus()  # Smooth positive activation: never exactly 0, no dying-unit risk
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -150,11 +150,13 @@ class FrequencyHead(nn.Module):
 
 class TemperatureHead(nn.Module):
     """
-    Predicts node/line temperatures.
+    Predicts node/line temperatures (normalised: °C / 100).
 
     Physics-informed: Temperature must be positive.
+    Training target is divided by 100 in the loss so the MSE scale matches the
+    voltage loss (~1 p.u.) and neither term dominates the other.
 
-    Output: [batch_size, num_nodes, 1] with ReLU activation (positive values)
+    Output: [batch_size, num_nodes, 1] with ReLU activation (positive values ≥ 0)
     """
 
     def __init__(self, hidden_dim: int, dropout: float = Settings.Model.HEAD_DROPOUT_LOW):

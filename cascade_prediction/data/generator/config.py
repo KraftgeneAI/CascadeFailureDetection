@@ -346,6 +346,15 @@ class ModelConfig:
 
 
 # ---------------------------------------------------------------------------
+# Physics Supervision (next-step prediction from LSTM hidden state h_T)
+# ---------------------------------------------------------------------------
+class PhysicsPredConfig:
+    LAMBDA_VOLTAGE  = 0.5   # MSE loss: predicted V_{T} vs scada[:, -1, :, 0]
+    LAMBDA_TEMP     = 0.5   # MSE loss: predicted temp_{T} vs scada[:, -1, :, 5]
+    LAMBDA_FLOW     = 0.3   # MSE loss: predicted P_ij_{T} vs edge_attr[:, -1, :, 5]
+
+
+# ---------------------------------------------------------------------------
 # Loss Function
 # ---------------------------------------------------------------------------
 class LossConfig:
@@ -486,3 +495,4 @@ class Settings:
     Model         = ModelConfig
     Loss          = LossConfig
     Embedding     = EmbeddingConfig
+    PhysicsPred   = PhysicsPredConfig
