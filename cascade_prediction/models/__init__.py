@@ -13,9 +13,7 @@ This package contains:
 
 # Import embeddings
 from .embeddings import (
-    EnvironmentalEmbedding,
     InfrastructureEmbedding,
-    RoboticEmbedding,
 )
 
 # Import layers
@@ -46,9 +44,7 @@ from .unified_model import UnifiedCascadePredictionModel
 
 __all__ = [
     # Embeddings
-    'EnvironmentalEmbedding',
     'InfrastructureEmbedding',
-    'RoboticEmbedding',
     # Layers
     'GraphAttentionLayer',
     'TemporalGNNCell',

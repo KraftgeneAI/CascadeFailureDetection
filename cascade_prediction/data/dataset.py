@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional
 import numpy as np
 import glob
+import re
 from tqdm import tqdm
 import json
 
@@ -76,106 +77,75 @@ class CascadeDataset(Dataset):
         # Define cache path
         cache_file = self.data_dir / "metadata_cache.json"
         self.cascade_labels = []
-        
+
         # Load from cache if available
         if os.path.exists(cache_file):
             print(f"Loading labels from cache: {cache_file}")
             with open(cache_file, 'r') as f:
                 self.cascade_labels = json.load(f)
-            
-            # Safety check
             if len(self.cascade_labels) != len(self.scenario_files):
                 print("Warning: Cache length mismatch. Re-scanning...")
                 self.cascade_labels = []
-        
+
         # Scan files if no cache
         if not self.cascade_labels:
-            print(f"Scanning {len(self.scenario_files)} files for metadata (First Run)...")
-            
+            print(f"Scanning {len(self.scenario_files)} files for metadata (first run)...")
             for scenario_file in tqdm(self.scenario_files):
                 try:
                     with open(scenario_file, 'rb') as f:
                         scenario_data = pickle.load(f)
-                    
-                    # Handle list vs dict wrapper
-                    if isinstance(scenario_data, list):
-                        if len(scenario_data) == 0:
-                            self.cascade_labels.append(False)
-                            continue
-                        scenario = scenario_data[0]
-                    else:
-                        scenario = scenario_data
-                    
+                    scenario = scenario_data[0] if isinstance(scenario_data, list) else scenario_data
                     if not isinstance(scenario, dict):
                         self.cascade_labels.append(False)
                         continue
-                    
-                    # Extract label
                     if 'metadata' in scenario and 'is_cascade' in scenario['metadata']:
-                        has_cascade = scenario['metadata']['is_cascade']
+                        has_cascade = bool(scenario['metadata']['is_cascade'])
                     elif 'sequence' in scenario and len(scenario['sequence']) > 0:
                         last_step = scenario['sequence'][-1]
-                        has_cascade = bool(np.max(last_step.get('node_labels', np.zeros(1))) > Settings.Dataset.CASCADE_LABEL_THRESHOLD)
+                        has_cascade = bool(
+                            np.max(last_step.get('node_labels', np.zeros(1)))
+                            > Settings.Dataset.CASCADE_LABEL_THRESHOLD
+                        )
                     else:
                         has_cascade = False
-                    
                     self.cascade_labels.append(has_cascade)
-                
-                except (IOError, pickle.UnpicklingError, EOFError) as e:
+                except (IOError, pickle.UnpicklingError, EOFError):
                     print(f"Warning: Skipping corrupted file: {scenario_file}")
                     self.cascade_labels.append(False)
-            
-            # Save cache
+
             try:
                 with open(cache_file, 'w') as f:
                     json.dump(self.cascade_labels, f)
                 print(f"Saved metadata cache to {cache_file}")
             except Exception as e:
                 print(f"Warning: Could not save cache: {e}")
-        
+
         # Print statistics
         print(f"Physics normalization: base_mva={base_mva}, base_frequency={base_frequency}")
         print(f"Indexed {len(self.scenario_files)} scenarios.")
-        
         if len(self.cascade_labels) == 0:
-            print(f"  [WARNING] No valid scenarios found!")
+            print("  [WARNING] No valid scenarios found!")
         else:
             positive_count = sum(self.cascade_labels)
             total = len(self.cascade_labels)
             print(f"  Cascade scenarios: {positive_count} ({positive_count/total*100:.1f}%)")
-            print(f"  Normal scenarios: {total - positive_count} ({(total - positive_count)/total*100:.1f}%)")
-        
+            print(f"  Normal scenarios:  {total - positive_count} ({(total-positive_count)/total*100:.1f}%)")
         print(f"Ultra-memory-efficient mode: Loading 1 file per sample.")
     
     def __len__(self) -> int:
         return len(self.scenario_files)
-    
+
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        """
-        Load and process a single scenario.
-        
-        Args:
-            idx: Scenario index
-        
-        Returns:
-            Dictionary containing all processed data for the scenario
-        """
+        """Load and process a single scenario."""
         scenario_file = self.scenario_files[idx]
-        
+
         try:
             with open(scenario_file, 'rb') as f:
                 scenario_data = pickle.load(f)
-            
-            if isinstance(scenario_data, list):
-                if len(scenario_data) == 0:
-                    return {}
-                scenario = scenario_data[0]
-            else:
-                scenario = scenario_data
-            
+            scenario = scenario_data[0] if isinstance(scenario_data, list) else scenario_data
             if not isinstance(scenario, dict):
                 return {}
-        
+
         except Exception as e:
             print(f"Error loading {scenario_file}: {e}. Returning empty dict.")
             return {}
@@ -227,13 +197,7 @@ class CascadeDataset(Dataset):
         
         # Initialize data containers
         data_arrays = {
-            'satellite_data': [],
             'scada_data': [],
-            'weather_sequence': [],
-            'threat_indicators': [],
-            'visual_data': [],
-            'thermal_data': [],
-            'sensor_data': [],
             'pmu_sequence': [],
             'equipment_status': [],
             'edge_mask': [],
@@ -285,15 +249,6 @@ class CascadeDataset(Dataset):
                 pmu_data[:, 5] = normalize_frequency(pmu_data[:, 5], self.base_frequency)
             data_arrays['pmu_sequence'].append(to_tensor(pmu_data))
             
-            # Other modalities
-            weather_data = ts.get('weather_sequence', np.zeros((num_nodes, 10, 8))).astype(np.float32)
-            data_arrays['weather_sequence'].append(to_tensor(weather_data.reshape(num_nodes, -1)))
-            
-            data_arrays['satellite_data'].append(to_tensor(ts.get('satellite_data', np.zeros((num_nodes, 12, 16, 16)))))
-            data_arrays['threat_indicators'].append(to_tensor(ts.get('threat_indicators', np.zeros((num_nodes, 6)))))
-            data_arrays['visual_data'].append(to_tensor(ts.get('visual_data', np.zeros((num_nodes, 3, 32, 32)))))
-            data_arrays['thermal_data'].append(to_tensor(ts.get('thermal_data', np.zeros((num_nodes, 1, 32, 32)))))
-            data_arrays['sensor_data'].append(to_tensor(ts.get('sensor_data', np.zeros((num_nodes, 12)))))
             data_arrays['equipment_status'].append(to_tensor(ts.get('equipment_status', np.zeros((num_nodes, 10)))))
 
             # Per-timestep edge attributes — cols 5-6 (line_flows, line_flows_q) are dynamic
@@ -443,14 +398,6 @@ class CascadeDataset(Dataset):
             scada_tensor = scada_tensor + noise
 
         return {
-            # Masked modalities (zeroed)
-            'satellite_data': torch.zeros_like(torch.stack(data_arrays['satellite_data'])),
-            'weather_sequence': torch.zeros_like(torch.stack(data_arrays['weather_sequence'])),
-            'threat_indicators': torch.zeros_like(torch.stack(data_arrays['threat_indicators'])),
-            'visual_data': torch.zeros_like(torch.stack(data_arrays['visual_data'])),
-            'thermal_data': torch.zeros_like(torch.stack(data_arrays['thermal_data'])),
-            'sensor_data': torch.zeros_like(torch.stack(data_arrays['sensor_data'])),
-            # Active modalities
             'scada_data': scada_tensor,
             'pmu_sequence': torch.stack(data_arrays['pmu_sequence']),
             'equipment_status': torch.stack(data_arrays['equipment_status']),
@@ -741,14 +688,8 @@ class CascadeDataset(Dataset):
         # Create synthetic data
         T = 1
         scada_data = torch.randn(T, num_nodes, 13)
-        weather_sequence = torch.randn(T, num_nodes, 80)
-        threat_indicators = torch.randn(T, num_nodes, 6)
         pmu_sequence = torch.randn(T, num_nodes, 8)
         equipment_status = torch.randn(T, num_nodes, 10)
-        satellite_data = torch.randn(T, num_nodes, 12, 16, 16)
-        visual_data = torch.randn(T, num_nodes, 3, 32, 32)
-        thermal_data = torch.randn(T, num_nodes, 1, 32, 32)
-        sensor_data = torch.randn(T, num_nodes, 12)
         edge_attr = torch.randn(num_edges, 7)
         edge_mask = torch.ones(T, num_edges)
         
@@ -761,14 +702,6 @@ class CascadeDataset(Dataset):
         ground_truth_risk = metadata.get('ground_truth_risk', np.zeros(7, dtype=np.float32))
         
         item = {
-            # Masked modalities
-            'satellite_data': torch.zeros_like(satellite_data[0]),
-            'weather_sequence': torch.zeros_like(weather_sequence[0]),
-            'threat_indicators': torch.zeros_like(threat_indicators[0]),
-            'visual_data': torch.zeros_like(visual_data[0]),
-            'thermal_data': torch.zeros_like(thermal_data[0]),
-            'sensor_data': torch.zeros_like(sensor_data[0]),
-            # Active modalities
             'scada_data': scada_data[0],
             'pmu_sequence': pmu_sequence[0],
             'equipment_status': equipment_status[0],
@@ -782,9 +715,7 @@ class CascadeDataset(Dataset):
         }
         
         if self.mode == 'full_sequence':
-            for key in ['satellite_data', 'scada_data', 'weather_sequence', 'threat_indicators',
-                       'visual_data', 'thermal_data', 'sensor_data', 'pmu_sequence',
-                       'equipment_status', 'edge_mask']:
+            for key in ['scada_data', 'pmu_sequence', 'equipment_status', 'edge_mask']:
                 item[key] = item[key].unsqueeze(0)
             item['temporal_sequence'] = item['scada_data']
             item['sequence_length'] = 1

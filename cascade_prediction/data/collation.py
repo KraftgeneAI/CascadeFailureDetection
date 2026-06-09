@@ -15,9 +15,7 @@ from typing import List, Dict, Any
 # They must all be truncated to the same global min_len so the model
 # never sees mismatched T across modalities (which causes a CUDA assert).
 _TEMPORAL_KEYS = {
-    'satellite_data', 'visual_data', 'thermal_data',
-    'scada_data', 'weather_sequence', 'threat_indicators',
-    'equipment_status', 'pmu_sequence', 'sensor_data', 'edge_mask',
+    'scada_data', 'pmu_sequence', 'equipment_status', 'edge_mask',
     'temporal_sequence',
     'edge_attr',        # [T, E, 7] — per-timestep line flows
     'node_features',    # [T, N, 115] — per-node MLP feature tensor

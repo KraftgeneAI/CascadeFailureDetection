@@ -117,7 +117,7 @@ class TestCascadeDataset:
     def test_dataset_initialization(self, temp_data_dir, mock_cascade_scenario):
         """Test dataset initialization."""
         # Save a scenario file
-        scenario_file = temp_data_dir / "scenario_0.pkl"
+        scenario_file = temp_data_dir / "scenarios_batch_0.pkl"
         with open(scenario_file, 'wb') as f:
             pickle.dump(mock_cascade_scenario, f)
         
@@ -136,7 +136,7 @@ class TestCascadeDataset:
         """Test dataset length calculation."""
         # Save multiple scenarios
         for i, scenario in enumerate([mock_cascade_scenario, mock_normal_scenario]):
-            scenario_file = temp_data_dir / f"scenario_{i}.pkl"
+            scenario_file = temp_data_dir / f"scenarios_batch_{i}.pkl"
             with open(scenario_file, 'wb') as f:
                 pickle.dump(scenario, f)
         
@@ -145,7 +145,7 @@ class TestCascadeDataset:
     
     def test_getitem_cascade(self, temp_data_dir, mock_cascade_scenario):
         """Test loading a cascade scenario."""
-        scenario_file = temp_data_dir / "scenario_0.pkl"
+        scenario_file = temp_data_dir / "scenarios_batch_0.pkl"
         with open(scenario_file, 'wb') as f:
             pickle.dump(mock_cascade_scenario, f)
         
@@ -169,7 +169,7 @@ class TestCascadeDataset:
     
     def test_getitem_normal(self, temp_data_dir, mock_normal_scenario):
         """Test loading a normal scenario."""
-        scenario_file = temp_data_dir / "scenario_0.pkl"
+        scenario_file = temp_data_dir / "scenarios_batch_0.pkl"
         with open(scenario_file, 'wb') as f:
             pickle.dump(mock_normal_scenario, f)
         
@@ -181,7 +181,7 @@ class TestCascadeDataset:
     
     def test_normalization(self, temp_data_dir, mock_cascade_scenario):
         """Test physics-based normalization."""
-        scenario_file = temp_data_dir / "scenario_0.pkl"
+        scenario_file = temp_data_dir / "scenarios_batch_0.pkl"
         with open(scenario_file, 'wb') as f:
             pickle.dump(mock_cascade_scenario, f)
         
@@ -200,7 +200,7 @@ class TestCascadeDataset:
     
     def test_edge_mask_creation(self, temp_data_dir, mock_cascade_scenario):
         """Test edge mask creation."""
-        scenario_file = temp_data_dir / "scenario_0.pkl"
+        scenario_file = temp_data_dir / "scenarios_batch_0.pkl"
         with open(scenario_file, 'wb') as f:
             pickle.dump(mock_cascade_scenario, f)
         
@@ -217,7 +217,7 @@ class TestCascadeDataset:
     
     def test_graph_properties_extraction(self, temp_data_dir, mock_cascade_scenario):
         """Test graph properties extraction."""
-        scenario_file = temp_data_dir / "scenario_0.pkl"
+        scenario_file = temp_data_dir / "scenarios_batch_0.pkl"
         with open(scenario_file, 'wb') as f:
             pickle.dump(mock_cascade_scenario, f)
         
@@ -232,7 +232,7 @@ class TestCascadeDataset:
     
     def test_cache_creation(self, temp_data_dir, mock_cascade_scenario):
         """Test metadata cache creation."""
-        scenario_file = temp_data_dir / "scenario_0.pkl"
+        scenario_file = temp_data_dir / "scenarios_batch_0.pkl"
         with open(scenario_file, 'wb') as f:
             pickle.dump(mock_cascade_scenario, f)
         
@@ -254,7 +254,7 @@ class TestCascadeDataset:
     def test_corrupted_file_handling(self, temp_data_dir):
         """Test handling of corrupted pickle files."""
         # Create a corrupted file
-        corrupted_file = temp_data_dir / "scenario_0.pkl"
+        corrupted_file = temp_data_dir / "scenarios_batch_0.pkl"
         with open(corrupted_file, 'w') as f:
             f.write("This is not a valid pickle file")
         
@@ -269,7 +269,7 @@ class TestCascadeDataset:
     def test_get_cascade_label(self, temp_data_dir, mock_cascade_scenario, mock_normal_scenario):
         """Test get_cascade_label method."""
         for i, scenario in enumerate([mock_cascade_scenario, mock_normal_scenario]):
-            scenario_file = temp_data_dir / f"scenario_{i}.pkl"
+            scenario_file = temp_data_dir / f"scenarios_batch_{i}.pkl"
             with open(scenario_file, 'wb') as f:
                 pickle.dump(scenario, f)
         
@@ -280,7 +280,7 @@ class TestCascadeDataset:
     
     def test_mode_full_sequence(self, temp_data_dir, mock_cascade_scenario):
         """Test full_sequence mode."""
-        scenario_file = temp_data_dir / "scenario_0.pkl"
+        scenario_file = temp_data_dir / "scenarios_batch_0.pkl"
         with open(scenario_file, 'wb') as f:
             pickle.dump(mock_cascade_scenario, f)
         
@@ -293,7 +293,7 @@ class TestCascadeDataset:
     
     def test_mode_last_timestep(self, temp_data_dir, mock_cascade_scenario):
         """Test last_timestep mode."""
-        scenario_file = temp_data_dir / "scenario_0.pkl"
+        scenario_file = temp_data_dir / "scenarios_batch_0.pkl"
         with open(scenario_file, 'wb') as f:
             pickle.dump(mock_cascade_scenario, f)
         

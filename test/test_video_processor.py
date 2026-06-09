@@ -188,12 +188,12 @@ class TestOutputProperties:
         assert np.all(signal >= 0.0), f"min={signal.min()}"
         assert np.all(signal <= 1.0), f"max={signal.max()}"
 
-    def test_output_max_is_one_when_nonzero_detections(self):
-        """After min-max normalisation, the maximum must be 1.0.
+    def test_output_max_is_nonzero_when_nonzero_detections(self):
+        """A frame with detections must produce a positive score.
 
         Uses two frames: one with a detection (non-zero score) and one without
-        (zero score) so the raw signal is non-constant and normalisation maps
-        the peak to exactly 1.0.
+        (zero score). The raw area fraction (box_area / frame_area) is returned
+        directly (clipped to [0, 1]) — no min-max normalisation.
         """
         frames = [_BLANK_FRAME.copy(), _BLANK_FRAME.copy()]
         cap = _make_cap(frames)
@@ -207,7 +207,7 @@ class TestOutputProperties:
                 signal = extract_threat_curve(
                     "v.mp4", frame_skip=1, confidence_threshold=0.1
                 )
-        assert float(signal.max()) == pytest.approx(1.0)
+        assert float(signal.max()) > 0.0
 
     def test_constant_zero_signal_is_all_zeros(self):
         """If no frame scores any detection, output is all-zero."""
@@ -308,8 +308,8 @@ class TestConfidenceThreshold:
     def test_above_threshold_detection_contributes(self):
         """Detections above confidence_threshold contribute a positive score.
 
-        Frame 0 has a high-conf detection; frame 1 has none. The two frames
-        produce different raw scores, so normalisation maps the peak to 1.0.
+        Frame 0 has a high-conf detection; frame 1 has none. The raw area
+        fraction (box_area / frame_area) is returned directly — no normalisation.
         """
         frames = [_BLANK_FRAME.copy(), _BLANK_FRAME.copy()]
         cap = _make_cap(frames)
@@ -324,8 +324,8 @@ class TestConfidenceThreshold:
             with patch("video_processor.YOLO", return_value=model):
                 signal = extract_threat_curve("v.mp4", frame_skip=1, confidence_threshold=0.5)
 
-        # Non-constant raw signal → max normalised to 1.0
-        assert float(signal.max()) == pytest.approx(1.0)
+        # Detection frame has positive score; no-detection frame is zero
+        assert float(signal.max()) > 0.0
 
     def test_mixed_confidence_partial_filtering(self):
         """Mix of above- and below-threshold detections: only above count."""
@@ -344,9 +344,8 @@ class TestConfidenceThreshold:
             with patch("video_processor.YOLO", return_value=model):
                 signal = extract_threat_curve("v.mp4", frame_skip=1, confidence_threshold=0.5)
 
-        # First frame has detection, second does not
-        # After normalisation: max should be 1.0, last element 0
-        assert float(signal.max()) == pytest.approx(1.0)
+        # First frame has detection (positive score), second is filtered (zero)
+        assert float(signal.max()) > 0.0
         assert float(signal[-1]) == pytest.approx(0.0)
 
 
@@ -357,30 +356,25 @@ class TestConfidenceThreshold:
 
 class TestScoringFormula:
 
-    def test_score_is_conf_times_sqrt_area_ratio(self):
+    def test_score_is_box_area_over_frame_area(self):
         """
-        Per-frame score = conf * sqrt(box_area / frame_area).
-        With a 100×100 box in a 640×640 frame and conf=1.0:
-          area_ratio = 10000 / 409600 ≈ 0.024414
-          raw_score  = 1.0 * sqrt(0.024414) ≈ 0.15625
-        After min-max normalisation of a single-value signal → max = 0 (constant).
-        We verify the *raw* mean before normalisation by checking the
-        output is all-zero for a constant signal.
+        Per-frame score = total_box_area / frame_area (clipped to [0, 1]).
+        With a 100×100 box in a 640×640 frame:
+          score = 10000 / 409600 ≈ 0.024414
+        Same detection every frame → constant signal, all equal to that value.
         """
-        # Two identical frames so signal is constant → normalised to 0
         frames = [_BLANK_FRAME.copy(), _BLANK_FRAME.copy()]
         cap = _make_cap(frames)
 
         model = MagicMock()
-        # Same detection every frame → constant signal → normalised all-zero
         model.return_value = _make_results([_make_box(conf=1.0, x1=0, y1=0, x2=100, y2=100)])
 
         with patch("video_processor.cv2.VideoCapture", return_value=cap):
             with patch("video_processor.YOLO", return_value=model):
                 signal = extract_threat_curve("v.mp4", frame_skip=1, confidence_threshold=0.0)
 
-        # Constant raw values → min == max → normalised to all-zero
-        assert np.all(signal == 0.0)
+        expected = 10000 / (640 * 640)
+        assert np.allclose(signal, expected)
 
     def test_larger_box_gives_higher_score(self):
         """A larger bounding box should produce a higher per-frame score."""
@@ -539,8 +533,8 @@ class TestNormalisation:
         assert np.all(signal >= 0.0)
         assert np.all(signal <= 1.0)
 
-    def test_all_same_raw_score_produces_all_zeros(self):
-        """When min == max, signal is set to all zeros (no divide-by-zero)."""
+    def test_all_same_raw_score_produces_constant_signal(self):
+        """Identical detections every frame → all values equal (raw area fraction, no normalisation)."""
         frames = [_BLANK_FRAME.copy() for _ in range(3)]
         cap = _make_cap(frames)
 
@@ -552,7 +546,9 @@ class TestNormalisation:
             with patch("video_processor.YOLO", return_value=model):
                 signal = extract_threat_curve("v.mp4", frame_skip=1, confidence_threshold=0.0)
 
-        assert np.all(signal == 0.0)
+        # All frames equal; value is box_area / frame_area for the default box
+        assert np.all(signal == signal[0])
+        assert float(signal[0]) > 0.0
 
 
 if __name__ == "__main__":
