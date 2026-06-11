@@ -133,6 +133,79 @@ class CascadePredictor:
             "cascade_sequence": cascade_sequence,   # causal chain with parent links
         }
 
+    def predict_window(
+        self,
+        data_path: str,
+        scenario_idx: int,
+        end_step: int,
+        start_step: int = 0,
+    ) -> Dict:
+        """
+        Deterministic inference on an explicit window of a scenario.
+
+        Used by streaming mode: the model sees sequence[start_step:end_step]
+        (no random truncation). Requires end_step - start_step >= 10.
+
+        Returns a lean dict: cascade_detected, cascade_probability,
+        risky_nodes [{node_id, score, pred_time_minutes}].
+        """
+        if end_step - start_step < 10:
+            raise ValueError(
+                f"Window must be >= 10 timesteps, got {end_step - start_step}"
+            )
+
+        dataset = CascadeDataset(
+            data_path,
+            mode="full_sequence",
+            base_mva=self.base_mva,
+            base_frequency=self.base_freq,
+            fixed_window=(start_step, end_step),
+        )
+
+        item = dataset[scenario_idx]
+        if not item:
+            raise ValueError(
+                f"Scenario {scenario_idx} could not be loaded from {data_path}"
+            )
+
+        original_seq_len = int(
+            item.get("original_sequence_length", Settings.Simulation.DEFAULT_SEQUENCE_LENGTH)
+        )
+
+        batch = collate_cascade_batch([item])
+        batch_dev = {
+            k: (v.to(self.device) if isinstance(v, torch.Tensor) else v)
+            for k, v in batch.items()
+        }
+
+        with torch.no_grad():
+            outputs = self.model(batch_dev)
+
+        probs = outputs["failure_probability"].squeeze(-1).squeeze(0).sigmoid().cpu().numpy()
+
+        DT_MINUTES = Settings.Thermal.DT_MINUTES
+        pred_timing_normed = outputs["cascade_timing"].squeeze(-1).squeeze(0).cpu().numpy()
+        pred_timing_minutes = pred_timing_normed * original_seq_len * DT_MINUTES
+
+        risky_nodes = sorted(
+            [
+                {
+                    "node_id": int(n),
+                    "score": float(probs[n]),
+                    "pred_time_minutes": float(pred_timing_minutes[n]),
+                }
+                for n in range(len(probs))
+                if probs[n] > self.node_threshold
+            ],
+            key=lambda x: x["pred_time_minutes"],
+        )
+
+        return {
+            "cascade_detected": bool(risky_nodes),
+            "cascade_probability": max((n["score"] for n in risky_nodes), default=0.0),
+            "risky_nodes": risky_nodes,
+        }
+
     def _build_cascade_path(self, ranked_nodes: List[Dict]) -> List[Dict]:
         cascade_path = []
         if not ranked_nodes:

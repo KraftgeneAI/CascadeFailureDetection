@@ -52,21 +52,26 @@ class CascadeDataset(Dataset):
         data_dir: str,
         mode: str = 'last_timestep',
         base_mva: float = Settings.Dataset.BASE_MVA,
-        base_frequency: float = Settings.Dataset.BASE_FREQUENCY
+        base_frequency: float = Settings.Dataset.BASE_FREQUENCY,
+        fixed_window: Optional[Tuple[int, int]] = None
     ):
         """
         Initialize dataset from a directory of scenario files.
-        
+
         Args:
             data_dir: Directory containing scenario_*.pkl files
             mode: Dataset mode ('last_timestep' or 'full_sequence')
             base_mva: Base MVA for power normalization
             base_frequency: Base frequency for normalization (Hz)
+            fixed_window: Optional (start_idx, end_idx) that bypasses random
+                sliding-window truncation. Used for deterministic streaming
+                inference on an explicit window (e.g. steps 0..t).
         """
         self.data_dir = Path(data_dir)
         self.mode = mode
         self.base_mva = base_mva
         self.base_frequency = base_frequency
+        self.fixed_window = fixed_window
         
         # Find all scenario files
         print(f"Indexing scenarios from: {data_dir}")
@@ -186,13 +191,20 @@ class CascadeDataset(Dataset):
         # Apply truncation
         cascade_start_time = metadata.get('cascade_start_time', -1)
         is_cascade = metadata.get('is_cascade', False)
-        
-        start_idx, end_idx = calculate_truncation_window(
-            len(sequence_original),
-            cascade_start_time,
-            is_cascade
-        )
-        
+
+        if self.fixed_window is not None:
+            # Deterministic explicit window (streaming inference) — bypass
+            # random truncation entirely.
+            start_idx, end_idx = self.fixed_window
+            start_idx = max(0, int(start_idx))
+            end_idx = min(len(sequence_original), int(end_idx))
+        else:
+            start_idx, end_idx = calculate_truncation_window(
+                len(sequence_original),
+                cascade_start_time,
+                is_cascade
+            )
+
         sequence = apply_truncation(sequence_original, start_idx, end_idx)
         
         # Initialize data containers
