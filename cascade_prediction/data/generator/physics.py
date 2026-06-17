@@ -56,7 +56,10 @@ class PowerFlowSimulator:
         self.num_nodes = num_nodes
         self.num_edges = edge_index.shape[1]
         self.node_types = node_types
-        
+        # Keep the (bidirectional) edge index so result extraction can map each
+        # directed edge back to its single physical PyPSA line (see Fix #2).
+        self.edge_index = np.asarray(edge_index)
+
         # Per-node power factors based on node type (tan(phi) = Q/P)
         # Load buses (0): mixed residential/commercial/industrial
         #   - residential: pf ~0.95 → tan(phi) ~0.33
@@ -149,23 +152,43 @@ class PowerFlowSimulator:
                 q_set=0.0
             )
         
-        # Add transmission lines
+        # Add transmission lines.
+        # Fix (#2): edge_index is bidirectional, so add ONE PyPSA Line per
+        # *undirected* pair instead of one per directed edge (which created two
+        # parallel branches per line, halving reactance and doubling capacity).
+        # Build a mapping from every directed edge -> (physical line name, sign)
+        # so flows can be mapped back to all directed edges during extraction.
         src, dst = edge_index
+        self.edge_to_line = {}   # directed edge idx -> (line_name, sign)
+        self.line_buses = {}     # line_name -> (bus0_idx, bus1_idx)  (bus0 < bus1)
+        seen = {}                # (min,max) pair -> line_name
+        line_counter = 0
         for i in range(self.num_edges):
             s, d = int(src[i]), int(dst[i])
-            network.add(
-                "Line",
-                f"line_{i}",
-                bus0=f"bus_{s}",
-                bus1=f"bus_{d}",
-                x=line_reactance[i],
-                r=line_resistance[i],
-                b=line_susceptance[i],
-                g=line_conductance[i],
-                s_nom=thermal_limits[i],
-                length=1.0
-            )
-        
+            key = (min(s, d), max(s, d))
+            if key not in seen:
+                name = f"line_{line_counter}"
+                network.add(
+                    "Line",
+                    name,
+                    bus0=f"bus_{key[0]}",
+                    bus1=f"bus_{key[1]}",
+                    x=line_reactance[i],
+                    r=line_resistance[i],
+                    b=line_susceptance[i],
+                    g=line_conductance[i],
+                    s_nom=thermal_limits[i],
+                    length=1.0
+                )
+                seen[key] = name
+                self.line_buses[name] = key
+                line_counter += 1
+            name = seen[key]
+            # +1 if this directed edge runs bus0->bus1 (PyPSA p0 convention), else -1
+            sign = 1.0 if (s, d) == key else -1.0
+            self.edge_to_line[i] = (name, sign)
+
+        self.num_phys_lines = line_counter
         return network
     
     def compute_power_flow(
@@ -198,102 +221,81 @@ class PowerFlowSimulator:
         # with actual load so there is no over/under-compensation at any stress level.
         q_load = load * self.tan_phi * Settings.PowerFlow.Q_LOAD_FACTOR
 
-        # Store original states for restoration
-        original_bus_states = {}
-        original_gen_states = {}
-        original_load_states = {}
-        original_line_states = {}
-        
-        # Handle failed nodes - PROPERLY ISOLATE BUSES
-        if failed_nodes:
-            failed_node_set = set(failed_nodes)
-            
-            # 1. Disable failed buses
-            for node_idx in failed_nodes:
-                bus_name = f"bus_{node_idx}"
-                if 'in_service' in self.network.buses.columns:
-                    original_bus_states[bus_name] = self.network.buses.loc[bus_name, "in_service"]
-                    self.network.buses.loc[bus_name, "in_service"] = False
-                
-                # 2. Disable generators at failed buses
-                gen_name = f"gen_{node_idx}"
-                if gen_name in self.network.generators.index:
-                    original_gen_states[gen_name] = {
-                        'p_set': self.network.generators.loc[gen_name, "p_set"]
-                    }
-                    if 'in_service' in self.network.generators.columns:
-                        original_gen_states[gen_name]['in_service'] = self.network.generators.loc[gen_name, "in_service"]
-                        self.network.generators.loc[gen_name, "in_service"] = False
-                    else:
-                        # Fallback: set p_set to 0
-                        self.network.generators.loc[gen_name, "p_set"] = 0.0
-                
-                # 3. Disable loads at failed buses
-                load_name = f"load_{node_idx}"
-                if 'in_service' in self.network.loads.columns:
-                    original_load_states[load_name] = self.network.loads.loc[load_name, "in_service"]
-                    self.network.loads.loc[load_name, "in_service"] = False
-                else:
-                    # Fallback: set p_set and q_set to 0
-                    original_load_states[load_name] = {
-                        'p_set': self.network.loads.loc[load_name, "p_set"],
-                        'q_set': self.network.loads.loc[load_name, "q_set"]
-                    }
-                    self.network.loads.loc[load_name, "p_set"] = 0.0
-                    self.network.loads.loc[load_name, "q_set"] = 0.0
-            
-            # 4. Disable lines connected to failed buses
-            for line_idx in range(self.num_edges):
-                line_name = f"line_{line_idx}"
-                src, dst = int(self.network.lines.loc[line_name, "bus0"].split("_")[1]), \
-                           int(self.network.lines.loc[line_name, "bus1"].split("_")[1])
-                
-                if src in failed_node_set or dst in failed_node_set:
-                    if line_name not in original_line_states:
-                        if 'in_service' in self.network.lines.columns:
-                            original_line_states[line_name] = self.network.lines.loc[line_name, "in_service"]
-                            self.network.lines.loc[line_name, "in_service"] = False
-        
-        # Update generator setpoints for active nodes
+        failed_node_set = set(int(n) for n in failed_nodes) if failed_nodes else set()
+
+        # Record everything we mutate so we can restore the pristine base network.
+        restore = {
+            'gen_p_set': {}, 'gen_control': {}, 'gen_active': {},
+            'load_p_set': {}, 'load_q_set': {}, 'load_active': {},
+            'line_active': {}, 'dummy_gens': [],
+        }
+
+        # 1. Generator active-power setpoints (failed generators contribute 0).
         gen_indices = np.where(self.node_types == 1)[0]
         for idx in gen_indices:
-            if failed_nodes and idx in failed_nodes:
-                continue  # Already disabled above
-            
             gen_name = f"gen_{idx}"
-            if gen_name not in original_gen_states:
-                original_gen_states[gen_name] = {
-                    'p_set': self.network.generators.loc[gen_name, "p_set"]
-                }
-                if 'in_service' in self.network.generators.columns:
-                    original_gen_states[gen_name]['in_service'] = self.network.generators.loc[gen_name, "in_service"]
-            self.network.generators.loc[gen_name, "p_set"] = generation[idx]
-        
-        # Update load setpoints for active nodes
+            restore['gen_p_set'][gen_name] = self.network.generators.at[gen_name, "p_set"]
+            self.network.generators.at[gen_name, "p_set"] = (
+                0.0 if idx in failed_node_set else generation[idx]
+            )
+
+        # 2. Load setpoints (failed loads contribute 0).
         for i in range(self.num_nodes):
-            if failed_nodes and i in failed_nodes:
-                continue  # Already disabled above
-            
             load_name = f"load_{i}"
-            if load_name not in original_load_states:
-                if 'in_service' in self.network.loads.columns:
-                    original_load_states[load_name] = self.network.loads.loc[load_name, "in_service"]
-                else:
-                    original_load_states[load_name] = {
-                        'p_set': self.network.loads.loc[load_name, "p_set"],
-                        'q_set': self.network.loads.loc[load_name, "q_set"]
-                    }
-            self.network.loads.loc[load_name, "p_set"] = load[i]
-            self.network.loads.loc[load_name, "q_set"] = q_load[i]
-        
-        # Handle explicitly failed lines (in addition to those connected to failed buses)
+            restore['load_p_set'][load_name] = self.network.loads.at[load_name, "p_set"]
+            restore['load_q_set'][load_name] = self.network.loads.at[load_name, "q_set"]
+            if i in failed_node_set:
+                self.network.loads.at[load_name, "p_set"] = 0.0
+                self.network.loads.at[load_name, "q_set"] = 0.0
+            else:
+                self.network.loads.at[load_name, "p_set"] = load[i]
+                self.network.loads.at[load_name, "q_set"] = q_load[i]
+
+        # 3. PROPERLY remove failed nodes from the solved network (Fix #3).
+        # PyPSA has no 'in_service' attribute (that is pandapower); it uses
+        # 'active' on generators/loads/lines.  Deactivating a component truly
+        # removes it from the power-flow sub-network, so flow redistributes onto
+        # the remaining corridors — the physics a cascade depends on.
+        if failed_node_set:
+            for idx in failed_node_set:
+                gen_name = f"gen_{idx}"
+                if gen_name in self.network.generators.index:
+                    restore['gen_active'][gen_name] = bool(self.network.generators.at[gen_name, "active"])
+                    self.network.generators.at[gen_name, "active"] = False
+                load_name = f"load_{idx}"
+                restore['load_active'][load_name] = bool(self.network.loads.at[load_name, "active"])
+                self.network.loads.at[load_name, "active"] = False
+
+            # Deactivate every physical line touching a failed bus.
+            for name, (b0, b1) in self.line_buses.items():
+                if b0 in failed_node_set or b1 in failed_node_set:
+                    if name not in restore['line_active']:
+                        restore['line_active'][name] = bool(self.network.lines.at[name, "active"])
+                        self.network.lines.at[name, "active"] = False
+
+            # A failed bus is now an isolated single-bus sub-network with no
+            # reference, which PyPSA cannot solve.  Give each one a tiny dummy
+            # slack so the solve succeeds; its output is masked to 0 anyway.
+            for idx in failed_node_set:
+                dummy = f"_failslack_{idx}"
+                if dummy in self.network.generators.index:
+                    self.network.remove("Generator", dummy)
+                self.network.add(
+                    "Generator", dummy, bus=f"bus_{idx}",
+                    control="Slack", p_set=0.0, v_set=1.0, p_nom=1e-3,
+                )
+                restore['dummy_gens'].append(dummy)
+
+        # 4. Explicitly failed lines (map directed edge idx -> physical line).
         if failed_lines:
-            for line_idx in failed_lines:
-                line_name = f"line_{line_idx}"
-                if line_name not in original_line_states:
-                    if 'in_service' in self.network.lines.columns:
-                        original_line_states[line_name] = self.network.lines.loc[line_name, "in_service"]
-                        self.network.lines.loc[line_name, "in_service"] = False
+            for e_idx in failed_lines:
+                mapped = self.edge_to_line.get(int(e_idx))
+                if mapped is None:
+                    continue
+                name = mapped[0]
+                if name not in restore['line_active']:
+                    restore['line_active'][name] = bool(self.network.lines.at[name, "active"])
+                    self.network.lines.at[name, "active"] = False
         
         # Give every failed/isolated bus a tiny dummy Slack generator so its
         # single-bus sub-network still has an angle reference. Without one,
@@ -314,18 +316,18 @@ class PowerFlowSimulator:
         # If the slack bus (node 0) is failed, reassign slack to the next active generator.
         # Without a slack bus PyPSA has no angle reference and will crash.
         slack_reassigned = None
-        if failed_nodes and 0 in failed_nodes:
-            gen_indices = np.where(self.node_types == 1)[0]
+        if 0 in failed_node_set:
             for candidate in gen_indices:
-                if candidate not in failed_nodes:
-                    self.network.generators.loc[f"gen_{candidate}", "control"] = "Slack"
+                if candidate not in failed_node_set:
+                    gen_name = f"gen_{candidate}"
+                    restore['gen_control'][gen_name] = self.network.generators.at[gen_name, "control"]
+                    self.network.generators.at[gen_name, "control"] = "Slack"
                     slack_reassigned = candidate
                     break
             if slack_reassigned is None:
                 # No generators left — full collapse
                 self._remove_dummy_gens(dummy_gens)
-                self._restore_network_state(original_bus_states, original_gen_states,
-                                            original_load_states, original_line_states)
+                self._restore_network_state(restore)
                 return self._get_default_results()
 
         try:
@@ -334,6 +336,7 @@ class PowerFlowSimulator:
             # distribute_slack spreads imbalance across all PV generators,
             # reducing voltage stress on the single slack bus at high load.
             status = self.network.pf(use_seed=False, distribute_slack=True)
+            is_stable = self._pf_converged(status)
             converged = status.get("converged")
             if hasattr(converged, "values"):   # DataFrame: snapshots × sub-networks
                 # ALL sub-networks must converge (an edited grid with a
@@ -348,10 +351,7 @@ class PowerFlowSimulator:
 
             if not is_stable:
                 self._remove_dummy_gens(dummy_gens)
-                self._restore_network_state(original_bus_states, original_gen_states,
-                                            original_load_states, original_line_states)
-                if slack_reassigned is not None:
-                    self.network.generators.loc[f"gen_{slack_reassigned}", "control"] = "PV"
+                self._restore_network_state(restore)
                 return self._get_default_results()
 
             # Extract results
@@ -360,10 +360,7 @@ class PowerFlowSimulator:
 
             # Restore network state
             self._remove_dummy_gens(dummy_gens)
-            self._restore_network_state(original_bus_states, original_gen_states,
-                                        original_load_states, original_line_states)
-            if slack_reassigned is not None:
-                self.network.generators.loc[f"gen_{slack_reassigned}", "control"] = "PV"
+            self._restore_network_state(restore)
 
             return voltages, angles, line_flows_p, node_reactive, line_flows_q, True
 
@@ -372,11 +369,28 @@ class PowerFlowSimulator:
             print(f"  [WARNING] Power flow exception: {type(e).__name__}: {e}")
             traceback.print_exc()
             self._remove_dummy_gens(dummy_gens)
-            self._restore_network_state(original_bus_states, original_gen_states,
-                                        original_load_states, original_line_states)
-            if slack_reassigned is not None:
-                self.network.generators.loc[f"gen_{slack_reassigned}", "control"] = "PV"
+            self._restore_network_state(restore)
             return self._get_default_results()
+
+    @staticmethod
+    def _pf_converged(status) -> bool:
+        """Robustly read the convergence flag from network.pf() across PyPSA versions."""
+        conv = None
+        if hasattr(status, "converged"):
+            conv = status.converged              # namedtuple-style result
+        elif isinstance(status, dict):
+            conv = status.get("converged")
+        if conv is None:
+            return False
+        if hasattr(conv, "iloc"):                # DataFrame
+            return bool(conv.iloc[0, 0])
+        if isinstance(conv, dict):
+            inner = next(iter(conv.values()), {})
+            return bool(next(iter(inner.values()), False)) if isinstance(inner, dict) else bool(inner)
+        try:
+            return bool(np.all(conv))
+        except Exception:
+            return bool(conv)
     
     def _extract_bus_results(self, failed_nodes: Optional[List[int]] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -433,31 +447,32 @@ class PowerFlowSimulator:
         """
         line_flows_p = np.zeros(self.num_edges)
         line_flows_q = np.zeros(self.num_edges)
-        
-        failed_line_set = set(failed_lines) if failed_lines else set()
-        failed_node_set = set(failed_nodes) if failed_nodes else set()
-        
+
+        failed_line_set = set(int(l) for l in failed_lines) if failed_lines else set()
+        failed_node_set = set(int(n) for n in failed_nodes) if failed_nodes else set()
+
+        src, dst = self.edge_index
+        p0 = getattr(self.network.lines_t, "p0", None)
+        q0 = getattr(self.network.lines_t, "q0", None)
+
         for i in range(self.num_edges):
-            line_name = f"line_{i}"
-            
-            # Check if line is connected to failed nodes
-            src = int(self.network.lines.loc[line_name, "bus0"].split("_")[1])
-            dst = int(self.network.lines.loc[line_name, "bus1"].split("_")[1])
-            
-            if i in failed_line_set or src in failed_node_set or dst in failed_node_set:
-                # Failed lines have zero flow
-                line_flows_p[i] = 0.0
-                line_flows_q[i] = 0.0
-            else:
-                # Active lines: extract from power flow results
-                try:
-                    line_flows_p[i] = self.network.lines_t.p0.loc["now", line_name]
-                    line_flows_q[i] = self.network.lines_t.q0.loc["now", line_name]
-                except (KeyError, AttributeError):
-                    # Line might be in isolated island - use zero flow
-                    line_flows_p[i] = 0.0
-                    line_flows_q[i] = 0.0
-        
+            s, d = int(src[i]), int(dst[i])
+
+            if i in failed_line_set or s in failed_node_set or d in failed_node_set:
+                # Failed / out-of-service edges carry zero flow
+                continue
+
+            # Map this directed edge back to its single physical PyPSA line.
+            # 'sign' restores the source->destination orientation of this edge
+            # relative to the line's bus0->bus1 convention (Fix #2).
+            name, sign = self.edge_to_line[i]
+            try:
+                line_flows_p[i] = float(p0.at["now", name]) * sign
+                line_flows_q[i] = float(q0.at["now", name]) * sign
+            except (KeyError, AttributeError, TypeError):
+                # Line in an isolated island / not solved — leave as zero flow
+                continue
+
         return line_flows_p, line_flows_q
 
     def _remove_dummy_gens(self, names: List[str]) -> None:
@@ -466,50 +481,41 @@ class PowerFlowSimulator:
             if name in self.network.generators.index:
                 self.network.remove("Generator", name)
 
-    def _restore_network_state(
-        self,
-        original_bus_states: Dict,
-        original_gen_states: Dict,
-        original_load_states: Dict,
-        original_line_states: Dict
-    ):
+    def _restore_network_state(self, restore: Dict):
         """
-        Restore network to original state after power flow simulation.
-        
+        Restore the network to its pristine base state after a power-flow call.
+
+        Reverses every mutation recorded in ``restore`` (setpoints, 'active'
+        flags, slack reassignment) and removes any temporary dummy slack
+        generators that were added to isolated failed buses.
+
         Args:
-            original_bus_states: Original bus in_service states
-            original_gen_states: Original generator states (in_service, p_set)
-            original_load_states: Original load in_service states or {p_set, q_set}
-            original_line_states: Original line in_service states
+            restore: State dictionary populated by ``compute_power_flow``.
         """
-        # Restore buses
-        for bus_name, state in original_bus_states.items():
-            if 'in_service' in self.network.buses.columns:
-                self.network.buses.loc[bus_name, "in_service"] = state
-        
-        # Restore generators
-        for gen_name, states in original_gen_states.items():
-            if gen_name in self.network.generators.index:
-                if 'in_service' in states:
-                    if 'in_service' in self.network.generators.columns:
-                        self.network.generators.loc[gen_name, "in_service"] = states['in_service']
-                self.network.generators.loc[gen_name, "p_set"] = states['p_set']
-        
-        # Restore loads
-        for load_name, state in original_load_states.items():
-            if isinstance(state, dict):
-                # Fallback mode: restore p_set and q_set
-                self.network.loads.loc[load_name, "p_set"] = state['p_set']
-                self.network.loads.loc[load_name, "q_set"] = state['q_set']
-            else:
-                # Normal mode: restore in_service
-                if 'in_service' in self.network.loads.columns:
-                    self.network.loads.loc[load_name, "in_service"] = state
-        
-        # Restore lines
-        for line_name, state in original_line_states.items():
-            if 'in_service' in self.network.lines.columns:
-                self.network.lines.loc[line_name, "in_service"] = state
+        # Remove temporary dummy slack generators first.
+        for name in restore.get('dummy_gens', []):
+            if name in self.network.generators.index:
+                self.network.remove("Generator", name)
+
+        # Reactivate components.
+        for gen_name, val in restore.get('gen_active', {}).items():
+            self.network.generators.at[gen_name, "active"] = val
+        for load_name, val in restore.get('load_active', {}).items():
+            self.network.loads.at[load_name, "active"] = val
+        for line_name, val in restore.get('line_active', {}).items():
+            self.network.lines.at[line_name, "active"] = val
+
+        # Restore slack reassignment.
+        for gen_name, val in restore.get('gen_control', {}).items():
+            self.network.generators.at[gen_name, "control"] = val
+
+        # Restore setpoints.
+        for gen_name, val in restore.get('gen_p_set', {}).items():
+            self.network.generators.at[gen_name, "p_set"] = val
+        for load_name, val in restore.get('load_p_set', {}).items():
+            self.network.loads.at[load_name, "p_set"] = val
+        for load_name, val in restore.get('load_q_set', {}).items():
+            self.network.loads.at[load_name, "q_set"] = val
     
     def _get_default_results(self) -> Tuple:
         """Return default results when power flow fails."""

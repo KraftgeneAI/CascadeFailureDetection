@@ -119,6 +119,14 @@ class ThermalConfig:
     DIURNAL_AMPLITUDE_C = 8.0           # ±°C diurnal swing around base ambient
     DIURNAL_PEAK_HOUR   = 14            # Hour of day for peak temperature
 
+    # Heat-generation scale for the (degree-invariant) MEAN incident-line
+    # loading^2 proxy used by PhysicsBasedGridSimulator._get_heat_generation.
+    # Tuned so normal/stressed loadings stay well below the failure threshold
+    # (~40-60°C rise) and only sustained real overload (line loading >~1.5)
+    # drives equipment to the overheating trip point. Raise toward 2.0 to make
+    # temperature a more active failure mode; lower toward 1.0 to make it inert.
+    HEAT_SCALE          = 1.5
+
 
 # ---------------------------------------------------------------------------
 # Node Properties (topology initialisation)

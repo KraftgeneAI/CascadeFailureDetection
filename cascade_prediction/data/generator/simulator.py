@@ -207,6 +207,30 @@ class PhysicsBasedGridSimulator:
         min_thermal_limit = total_load * Settings.LineImpedance.THERMAL_MIN_FRACTION
         self.thermal_limits = np.maximum(self.thermal_limits, min_thermal_limit)
 
+        # --- Fix (#2): edge_index is bidirectional, so each physical line appears
+        # as two directed columns (i->j and j->i).  Their parameters were drawn
+        # independently above, producing an inconsistent asymmetric pair.  Mirror
+        # every per-edge parameter so both directed copies of the same undirected
+        # line carry identical values.  The power-flow simulator then builds ONE
+        # PyPSA Line per undirected pair, and both edge_attr rows stay consistent.
+        src_np = src.numpy().astype(np.int64)
+        dst_np = dst.numpy().astype(np.int64)
+        canon_key = (np.minimum(src_np, dst_np) * self.num_nodes
+                     + np.maximum(src_np, dst_np))
+        _uniq, rep_idx, inv = np.unique(canon_key, return_index=True, return_inverse=True)
+
+        def _mirror(arr):
+            # Broadcast each undirected line's representative value back to both
+            # of its directed edge slots.
+            return arr[rep_idx][inv]
+
+        self.line_reactance   = _mirror(self.line_reactance)
+        self.line_resistance  = _mirror(self.line_resistance)
+        self.line_susceptance = _mirror(self.line_susceptance)
+        self.line_conductance = _mirror(self.line_conductance)
+        self.thermal_limits   = _mirror(self.thermal_limits)
+
+
         # Decommissioned nodes (topology edits): buses that exist in the
         # arrays but are permanently out of service. Empty for generated
         # grids; from_grid_state() fills it from the block's removed_nodes.
@@ -427,17 +451,35 @@ class PhysicsBasedGridSimulator:
         """
         Compute per-node heat generation from line loading ratios.
 
-        Heat is proportional to I²R.  We use (apparent loading ratio)² as a
-        dimensionless current² proxy so the scale stays consistent with the
-        thermal model tuning regardless of the chosen resistance units.
-        Each line's heat is split equally between its two endpoint nodes.
+        Heat is proportional to I²R; we use (apparent loading ratio)² as a
+        dimensionless current² proxy.  Crucially this is the **mean** of that
+        proxy over a node's incident lines, NOT the sum:
+
+        - A degree-invariant mean prevents high-degree hubs (e.g. the slack bus,
+          which touches many lines) from accumulating unbounded heat and
+          overheating first in every scenario — the failure mode that made
+          'normal'/'stressed' scenarios trip immediately after the line-dedup
+          fix raised single-line loadings.
+        - Taking the mean also cancels the 2x double-count that would otherwise
+          arise from the bidirectional edge_index (each physical line appears as
+          two directed columns).
+
+        The result is multiplied by Settings.Thermal.HEAT_SCALE, which calibrates
+        the absolute temperature rise so normal/stressed loadings stay safe and
+        only sustained real overload reaches the overheating threshold.
         """
         src, dst = self.edge_index
-        heat_per_line = loading_ratios ** 2          # dimensionless, 0–(several) range
-        heat_generation = np.zeros(self.num_nodes)
-        np.add.at(heat_generation, src.numpy(), heat_per_line / 2)
-        np.add.at(heat_generation, dst.numpy(), heat_per_line / 2)
-        return heat_generation
+        loading_sq = loading_ratios ** 2             # dimensionless current² proxy
+        heat_sum = np.zeros(self.num_nodes)
+        degree   = np.zeros(self.num_nodes)
+        np.add.at(heat_sum, src.numpy(), loading_sq)
+        np.add.at(heat_sum, dst.numpy(), loading_sq)
+        np.add.at(degree,   src.numpy(), 1.0)
+        np.add.at(degree,   dst.numpy(), 1.0)
+        mean_loading_sq = np.divide(
+            heat_sum, degree, out=np.zeros_like(heat_sum), where=degree > 0
+        )
+        return mean_loading_sq * Settings.Thermal.HEAT_SCALE
 
     def _generate_time_series(
         self,

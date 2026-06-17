@@ -580,6 +580,10 @@ class Trainer:
                 pbar.set_postfix({'loss': f"{loss.item():.4f}"})
         
         # Concatenate all probabilities and labels
+        if not all_node_probs:
+            logging.warning("[SKIP] Validation set is empty — no batches processed.")
+            return {'val_loss': 0.0, 'val_node_f1': 0.0, 'val_cascade_auc': 0.0}
+
         global_node_probs = torch.cat(all_node_probs)
         global_node_labels = torch.cat(all_node_labels)
         global_cascade_probs = torch.cat(all_cascade_probs)
