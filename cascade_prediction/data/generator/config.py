@@ -224,6 +224,14 @@ class CascadeConfig:
     FAILURE_DELAY_MAX           = 0.5
     STRESS_DECAY                = 0.80  # Downstream stress decay factor
 
+    # Independent line tripping (Phase 0 — MISO data gap plan)
+    # A line trips on its own when apparent power exceeds
+    # LINE_TRIP_LOADING_RATIO × thermal_limit for LINE_TRIP_SUSTAIN_STEPS
+    # consecutive timesteps. The 1.2 factor is an interim proxy for the
+    # emergency (LEP) rating; Phase 1 replaces it with an explicit rating set.
+    LINE_TRIP_LOADING_RATIO     = 1.2
+    LINE_TRIP_SUSTAIN_STEPS     = 3
+
     # Cascade adjacency propagation weights
     WEIGHT_GEN_TO_SUB   = 0.9
     WEIGHT_SUB_TO_LOAD  = 0.7

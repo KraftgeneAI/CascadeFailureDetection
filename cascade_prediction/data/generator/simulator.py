@@ -28,7 +28,7 @@ import pypsa
 
 from .topology import GridTopologyGenerator, NodePropertyInitializer
 from .physics import PowerFlowSimulator, FrequencyDynamicsSimulator, ThermalDynamicsSimulator
-from .cascade import CascadeSimulator, create_adjacency_list
+from .cascade import CascadeSimulator, LineTripMonitor, create_adjacency_list
 from .environmental import EnvironmentalDataGenerator
 from .robotic import RoboticDataGenerator
 from .utils import get_failed_lines_from_nodes
@@ -326,6 +326,9 @@ class PhysicsBasedGridSimulator:
             self.frequency_failure_threshold, self.frequency_damage_threshold
         )
 
+        # Phase 0 — independent line tripping (sustained thermal overload)
+        self.line_trip_monitor = LineTripMonitor(self.edge_index.numpy())
+
         self.video_folder = video_folder
         self.video_path = None  # Set per cascade scenario via set_video()
 
@@ -510,6 +513,12 @@ class PhysicsBasedGridSimulator:
         failure_record: Dict[int, Tuple[int, str, Optional[int]]] = {}
         cascade_start_time = -1
 
+        # Phase 0 — independent line failures (first-class state, not just
+        # derived from failed nodes). line_failure_record: edge idx → timestep.
+        cumulative_failed_lines: set = set()
+        line_failure_record: Dict[int, int] = {}
+        self.line_trip_monitor.reset()
+
         # Stress ramp: rise from 60% to 100% of stress_level over first RAMP_FRACTION of sequence
         earlest_cascade_time = max(1, int(sequence_length * (np.random.uniform(Settings.Simulation.RAMP_FRACTION_MIN, Settings.Simulation.RAMP_FRACTION_MAX))))
         alpha = (0.75/stress_level - 0.6) / earlest_cascade_time
@@ -561,8 +570,12 @@ class PhysicsBasedGridSimulator:
             # FLOW purposes only — node_labels still track cumulative_failed
             # (decommissioned ≠ failed; they must not become training labels).
             failed_nodes_t = list(cumulative_failed_nodes | self.decommissioned_nodes)
-            failed_lines_t = get_failed_lines_from_nodes(
-                self.edge_index.numpy(), cumulative_failed_nodes
+            # Failed lines = node-derived ∪ independently tripped (Phase 0)
+            failed_lines_t = sorted(
+                set(get_failed_lines_from_nodes(
+                    self.edge_index.numpy(), cumulative_failed_nodes
+                ))
+                | cumulative_failed_lines
             )
             # Run power flow
             voltages, angles, line_flows, node_reactive, line_flows_q, is_stable = (
@@ -596,6 +609,22 @@ class PhysicsBasedGridSimulator:
             # ratios so both active and reactive current contribute to thermal
             # loading, consistent with how propagate_cascade_physics works.
             loading_ratios = np.sqrt(line_flows**2 + line_flows_q**2) / (self.thermal_limits + 1e-6)
+
+            # Phase 0 — independent line tripping: a line sustaining apparent
+            # power above LINE_TRIP_LOADING_RATIO × thermal limit for
+            # LINE_TRIP_SUSTAIN_STEPS consecutive steps trips on its own, with
+            # no attached node failure. Takes effect in next timestep's power
+            # flow (this step it was still overloaded-but-connected).
+            newly_tripped_lines = self.line_trip_monitor.update(
+                loading_ratios, set(failed_lines_t)
+            )
+            for line_idx in newly_tripped_lines:
+                cumulative_failed_lines.add(line_idx)
+                line_failure_record.setdefault(line_idx, t)
+            if newly_tripped_lines:
+                print(f"  [LINE TRIP] t={t}: lines {newly_tripped_lines} tripped "
+                      f"on sustained overload (no node failure)")
+
             heat_generation = self._get_heat_generation(loading_ratios)
 
             current_frequency, load_values = self.frequency_sim.update_frequency(
@@ -682,7 +711,8 @@ class PhysicsBasedGridSimulator:
                     extra_failed_nodes=self.decommissioned_nodes,
                     power_flow_simulator=self.power_flow_sim,
                     edge_index=self.edge_index.numpy(),
-                    thermal_limits=self.thermal_limits
+                    thermal_limits=self.thermal_limits,
+                    initial_failed_lines=list(cumulative_failed_lines)
                 )
                 # Record every failure from this cascade wave (initial + propagated)
                 for fail_node, fail_time_offset, fail_reason, fail_parent in cascade_sequence:
@@ -723,6 +753,11 @@ class PhysicsBasedGridSimulator:
             result['failure_reasons']     = failure_reasons_out
             result['failure_parents']     = failure_parents_out
             result['actual_cascade_start'] = cascade_start_time
+            # Phase 0 — independently tripped lines (sorted by trip time)
+            failed_lines_out = sorted(line_failure_record.keys(),
+                                      key=lambda e: line_failure_record[e])
+            result['failed_lines']      = failed_lines_out
+            result['line_failure_times'] = [line_failure_record[e] for e in failed_lines_out]
         return result
     
     def _compute_node_risk_vectors(

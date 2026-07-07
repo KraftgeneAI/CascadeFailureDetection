@@ -16,6 +16,90 @@ from .utils import get_failed_lines_from_nodes
 from .config import Settings
 
 
+class LineTripMonitor:
+    """
+    Independent line tripping via a sustained-overload timer (Phase 0).
+
+    Tracks per-edge overload duration and trips a line when its apparent-power
+    loading exceeds ``trip_ratio`` × thermal limit for ``sustain_steps``
+    consecutive timesteps — no attached node failure required.
+
+    Mirrored-pair consistency: ``edge_index`` stores each physical line as two
+    directed columns (i→j and j→i). Trips are applied to the whole undirected
+    group so both rows always carry identical status.
+    """
+
+    def __init__(
+        self,
+        edge_index: np.ndarray,
+        trip_ratio: float = Settings.Cascade.LINE_TRIP_LOADING_RATIO,
+        sustain_steps: int = Settings.Cascade.LINE_TRIP_SUSTAIN_STEPS,
+    ):
+        """
+        Args:
+            edge_index: Edge connectivity [2, num_edges] (directed, mirrored pairs)
+            trip_ratio: loading_ratio threshold that starts/advances the timer
+            sustain_steps: consecutive overloaded steps required to trip
+        """
+        self.num_edges = edge_index.shape[1]
+        self.trip_ratio = trip_ratio
+        self.sustain_steps = sustain_steps
+        self.overload_timer = np.zeros(self.num_edges, dtype=np.int64)
+
+        # Group directed edge indices by undirected line (canonical key).
+        src = np.asarray(edge_index[0], dtype=np.int64)
+        dst = np.asarray(edge_index[1], dtype=np.int64)
+        num_nodes = int(max(src.max(), dst.max())) + 1
+        canon_key = np.minimum(src, dst) * num_nodes + np.maximum(src, dst)
+        groups: Dict[int, List[int]] = {}
+        for i, k in enumerate(canon_key):
+            groups.setdefault(int(k), []).append(i)
+        # mirror_group[i] = all directed indices sharing edge i's physical line
+        self._group_of = [np.array(groups[int(k)], dtype=np.int64) for k in canon_key]
+
+    def reset(self):
+        """Clear all overload timers (call at the start of each scenario)."""
+        self.overload_timer[:] = 0
+
+    def update(
+        self,
+        loading_ratios: np.ndarray,
+        already_failed_lines: Set[int],
+    ) -> List[int]:
+        """
+        Advance timers one timestep and return newly tripped line indices.
+
+        Args:
+            loading_ratios: per-edge apparent power / thermal limit
+            already_failed_lines: directed indices already out of service
+                (node-derived or previously tripped) — ignored by the timer
+
+        Returns:
+            Sorted list of newly tripped directed edge indices,
+            mirror-consistent (both rows of a pair trip together).
+        """
+        overloaded = loading_ratios >= self.trip_ratio
+        if already_failed_lines:
+            failed_idx = np.fromiter(already_failed_lines, dtype=np.int64)
+            overloaded[failed_idx] = False
+
+        # Sustained-overload timer: increment while overloaded, reset otherwise.
+        self.overload_timer = np.where(overloaded, self.overload_timer + 1, 0)
+
+        tripped: Set[int] = set()
+        for i in np.nonzero(self.overload_timer >= self.sustain_steps)[0]:
+            if int(i) in already_failed_lines:
+                continue
+            # Trip the whole mirrored group for consistency.
+            for j in self._group_of[int(i)]:
+                if int(j) not in already_failed_lines:
+                    tripped.add(int(j))
+
+        for j in tripped:
+            self.overload_timer[j] = 0
+        return sorted(tripped)
+
+
 class CascadeSimulator:
     """
     Simulates cascade failure propagation through power grid.
@@ -200,6 +284,7 @@ class CascadeSimulator:
         power_flow_simulator,
         edge_index: np.ndarray,
         thermal_limits: np.ndarray,
+        initial_failed_lines: Optional[List[int]] = None,
         extra_failed_nodes: Optional[Set[int]] = None
     ) -> List[Tuple[int, float, str]]:
         """
@@ -218,6 +303,9 @@ class CascadeSimulator:
             power_flow_simulator: PowerFlowSimulator instance
             edge_index: Edge connectivity
             thermal_limits: Line thermal limits
+            initial_failed_lines: Directed edge indices already out of service
+                before this cascade wave
+
             extra_failed_nodes: Buses permanently out of service (e.g.
                 decommissioned by a topology edit). Unioned into every
                 power-flow call so isolated buses don't break convergence,
@@ -242,10 +330,16 @@ class CascadeSimulator:
 
         queue = [(node[0], 0.0) for node in initial_failed_nodes]
         visited = set(node[0] for node in initial_failed_nodes)
-        
-        # Calculate failed lines from failed nodes (incl. decommissioned)
-        failed_lines = get_failed_lines_from_nodes(
-            edge_index, failed_nodes | extra_failed)
+
+        # Independently tripped lines (Phase 0) stay out of service throughout.
+        independent_failed_lines = set(initial_failed_lines or [])
+
+        # Failed lines = node-derived ∪ independently tripped (incl. decommissioned)
+        failed_lines = sorted(
+            set(get_failed_lines_from_nodes(
+            edge_index, failed_nodes | extra_failed))
+            | independent_failed_lines
+        )
         
         # Recompute power flow after initial failures
         print(f"    [POWER FLOW] Recomputing after initial failures: {list(failed_nodes)}")
@@ -314,9 +408,12 @@ class CascadeSimulator:
                     generation[neighbor]=0
                     load[neighbor]=0
                     
-                    # Calculate failed lines from all failed nodes (incl. decommissioned)
-                    failed_lines = get_failed_lines_from_nodes(
-                        edge_index, failed_nodes | extra_failed)
+                    # Failed lines = node-derived ∪ independently tripped (incl. decommissioned)
+                    failed_lines = sorted(
+                        set(get_failed_lines_from_nodes(
+                        edge_index, failed_nodes | extra_failed))
+                        | independent_failed_lines
+                    )
 
                     print(f"    [POWER FLOW] Recomputing after node {neighbor} failure...")
                     print(f"    [POWER FLOW] Total failed nodes: {len(failed_nodes)}, Failed lines: {len(failed_lines)}")
