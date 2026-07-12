@@ -225,12 +225,28 @@ class CascadeConfig:
     STRESS_DECAY                = 0.80  # Downstream stress decay factor
 
     # Independent line tripping (Phase 0 — MISO data gap plan)
-    # A line trips on its own when apparent power exceeds
-    # LINE_TRIP_LOADING_RATIO × thermal_limit for LINE_TRIP_SUSTAIN_STEPS
-    # consecutive timesteps. The 1.2 factor is an interim proxy for the
-    # emergency (LEP) rating; Phase 1 replaces it with an explicit rating set.
+    # [MISO RTO-SPEC-006: "Switching-device (breaker/switch) open/closed
+    #  status" — prerequisite: gives breakers line-level trip events to report]
+    # A line trips on its own when apparent power exceeds a rating tier for a
+    # sustained number of consecutive timesteps.
+    # LINE_TRIP_LOADING_RATIO is the scalar fallback used when no per-edge
+    # emergency ratings are supplied (pre-Phase-1 behavior).
     LINE_TRIP_LOADING_RATIO     = 1.2
-    LINE_TRIP_SUSTAIN_STEPS     = 3
+    LINE_TRIP_SUSTAIN_STEPS     = 3   # steps above emergency rating before trip
+    LINE_TRIP_LOAD_DUMP_STEPS   = 1   # steps above load-dump rating before trip
+
+    # Multi-rating lines (Phase 1 — MISO data gap plan)
+    # [MISO RTO-SPEC-006: "Line ratings — normal / emergency (LEP) / load-dump
+    #  set" (was: single thermal limit)]
+    # Per-edge rating tiers as random multiples of the normal rating
+    # (thermal_limits). Emergency = MISO's LEP rating; load-dump is the
+    # minutes-only ceiling. loading_ratios stay normalized by the NORMAL
+    # rating everywhere — tiers are thresholds on that ratio, so heat, node
+    # thresholds, and training features keep their calibration.
+    EMERGENCY_RATING_FACTOR_MIN = 1.15
+    EMERGENCY_RATING_FACTOR_MAX = 1.30
+    LOAD_DUMP_RATING_FACTOR_MIN = 1.40
+    LOAD_DUMP_RATING_FACTOR_MAX = 1.55
 
     # Cascade adjacency propagation weights
     WEIGHT_GEN_TO_SUB   = 0.9
@@ -355,7 +371,13 @@ class ModelConfig:
     HEAD_DROPOUT_LOW    = 0.3           # Dropout for voltage / angle / flow / temperature heads
     LSTM_NUM_LAYERS     = 3             # LSTM layer count in TemporalGNNCell
     LSTM_DROPOUT        = 0.3           # LSTM internal dropout
-    EDGE_FEATURES       = 7             # Edge feature vector length
+    # Edge feature vector length. Phase 1 (MISO plan) appended 3 cols to the
+    # original 7: [7] branch_status (binary), [8] emergency limit, [9] load-dump
+    # limit. Existing indices 0–6 unchanged (append-only invariant). Width
+    # change requires model retrain.
+    # [MISO RTO-SPEC-006: col 7 → "Switching-device open/closed status";
+    #  cols 8–9 → "Line ratings — normal/emergency(LEP)/load-dump set"]
+    EDGE_FEATURES       = 10
     RISK_DIM            = 7             # Output dimension of risk assessment head
     GAT_DROPOUT         = 0.1           # Graph attention dropout
     LEAKY_RELU_SLOPE    = 0.2           # LeakyReLU negative slope in GAT

@@ -230,6 +230,44 @@ class PhysicsBasedGridSimulator:
         self.line_conductance = _mirror(self.line_conductance)
         self.thermal_limits   = _mirror(self.thermal_limits)
 
+        # Phase 1 — multi-rating lines. thermal_limits stays the NORMAL rating
+        # (edge_attr col 1, PyPSA s_nom, loading_ratio denominator). Emergency
+        # (LEP) and load-dump tiers are thresholds used only by trip logic.
+        # [MISO RTO-SPEC-006: "Line ratings — normal/emergency(LEP)/load-dump set"]
+        self.emergency_limits = self.thermal_limits * np.random.uniform(
+            Settings.Cascade.EMERGENCY_RATING_FACTOR_MIN,
+            Settings.Cascade.EMERGENCY_RATING_FACTOR_MAX, self.num_edges)
+        self.load_dump_limits = self.thermal_limits * np.random.uniform(
+            Settings.Cascade.LOAD_DUMP_RATING_FACTOR_MIN,
+            Settings.Cascade.LOAD_DUMP_RATING_FACTOR_MAX, self.num_edges)
+        self.emergency_limits = _mirror(self.emergency_limits)
+        self.load_dump_limits = _mirror(self.load_dump_limits)
+
+        # De-rate multiplier (weather/outage driven; scenario layer modulates
+        # it in Phase 6). Scales all three tiers together; default no-op.
+        # [MISO RTO-SPEC-006: "Transmission/generation outage schedules +
+        #  de-rates" — the de-rate half; schedules arrive in Phase 6]
+        self.rating_derate = np.ones(self.num_edges)
+
+        # Phase 1 — multi-rating lines. thermal_limits stays the NORMAL rating
+        # (edge_attr col 1, PyPSA s_nom, loading_ratio denominator). Emergency
+        # (LEP) and load-dump tiers are thresholds used only by trip logic.
+        # [MISO RTO-SPEC-006: "Line ratings — normal/emergency(LEP)/load-dump set"]
+        self.emergency_limits = self.thermal_limits * np.random.uniform(
+            Settings.Cascade.EMERGENCY_RATING_FACTOR_MIN,
+            Settings.Cascade.EMERGENCY_RATING_FACTOR_MAX, self.num_edges)
+        self.load_dump_limits = self.thermal_limits * np.random.uniform(
+            Settings.Cascade.LOAD_DUMP_RATING_FACTOR_MIN,
+            Settings.Cascade.LOAD_DUMP_RATING_FACTOR_MAX, self.num_edges)
+        self.emergency_limits = _mirror(self.emergency_limits)
+        self.load_dump_limits = _mirror(self.load_dump_limits)
+
+        # De-rate multiplier (weather/outage driven; scenario layer modulates
+        # it in Phase 6). Scales all three tiers together; default no-op.
+        # [MISO RTO-SPEC-006: "Transmission/generation outage schedules +
+        #  de-rates" — the de-rate half; schedules arrive in Phase 6]
+        self.rating_derate = np.ones(self.num_edges)
+
 
         # Decommissioned nodes (topology edits): buses that exist in the
         # arrays but are permanently out of service. Empty for generated
@@ -326,8 +364,14 @@ class PhysicsBasedGridSimulator:
             self.frequency_failure_threshold, self.frequency_damage_threshold
         )
 
-        # Phase 0 — independent line tripping (sustained thermal overload)
-        self.line_trip_monitor = LineTripMonitor(self.edge_index.numpy())
+        # Phase 0/1 — independent line tripping. Tier thresholds are per-edge
+        # ratios of the normal rating; derate cancels out of the thresholds
+        # because it scales all tiers equally (ratio uses derated normal too).
+        self.line_trip_monitor = LineTripMonitor(
+            self.edge_index.numpy(),
+            trip_ratio=self.emergency_limits / (self.thermal_limits + 1e-6),
+            fast_trip_ratio=self.load_dump_limits / (self.thermal_limits + 1e-6),
+        )
 
         self.video_folder = video_folder
         self.video_path = None  # Set per cascade scenario via set_video()
@@ -515,6 +559,7 @@ class PhysicsBasedGridSimulator:
 
         # Phase 0 — independent line failures (first-class state, not just
         # derived from failed nodes). line_failure_record: edge idx → timestep.
+        # [MISO RTO-SPEC-006: "Switching-device open/closed status"]
         cumulative_failed_lines: set = set()
         line_failure_record: Dict[int, int] = {}
         self.line_trip_monitor.reset()
@@ -608,7 +653,11 @@ class PhysicsBasedGridSimulator:
             # Update physics — use apparent power (S = √(P²+Q²)) for loading
             # ratios so both active and reactive current contribute to thermal
             # loading, consistent with how propagate_cascade_physics works.
-            loading_ratios = np.sqrt(line_flows**2 + line_flows_q**2) / (self.thermal_limits + 1e-6)
+            # Loading vs the (possibly de-rated) NORMAL rating. Derate scales
+            # all rating tiers together, so the monitor's tier thresholds
+            # (emergency/normal, load-dump/normal) are unaffected.
+            effective_limits = self.thermal_limits * self.rating_derate
+            loading_ratios = np.sqrt(line_flows**2 + line_flows_q**2) / (effective_limits + 1e-6)
 
             # Phase 0 — independent line tripping: a line sustaining apparent
             # power above LINE_TRIP_LOADING_RATIO × thermal limit for
@@ -728,12 +777,23 @@ class PhysicsBasedGridSimulator:
 
             current_cascade_timing = self._compute_cascade_timing(t, failure_record)
 
+            # Phase 1 — breaker status: closed (1) iff the edge was in service
+            # for THIS timestep's power flow. Lines tripped this step still
+            # show closed + overloaded here; they open next step. failed_lines_t
+            # already contains both rows of each mirrored pair.
+            # [MISO RTO-SPEC-006: "Switching-device (breaker/switch)
+            #  open/closed status" — the telemetered data item itself]
+            branch_status = np.ones(self.num_edges, dtype=np.float32)
+            if failed_lines_t:
+                branch_status[np.asarray(failed_lines_t, dtype=np.int64)] = 0.0
+
             timestep_data = self._package_timestep_data(
                 t, current_stress, voltages, angles, generation, node_reactive,
                 load_values, equipment_temps, current_frequency, loading_ratios,
                 line_flows, line_flows_q, sat_data, weather_seq, threat_ind,
                 vis_data, thermal_data, sensor_data, cumulative_failed_nodes,
-                current_cascade_timing, sequence_length,self.env_gen.fire_location
+                current_cascade_timing, sequence_length,self.env_gen.fire_location,
+                branch_status
             )
             sequence.append(timestep_data)
 
@@ -754,6 +814,7 @@ class PhysicsBasedGridSimulator:
             result['failure_parents']     = failure_parents_out
             result['actual_cascade_start'] = cascade_start_time
             # Phase 0 — independently tripped lines (sorted by trip time)
+            # [MISO RTO-SPEC-006: "Switching-device open/closed status"]
             failed_lines_out = sorted(line_failure_record.keys(),
                                       key=lambda e: line_failure_record[e])
             result['failed_lines']      = failed_lines_out
@@ -874,7 +935,8 @@ class PhysicsBasedGridSimulator:
         load_values, equipment_temps, current_frequency, loading_ratios,
         line_flows, line_flows_q, sat_data, weather_seq, threat_ind,
         vis_data, thermal_data, sensor_data, cumulative_failed_nodes,
-        current_cascade_timing, sequence_length,fire_location
+        current_cascade_timing, sequence_length,fire_location,
+        branch_status
     ) -> Dict:
         """Package all data for a single timestep."""
         return {
@@ -953,10 +1015,31 @@ class PhysicsBasedGridSimulator:
             'thermal_data': thermal_data.astype(np.float16),
             'sensor_data': sensor_data.astype(np.float16),
 
+            # Edge Attribute Format (10 features per edge)
+            # CRITICAL: append-only — never reorder. Loss targets hard-code
+            # col 5 (config LAMBDA_FLOW) and dataset.py normalizes 1, 5, 6, 8, 9.
+            # Index 0: line_reactance (Ω)
+            # Index 1: thermal_limits — NORMAL rating, derated (MVA)
+            # Index 2: line_resistance (Ω)
+            # Index 3: line_susceptance (S)
+            # Index 4: line_conductance (S)
+            # Index 5: line_flows P (MW)
+            # Index 6: line_flows Q (MVAr)
+            # Index 7: branch_status (1=closed, 0=open)          ← Phase 1
+            #          [MISO RTO-SPEC-006: switching-device open/closed status]
+            # Index 8: emergency (LEP) rating, derated (MVA)     ← Phase 1
+            # Index 9: load-dump rating, derated (MVA)           ← Phase 1
+            #          [8–9 — MISO RTO-SPEC-006: line ratings set; derate —
+            #           outage schedules + de-rates]
             'edge_attr': np.column_stack([
-                self.line_reactance, self.thermal_limits, self.line_resistance,
+                self.line_reactance,
+                self.thermal_limits * self.rating_derate,   # telemetered rating reflects derate
+                self.line_resistance,
                 self.line_susceptance, self.line_conductance,
                 line_flows, line_flows_q,
+                branch_status,
+                self.emergency_limits * self.rating_derate,
+                self.load_dump_limits * self.rating_derate,
             ]).astype(np.float32),
 
             'node_labels': np.array([

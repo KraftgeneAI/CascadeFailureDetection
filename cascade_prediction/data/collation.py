@@ -17,7 +17,7 @@ from typing import List, Dict, Any
 _TEMPORAL_KEYS = {
     'scada_data', 'pmu_sequence', 'equipment_status', 'edge_mask',
     'temporal_sequence',
-    'edge_attr',        # [T, E, 7] — per-timestep line flows
+    'edge_attr',        # [T, E, 10] — per-timestep line flows + ratings/status
     'node_features',    # [T, N, 115] — per-node MLP feature tensor
 }
 

@@ -20,6 +20,10 @@ class LineTripMonitor:
     """
     Independent line tripping via a sustained-overload timer (Phase 0).
 
+    [MISO RTO-SPEC-006: "Switching-device (breaker/switch) open/closed status"
+     — generates the line-level trip events breakers report;
+     tier thresholds implement "Line ratings — normal/emergency(LEP)/load-dump"]
+
     Tracks per-edge overload duration and trips a line when its apparent-power
     loading exceeds ``trip_ratio`` × thermal limit for ``sustain_steps``
     consecutive timesteps — no attached node failure required.
@@ -32,19 +36,33 @@ class LineTripMonitor:
     def __init__(
         self,
         edge_index: np.ndarray,
-        trip_ratio: float = Settings.Cascade.LINE_TRIP_LOADING_RATIO,
+        trip_ratio = Settings.Cascade.LINE_TRIP_LOADING_RATIO,
         sustain_steps: int = Settings.Cascade.LINE_TRIP_SUSTAIN_STEPS,
+        fast_trip_ratio = None,
+        fast_trip_steps: int = Settings.Cascade.LINE_TRIP_LOAD_DUMP_STEPS,
     ):
         """
         Args:
             edge_index: Edge connectivity [2, num_edges] (directed, mirrored pairs)
-            trip_ratio: loading_ratio threshold that starts/advances the timer
-            sustain_steps: consecutive overloaded steps required to trip
+            trip_ratio: emergency-tier threshold on the normal-based loading
+                ratio — scalar, or per-edge array (Phase 1:
+                emergency_limits / thermal_limits)
+            sustain_steps: consecutive steps above trip_ratio required to trip
+            fast_trip_ratio: optional load-dump tier threshold — scalar or
+                per-edge array (Phase 1: load_dump_limits / thermal_limits).
+                None disables the fast tier (Phase 0 behavior).
+            fast_trip_steps: consecutive steps above fast_trip_ratio to trip
         """
         self.num_edges = edge_index.shape[1]
-        self.trip_ratio = trip_ratio
+        self.trip_ratio = np.asarray(trip_ratio, dtype=np.float64)
         self.sustain_steps = sustain_steps
+        self.fast_trip_ratio = (
+            None if fast_trip_ratio is None
+            else np.asarray(fast_trip_ratio, dtype=np.float64)
+        )
+        self.fast_trip_steps = fast_trip_steps
         self.overload_timer = np.zeros(self.num_edges, dtype=np.int64)
+        self.fast_timer = np.zeros(self.num_edges, dtype=np.int64)
 
         # Group directed edge indices by undirected line (canonical key).
         src = np.asarray(edge_index[0], dtype=np.int64)
@@ -60,6 +78,7 @@ class LineTripMonitor:
     def reset(self):
         """Clear all overload timers (call at the start of each scenario)."""
         self.overload_timer[:] = 0
+        self.fast_timer[:] = 0
 
     def update(
         self,
@@ -78,16 +97,27 @@ class LineTripMonitor:
             Sorted list of newly tripped directed edge indices,
             mirror-consistent (both rows of a pair trip together).
         """
-        overloaded = loading_ratios >= self.trip_ratio
+        overloaded = loading_ratios >= self.trip_ratio          # emergency tier
+        fast_overloaded = (
+            loading_ratios >= self.fast_trip_ratio               # load-dump tier
+            if self.fast_trip_ratio is not None
+            else np.zeros(self.num_edges, dtype=bool)
+        )
         if already_failed_lines:
             failed_idx = np.fromiter(already_failed_lines, dtype=np.int64)
             overloaded[failed_idx] = False
+            fast_overloaded[failed_idx] = False
 
-        # Sustained-overload timer: increment while overloaded, reset otherwise.
+        # Sustained-overload timers: increment while overloaded, reset otherwise.
         self.overload_timer = np.where(overloaded, self.overload_timer + 1, 0)
+        self.fast_timer = np.where(fast_overloaded, self.fast_timer + 1, 0)
 
+        trip_now = (
+            (self.overload_timer >= self.sustain_steps)
+            | (self.fast_timer >= self.fast_trip_steps)
+        )
         tripped: Set[int] = set()
-        for i in np.nonzero(self.overload_timer >= self.sustain_steps)[0]:
+        for i in np.nonzero(trip_now)[0]:
             if int(i) in already_failed_lines:
                 continue
             # Trip the whole mirrored group for consistency.
@@ -97,6 +127,7 @@ class LineTripMonitor:
 
         for j in tripped:
             self.overload_timer[j] = 0
+            self.fast_timer[j] = 0
         return sorted(tripped)
 
 
@@ -332,6 +363,7 @@ class CascadeSimulator:
         visited = set(node[0] for node in initial_failed_nodes)
 
         # Independently tripped lines (Phase 0) stay out of service throughout.
+        # [MISO RTO-SPEC-006: "Switching-device open/closed status"]
         independent_failed_lines = set(initial_failed_lines or [])
 
         # Failed lines = node-derived ∪ independently tripped (incl. decommissioned)

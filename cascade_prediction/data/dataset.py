@@ -263,13 +263,31 @@ class CascadeDataset(Dataset):
             
             data_arrays['equipment_status'].append(to_tensor(ts.get('equipment_status', np.zeros((num_nodes, 10)))))
 
-            # Per-timestep edge attributes — cols 5-6 (line_flows, line_flows_q) are dynamic
-            # and must be collected per step, not just from the last timestep.
-            ea = ts.get('edge_attr', np.zeros((num_edges, 7))).astype(np.float32)
+            # Per-timestep edge attributes — cols 5-6 (line_flows, line_flows_q)
+            # and col 7 (branch_status) are dynamic and must be collected per
+            # step, not just from the last timestep.
+            ea = ts.get('edge_attr', np.zeros((num_edges, 10))).astype(np.float32)
             if ea.shape[1] >= 7:
-                ea[:, 1] = normalize_power(ea[:, 1], self.base_mva)   # thermal_limits
+                ea[:, 1] = normalize_power(ea[:, 1], self.base_mva)   # thermal_limits (normal rating)
                 ea[:, 5] = normalize_power(ea[:, 5], self.base_mva)   # line_flows_p
                 ea[:, 6] = normalize_power(ea[:, 6], self.base_mva)   # line_flows_q
+            if ea.shape[1] >= 10:
+                # Phase 1 columns: [7] branch_status is binary — leave raw.
+                # [MISO RTO-SPEC-006: col 7 → switching-device open/closed
+                #  status; cols 8–9 → line ratings normal/emergency/load-dump]
+                ea[:, 8] = normalize_power(ea[:, 8], self.base_mva)   # emergency (LEP) rating
+                ea[:, 9] = normalize_power(ea[:, 9], self.base_mva)   # load-dump rating
+            elif ea.shape[1] == 7:
+                # Legacy pre-Phase-1 scenarios: backfill appended columns so old
+                # pickles still feed the 10-wide edge encoder — breaker closed,
+                # tiers as nominal multiples of the (already normalized) normal
+                # rating (mid-range of the Phase 1 factor distributions).
+                backfill = np.column_stack([
+                    np.ones(ea.shape[0], dtype=np.float32),   # branch_status = closed
+                    ea[:, 1] * 1.22,                          # emergency (LEP)
+                    ea[:, 1] * 1.47,                          # load-dump
+                ]).astype(np.float32)
+                ea = np.concatenate([ea, backfill], axis=1)
             data_arrays['edge_attr'].append(to_tensor(ea))
 
             # Edge stress mask: encode thermal loading stress (pre-cascade window has no
@@ -702,7 +720,7 @@ class CascadeDataset(Dataset):
         scada_data = torch.randn(T, num_nodes, 13)
         pmu_sequence = torch.randn(T, num_nodes, 8)
         equipment_status = torch.randn(T, num_nodes, 10)
-        edge_attr = torch.randn(num_edges, 7)
+        edge_attr = torch.randn(num_edges, Settings.Model.EDGE_FEATURES)
         edge_mask = torch.ones(T, num_edges)
         
         # Apply normalization

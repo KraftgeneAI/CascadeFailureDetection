@@ -118,7 +118,9 @@ class UnifiedCascadePredictionModel(nn.Module):
         ])
         
         # Edge embedding - accepts Settings.Model.EDGE_FEATURES features:
-        # [reactance, thermal_limits, resistance, susceptance, conductance, line_flows_p, line_flows_q]
+        # [reactance, thermal_limits(normal), resistance, susceptance, conductance,
+        #  line_flows_p, line_flows_q, branch_status, emergency_limit, load_dump_limit]
+        # (last 3 appended in Phase 1 — MISO data gap plan)
         self.edge_embedding = nn.Sequential(
             nn.Linear(Settings.Model.EDGE_FEATURES, hidden_dim),
             nn.ReLU(),

@@ -96,7 +96,7 @@ def mock_timestep_data():
         'thermal_data': np.random.randn(num_nodes, 1, 32, 32).astype(np.float16),
         'sensor_data': np.random.randn(num_nodes, 12).astype(np.float16),
         'equipment_status': np.random.randn(num_nodes, 10).astype(np.float32),
-        'edge_attr': np.random.randn(num_edges, 7).astype(np.float32),
+        'edge_attr': np.random.randn(num_edges, 10).astype(np.float32),  # Phase 1: 10 cols
         'node_labels': np.zeros(num_nodes, dtype=np.float32),
         'cascade_timing': np.full(num_nodes, -1, dtype=np.float32),
         'conductance': np.random.randn(num_edges).astype(np.float32),
