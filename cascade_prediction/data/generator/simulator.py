@@ -33,6 +33,10 @@ from .environmental import EnvironmentalDataGenerator
 from .robotic import RoboticDataGenerator
 from .utils import get_failed_lines_from_nodes
 from .config import Settings
+from .grid_state import (
+    build_topology_block, validate_topology_block,
+    NODE_PROP_KEYS, THRESHOLD_KEYS, LINE_KEYS,
+)
 
 
 class PhysicsBasedGridSimulator:
@@ -202,7 +206,61 @@ class PhysicsBasedGridSimulator:
         # Ensure minimum thermal limits
         min_thermal_limit = total_load * Settings.LineImpedance.THERMAL_MIN_FRACTION
         self.thermal_limits = np.maximum(self.thermal_limits, min_thermal_limit)
-        
+
+        self._init_simulators(video_folder)
+
+    @classmethod
+    def from_grid_state(cls, topology_block: Dict,
+                        video_folder: Optional[str] = None
+                        ) -> "PhysicsBasedGridSimulator":
+        """
+        Build a simulator directly from a scenario's embedded topology block
+        (see grid_state.py), bypassing all random parameter generation.
+
+        This is the path used for edited grids: every node/edge physics
+        parameter comes verbatim from the block, so the same block always
+        produces the same simulator — no seed involved.
+
+        Args:
+            topology_block: dict produced by build_topology_block() /
+                apply_topology_edits(), validated before use.
+            video_folder: optional wildfire video folder (as in __init__).
+
+        Returns:
+            Fully initialized PhysicsBasedGridSimulator.
+        """
+        problems = validate_topology_block(topology_block)
+        if problems:
+            raise ValueError(f"invalid topology block: {problems}")
+
+        self = cls.__new__(cls)          # skip __init__'s generation path
+        self.seed = topology_block.get('seed')
+        self.num_nodes = int(topology_block['num_nodes'])
+        self.edge_index = torch.from_numpy(
+            np.asarray(topology_block['edge_index'], dtype=np.int64)).long()
+        self.num_edges = self.edge_index.shape[1]
+        self.positions = np.asarray(topology_block['positions'])
+        if 'adjacency_matrix' in topology_block:
+            self.adjacency_matrix = np.asarray(topology_block['adjacency_matrix'])
+        else:
+            self.adjacency_matrix = np.zeros((self.num_nodes, self.num_nodes),
+                                             dtype=np.float32)
+            ei = self.edge_index.numpy()
+            self.adjacency_matrix[ei[0], ei[1]] = 1.0
+
+        for key in NODE_PROP_KEYS + THRESHOLD_KEYS + LINE_KEYS:
+            setattr(self, key, np.asarray(topology_block[key]).copy())
+
+        self._init_simulators(video_folder)
+        return self
+
+    def _init_simulators(self, video_folder: Optional[str]) -> None:
+        """
+        Shared init tail: physics/frequency/thermal simulators, cascade
+        simulator, and environmental/robotic generators. Called by both
+        __init__ (seed-generated grids) and from_grid_state (embedded blocks).
+        Requires topology, node property, threshold, and line arrays to be set.
+        """
         # Initialize physics simulators
         print(f"Initializing physics simulators...")
         self.power_flow_sim = PowerFlowSimulator(
@@ -210,21 +268,21 @@ class PhysicsBasedGridSimulator:
             self.line_reactance, self.line_resistance,
             self.line_susceptance, self.line_conductance, self.thermal_limits,
         )
-        
+
         self.frequency_sim = FrequencyDynamicsSimulator(
             self.num_nodes, self.node_types, self.gen_capacity
         )
-        
+
         self.thermal_sim = ThermalDynamicsSimulator(
             self.num_nodes, self.thermal_time_constant, self.thermal_capacity, self.cooling_effectiveness
         )
-        
+
         # Initialize cascade simulator
         print(f"Initializing cascade simulator...")
         adjacency_list = create_adjacency_list(
             self.edge_index.numpy(), self.node_types
         )
-        
+
         self.cascade_sim = CascadeSimulator(
             self.num_nodes, adjacency_list,
             self.loading_failure_threshold, self.loading_damage_threshold,
@@ -232,7 +290,7 @@ class PhysicsBasedGridSimulator:
             self.temperature_failure_threshold, self.temperature_damage_threshold,
             self.frequency_failure_threshold, self.frequency_damage_threshold
         )
-        
+
         self.video_folder = video_folder
         self.video_path = None  # Set per cascade scenario via set_video()
 
@@ -245,7 +303,7 @@ class PhysicsBasedGridSimulator:
         self.robot_gen = RoboticDataGenerator(
             self.num_nodes, self.equipment_age, self.equipment_condition
         )
-        
+
         print(f"[OK] Initialized grid: {self.num_nodes} nodes, {self.num_edges} edges")
 
     def set_video(self, video_path: Optional[str]) -> None:
@@ -833,5 +891,10 @@ class PhysicsBasedGridSimulator:
         return {
             'sequence': sequence,
             'edge_index': self.edge_index.numpy(),
+            # Self-contained topology block (see grid_state.py): full grid
+            # parameterization so consumers never need the topology file.
+            # Loaders fall back to the default topology file when absent
+            # (legacy pre-embed scenarios).
+            'topology': build_topology_block(self),
         }
 
