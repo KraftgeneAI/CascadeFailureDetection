@@ -295,6 +295,22 @@ class PowerFlowSimulator:
                         original_line_states[line_name] = self.network.lines.loc[line_name, "in_service"]
                         self.network.lines.loc[line_name, "in_service"] = False
         
+        # Give every failed/isolated bus a tiny dummy Slack generator so its
+        # single-bus sub-network still has an angle reference. Without one,
+        # pf(distribute_slack=True) raises on generator-less islands —
+        # observed as a message-less "Power flow exception: None" when a
+        # topology edit decommissions a node (bus stays, edges dropped).
+        dummy_gens = []
+        if failed_nodes:
+            for node_idx in failed_nodes:
+                name = f"_failslack_{node_idx}"
+                if name not in self.network.generators.index:
+                    self.network.add(
+                        "Generator", name, bus=f"bus_{node_idx}",
+                        control="Slack", p_set=0.0, p_nom=1e-3,
+                    )
+                dummy_gens.append(name)
+
         # If the slack bus (node 0) is failed, reassign slack to the next active generator.
         # Without a slack bus PyPSA has no angle reference and will crash.
         slack_reassigned = None
@@ -307,6 +323,7 @@ class PowerFlowSimulator:
                     break
             if slack_reassigned is None:
                 # No generators left — full collapse
+                self._remove_dummy_gens(dummy_gens)
                 self._restore_network_state(original_bus_states, original_gen_states,
                                             original_load_states, original_line_states)
                 return self._get_default_results()
@@ -318,8 +335,11 @@ class PowerFlowSimulator:
             # reducing voltage stress on the single slack bus at high load.
             status = self.network.pf(use_seed=False, distribute_slack=True)
             converged = status.get("converged")
-            if hasattr(converged, "iloc"):   # modern PyPSA returns a DataFrame
-                is_stable = bool(converged.iloc[0, 0])
+            if hasattr(converged, "values"):   # DataFrame: snapshots × sub-networks
+                # ALL sub-networks must converge (an edited grid with a
+                # decommissioned node has >1 sub-network; reading only
+                # [0, 0] checked an arbitrary one).
+                is_stable = bool(np.asarray(converged.values).astype(bool).all())
             elif isinstance(converged, dict):
                 inner = next(iter(converged.values()), {})
                 is_stable = bool(next(iter(inner.values()), False)) if isinstance(inner, dict) else bool(inner)
@@ -327,6 +347,7 @@ class PowerFlowSimulator:
                 is_stable = bool(converged) if converged is not None else False
 
             if not is_stable:
+                self._remove_dummy_gens(dummy_gens)
                 self._restore_network_state(original_bus_states, original_gen_states,
                                             original_load_states, original_line_states)
                 if slack_reassigned is not None:
@@ -338,6 +359,7 @@ class PowerFlowSimulator:
             line_flows_p, line_flows_q = self._extract_line_results(failed_lines, failed_nodes)
 
             # Restore network state
+            self._remove_dummy_gens(dummy_gens)
             self._restore_network_state(original_bus_states, original_gen_states,
                                         original_load_states, original_line_states)
             if slack_reassigned is not None:
@@ -346,7 +368,10 @@ class PowerFlowSimulator:
             return voltages, angles, line_flows_p, node_reactive, line_flows_q, True
 
         except Exception as e:
-            print(f"  [WARNING] Power flow exception: {e}")
+            import traceback
+            print(f"  [WARNING] Power flow exception: {type(e).__name__}: {e}")
+            traceback.print_exc()
+            self._remove_dummy_gens(dummy_gens)
             self._restore_network_state(original_bus_states, original_gen_states,
                                         original_load_states, original_line_states)
             if slack_reassigned is not None:
@@ -434,7 +459,13 @@ class PowerFlowSimulator:
                     line_flows_q[i] = 0.0
         
         return line_flows_p, line_flows_q
-    
+
+    def _remove_dummy_gens(self, names: List[str]) -> None:
+        """Remove the temporary _failslack_ generators added for failed buses."""
+        for name in names:
+            if name in self.network.generators.index:
+                self.network.remove("Generator", name)
+
     def _restore_network_state(
         self,
         original_bus_states: Dict,

@@ -207,6 +207,11 @@ class PhysicsBasedGridSimulator:
         min_thermal_limit = total_load * Settings.LineImpedance.THERMAL_MIN_FRACTION
         self.thermal_limits = np.maximum(self.thermal_limits, min_thermal_limit)
 
+        # Decommissioned nodes (topology edits): buses that exist in the
+        # arrays but are permanently out of service. Empty for generated
+        # grids; from_grid_state() fills it from the block's removed_nodes.
+        self.decommissioned_nodes = set()
+
         self._init_simulators(video_folder)
 
     @classmethod
@@ -250,6 +255,12 @@ class PhysicsBasedGridSimulator:
 
         for key in NODE_PROP_KEYS + THRESHOLD_KEYS + LINE_KEYS:
             setattr(self, key, np.asarray(topology_block[key]).copy())
+
+        # Removed (decommissioned) nodes keep their bus index but have no
+        # edges — they'd form single-bus PyPSA islands and blow up the power
+        # flow. Every power-flow call marks them failed (dummy slack) instead.
+        self.decommissioned_nodes = {
+            int(i) for i in topology_block.get('removed_nodes', [])}
 
         self._init_simulators(video_folder)
         return self
@@ -504,7 +515,10 @@ class PhysicsBasedGridSimulator:
                 if active_capacity > 0:
                     generation[idx] = (self.gen_capacity[idx] / active_capacity) * total_load * Settings.Simulation.GENERATION_MARGIN
 
-            failed_nodes_t = list(cumulative_failed_nodes)
+            # Decommissioned buses are permanently out of service for POWER
+            # FLOW purposes only — node_labels still track cumulative_failed
+            # (decommissioned ≠ failed; they must not become training labels).
+            failed_nodes_t = list(cumulative_failed_nodes | self.decommissioned_nodes)
             failed_lines_t = get_failed_lines_from_nodes(
                 self.edge_index.numpy(), cumulative_failed_nodes
             )
@@ -580,6 +594,11 @@ class PhysicsBasedGridSimulator:
             for n in range(self.num_nodes):
                 if n in cumulative_failed_nodes:
                     continue
+                # Decommissioned buses read V=0 / zero load from the power
+                # flow — they must never enter the failure check or they get
+                # falsely labeled voltage_collapse at t=0 and seed a cascade.
+                if n in self.decommissioned_nodes:
+                    continue
 
                 # Wildfire trigger
                 if fire_stress[n] > 0.15:
@@ -618,6 +637,7 @@ class PhysicsBasedGridSimulator:
                     current_temperature=equipment_temps,
                     current_frequency=current_frequency,
                     target_num_failures=target_max_failures,
+                    extra_failed_nodes=self.decommissioned_nodes,
                     power_flow_simulator=self.power_flow_sim,
                     edge_index=self.edge_index.numpy(),
                     thermal_limits=self.thermal_limits
@@ -824,7 +844,8 @@ class PhysicsBasedGridSimulator:
                 voltages / self.voltage_failure_threshold,   # 14: >1 = safe, <1 = danger
                 equipment_temps / self.temperature_failure_threshold,  # 15: <1 = safe, >1 = danger
                 np.full(self.num_nodes, current_frequency) / self.frequency_failure_threshold,  # 16: >1 = safe, <1 = danger
-                load_values / self.base_load / self.loading_failure_threshold,  # 17: <1 = safe, >1 = danger
+                # guarded divide: decommissioned nodes have base_load == 0
+                load_values / (self.base_load + 1e-6) / self.loading_failure_threshold,  # 17: <1 = safe, >1 = danger
             ]).astype(np.float32),
 
             'pmu_sequence': np.column_stack([

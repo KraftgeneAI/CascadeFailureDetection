@@ -191,6 +191,7 @@ def apply_topology_edits(block: Dict, edits: Dict) -> Tuple[Dict, Dict[str, int]
           'added_nodes':  [{'id': str, 'type': 'generator'|'load'|'substation',
                             'position': [x, y], 'p_mw': float}, ...],
           'added_edges':  [{'from': int|str, 'to': int|str}, ...],
+          'moved_nodes':  [{'id': int|str, 'position': [x, y]}, ...],
           'removed_nodes': [int, ...],
           'removed_edges': [[int, int], ...],   # undirected node pairs
         }
@@ -240,6 +241,15 @@ def apply_topology_edits(block: Dict, edits: Dict) -> Tuple[Dict, Dict[str, int]
         if not 0 <= idx < n:
             raise ValueError(f"node index out of range: {idx}")
         return idx
+
+    # ---- 1b. moved nodes: update positions in place -----------------------
+    # Positions are display/geographic only in this model (line impedances
+    # were drawn at generation time and stay fixed), so a move never affects
+    # power flow — it's persisted so all views and future edits agree.
+    for spec in edits.get('moved_nodes', []):
+        idx = resolve(spec['id'])
+        new_block['positions'][idx] = np.asarray(
+            spec['position'], dtype=np.float64)
 
     # ---- 2. removed edges (undirected: drop both directed rows) ----------
     ei = np.asarray(new_block['edge_index'])

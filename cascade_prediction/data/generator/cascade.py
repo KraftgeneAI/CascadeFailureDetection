@@ -199,7 +199,8 @@ class CascadeSimulator:
         target_num_failures: int,
         power_flow_simulator,
         edge_index: np.ndarray,
-        thermal_limits: np.ndarray
+        thermal_limits: np.ndarray,
+        extra_failed_nodes: Optional[Set[int]] = None
     ) -> List[Tuple[int, float, str]]:
         """
         Propagate cascade with physics-based power flow recomputation.
@@ -217,13 +218,19 @@ class CascadeSimulator:
             power_flow_simulator: PowerFlowSimulator instance
             edge_index: Edge connectivity
             thermal_limits: Line thermal limits
-            
+            extra_failed_nodes: Buses permanently out of service (e.g.
+                decommissioned by a topology edit). Unioned into every
+                power-flow call so isolated buses don't break convergence,
+                but NOT counted as cascade failures or queued for
+                propagation.
+
         Returns:
             List of (node_id, failure_time, reason) tuples
         """
         # Work on local copies so the caller's arrays are never mutated.
         generation = generation.copy()
         load = load.copy()
+        extra_failed = set(extra_failed_nodes or ())
 
         # Initialize
         failed_nodes = set(node[0] for node in initial_failed_nodes)
@@ -236,8 +243,9 @@ class CascadeSimulator:
         queue = [(node[0], 0.0) for node in initial_failed_nodes]
         visited = set(node[0] for node in initial_failed_nodes)
         
-        # Calculate failed lines from failed nodes
-        failed_lines = get_failed_lines_from_nodes(edge_index, failed_nodes)
+        # Calculate failed lines from failed nodes (incl. decommissioned)
+        failed_lines = get_failed_lines_from_nodes(
+            edge_index, failed_nodes | extra_failed)
         
         # Recompute power flow after initial failures
         print(f"    [POWER FLOW] Recomputing after initial failures: {list(failed_nodes)}")
@@ -246,7 +254,7 @@ class CascadeSimulator:
             power_flow_simulator.compute_power_flow(
                 generation, load,
                 failed_lines=failed_lines,
-                failed_nodes=list(failed_nodes)
+                failed_nodes=list(failed_nodes | extra_failed)
             )
         
         if not is_stable:
@@ -306,16 +314,17 @@ class CascadeSimulator:
                     generation[neighbor]=0
                     load[neighbor]=0
                     
-                    # Calculate failed lines from all failed nodes
-                    failed_lines = get_failed_lines_from_nodes(edge_index, failed_nodes)
-                    
+                    # Calculate failed lines from all failed nodes (incl. decommissioned)
+                    failed_lines = get_failed_lines_from_nodes(
+                        edge_index, failed_nodes | extra_failed)
+
                     print(f"    [POWER FLOW] Recomputing after node {neighbor} failure...")
                     print(f"    [POWER FLOW] Total failed nodes: {len(failed_nodes)}, Failed lines: {len(failed_lines)}")
                     voltages, angles, line_flows, node_reactive, line_flows_q, is_stable = \
                         power_flow_simulator.compute_power_flow(
                             generation, load,
                             failed_lines=failed_lines,
-                            failed_nodes=list(failed_nodes)
+                            failed_nodes=list(failed_nodes | extra_failed)
                         )
                     
                     if not is_stable:
