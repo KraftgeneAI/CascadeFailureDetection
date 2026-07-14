@@ -37,6 +37,7 @@ class PowerFlowSimulator:
         line_susceptance: np.ndarray,
         line_conductance: np.ndarray,
         thermal_limits: np.ndarray,
+        branch_type: Optional[np.ndarray] = None,
     ):
         """
         Initialize power flow simulator.
@@ -52,6 +53,9 @@ class PowerFlowSimulator:
             line_susceptance: Line susceptances
             line_conductance: Line conductances
             thermal_limits: Line thermal limits
+            branch_type: Optional per-edge device type (Phase 2): 0=line,
+                1=LTC transformer, 2=phase-shifting transformer (PAR).
+                None → all plain lines (pre-Phase-2 behavior).
         """
         self.num_nodes = num_nodes
         self.num_edges = edge_index.shape[1]
@@ -79,6 +83,13 @@ class PowerFlowSimulator:
         # tan(phi) = sqrt(1 - pf²) / pf  → Q = P * tan(phi)
         self.tan_phi = np.sqrt(1.0 - pf**2) / pf  # per-node Q/P ratio
         
+        # Phase 2 — branch typing (None → all plain lines)
+        self.branch_type = (
+            np.asarray(branch_type, dtype=np.int64)
+            if branch_type is not None
+            else np.zeros(self.num_edges, dtype=np.int64)
+        )
+
         # Initialize PyPSA network
         self.network = self._create_pypsa_network(
             edge_index, positions, gen_capacity,
@@ -160,43 +171,83 @@ class PowerFlowSimulator:
         # so flows can be mapped back to all directed edges during extraction.
         src, dst = edge_index
         self.edge_to_line = {}   # directed edge idx -> (line_name, sign)
-        self.line_buses = {}     # line_name -> (bus0_idx, bus1_idx)  (bus0 < bus1)
-        seen = {}                # (min,max) pair -> line_name
+        self.line_buses = {}     # name -> (bus0_idx, bus1_idx)  (bus0 < bus1)
+        # Phase 2: physical branches may be Lines OR Transformers (LTC/PAR).
+        # branch_is_trafo: name -> True if PyPSA Transformer component.
+        # trafo_rep_edge:  transformer name -> representative directed edge
+        #                  index (used to look up per-call tap state).
+        self.branch_is_trafo = {}
+        self.trafo_rep_edge = {}
+        seen = {}                # (min,max) pair -> name
         line_counter = 0
+        trafo_counter = 0
+        v_nom = Settings.PowerSystem.V_NOM_KV
         for i in range(self.num_edges):
             s, d = int(src[i]), int(dst[i])
             key = (min(s, d), max(s, d))
             if key not in seen:
-                name = f"line_{line_counter}"
-                network.add(
-                    "Line",
-                    name,
-                    bus0=f"bus_{key[0]}",
-                    bus1=f"bus_{key[1]}",
-                    x=line_reactance[i],
-                    r=line_resistance[i],
-                    b=line_susceptance[i],
-                    g=line_conductance[i],
-                    s_nom=thermal_limits[i],
-                    length=1.0
-                )
+                if self.branch_type[i] != 0:
+                    # LTC transformer or PAR → PyPSA Transformer.
+                    # [MISO RTO-SPEC-006: transformer / PAR flows + taps]
+                    # PyPSA Transformer takes r/x in p.u. on its OWN s_nom
+                    # base:  x_pu = x_ohm * s_nom / v_nom².
+                    name = f"trafo_{trafo_counter}"
+                    s_nom = float(thermal_limits[i])
+                    network.add(
+                        "Transformer",
+                        name,
+                        bus0=f"bus_{key[0]}",
+                        bus1=f"bus_{key[1]}",
+                        x=max(float(line_reactance[i]) * s_nom / v_nom**2, 1e-4),
+                        r=float(line_resistance[i]) * s_nom / v_nom**2,
+                        s_nom=s_nom,
+                        tap_ratio=1.0,
+                        phase_shift=0.0,
+                        model="pi",
+                    )
+                    self.branch_is_trafo[name] = True
+                    self.trafo_rep_edge[name] = i
+                    trafo_counter += 1
+                else:
+                    name = f"line_{line_counter}"
+                    network.add(
+                        "Line",
+                        name,
+                        bus0=f"bus_{key[0]}",
+                        bus1=f"bus_{key[1]}",
+                        x=line_reactance[i],
+                        r=line_resistance[i],
+                        b=line_susceptance[i],
+                        g=line_conductance[i],
+                        s_nom=thermal_limits[i],
+                        length=1.0
+                    )
+                    self.branch_is_trafo[name] = False
+                    line_counter += 1
                 seen[key] = name
                 self.line_buses[name] = key
-                line_counter += 1
             name = seen[key]
             # +1 if this directed edge runs bus0->bus1 (PyPSA p0 convention), else -1
             sign = 1.0 if (s, d) == key else -1.0
             self.edge_to_line[i] = (name, sign)
 
         self.num_phys_lines = line_counter
+        self.num_phys_trafos = trafo_counter
         return network
+
+    def _branch_df(self, name: str):
+        """Return the component dataframe (lines or transformers) for a branch."""
+        return (self.network.transformers if self.branch_is_trafo.get(name)
+                else self.network.lines)
     
     def compute_power_flow(
         self,
         generation: np.ndarray,
         load: np.ndarray,
         failed_lines: Optional[List[int]] = None,
-        failed_nodes: Optional[List[int]] = None
+        failed_nodes: Optional[List[int]] = None,
+        tap_ratios: Optional[np.ndarray] = None,
+        phase_shifts: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool]:
         """
         Compute AC power flow using PyPSA with proper bus isolation.
@@ -266,12 +317,14 @@ class PowerFlowSimulator:
                 restore['load_active'][load_name] = bool(self.network.loads.at[load_name, "active"])
                 self.network.loads.at[load_name, "active"] = False
 
-            # Deactivate every physical line touching a failed bus.
+            # Deactivate every physical branch (line OR transformer) touching
+            # a failed bus.
             for name, (b0, b1) in self.line_buses.items():
                 if b0 in failed_node_set or b1 in failed_node_set:
                     if name not in restore['line_active']:
-                        restore['line_active'][name] = bool(self.network.lines.at[name, "active"])
-                        self.network.lines.at[name, "active"] = False
+                        df = self._branch_df(name)
+                        restore['line_active'][name] = bool(df.at[name, "active"])
+                        df.at[name, "active"] = False
 
             # A failed bus is now an isolated single-bus sub-network with no
             # reference, which PyPSA cannot solve.  Give each one a tiny dummy
@@ -286,7 +339,8 @@ class PowerFlowSimulator:
                 )
                 restore['dummy_gens'].append(dummy)
 
-        # 4. Explicitly failed lines (map directed edge idx -> physical line).
+        # 4. Explicitly failed lines (map directed edge idx -> physical branch;
+        # Phase 2: the branch may be a Line or a Transformer component).
         if failed_lines:
             for e_idx in failed_lines:
                 mapped = self.edge_to_line.get(int(e_idx))
@@ -294,24 +348,22 @@ class PowerFlowSimulator:
                     continue
                 name = mapped[0]
                 if name not in restore['line_active']:
-                    restore['line_active'][name] = bool(self.network.lines.at[name, "active"])
-                    self.network.lines.at[name, "active"] = False
-        
-        # Give every failed/isolated bus a tiny dummy Slack generator so its
-        # single-bus sub-network still has an angle reference. Without one,
-        # pf(distribute_slack=True) raises on generator-less islands —
-        # observed as a message-less "Power flow exception: None" when a
-        # topology edit decommissions a node (bus stays, edges dropped).
-        dummy_gens = []
-        if failed_nodes:
-            for node_idx in failed_nodes:
-                name = f"_failslack_{node_idx}"
-                if name not in self.network.generators.index:
-                    self.network.add(
-                        "Generator", name, bus=f"bus_{node_idx}",
-                        control="Slack", p_set=0.0, p_nom=1e-3,
-                    )
-                dummy_gens.append(name)
+                    df = self._branch_df(name)
+                    restore['line_active'][name] = bool(df.at[name, "active"])
+                    df.at[name, "active"] = False
+
+        # 5. Phase 2 — apply tap state to transformer components.
+        # tap_ratio (LTC voltage ratio) and phase_shift (PAR degrees) come
+        # from TapController via per-directed-edge arrays; each transformer
+        # reads its representative edge. When None, taps keep their previous
+        # values — cascade-internal recomputes deliberately inherit the main
+        # loop's tap state.  [MISO RTO-SPEC-006: LTC/PAR tap positions]
+        if tap_ratios is not None or phase_shifts is not None:
+            for name, rep in self.trafo_rep_edge.items():
+                if tap_ratios is not None:
+                    self.network.transformers.at[name, "tap_ratio"] = float(tap_ratios[rep])
+                if phase_shifts is not None:
+                    self.network.transformers.at[name, "phase_shift"] = float(phase_shifts[rep])
 
         # If the slack bus (node 0) is failed, reassign slack to the next active generator.
         # Without a slack bus PyPSA has no angle reference and will crash.
@@ -326,7 +378,6 @@ class PowerFlowSimulator:
                     break
             if slack_reassigned is None:
                 # No generators left — full collapse
-                self._remove_dummy_gens(dummy_gens)
                 self._restore_network_state(restore)
                 return self._get_default_results()
 
@@ -349,7 +400,6 @@ class PowerFlowSimulator:
                 is_stable = bool(converged) if converged is not None else False
 
             if not is_stable:
-                self._remove_dummy_gens(dummy_gens)
                 self._restore_network_state(restore)
                 return self._get_default_results()
 
@@ -358,7 +408,6 @@ class PowerFlowSimulator:
             line_flows_p, line_flows_q = self._extract_line_results(failed_lines, failed_nodes)
 
             # Restore network state
-            self._remove_dummy_gens(dummy_gens)
             self._restore_network_state(restore)
 
             return voltages, angles, line_flows_p, node_reactive, line_flows_q, True
@@ -367,7 +416,6 @@ class PowerFlowSimulator:
             import traceback
             print(f"  [WARNING] Power flow exception: {type(e).__name__}: {e}")
             traceback.print_exc()
-            self._remove_dummy_gens(dummy_gens)
             self._restore_network_state(restore)
             return self._get_default_results()
 
@@ -453,6 +501,10 @@ class PowerFlowSimulator:
         src, dst = self.edge_index
         p0 = getattr(self.network.lines_t, "p0", None)
         q0 = getattr(self.network.lines_t, "q0", None)
+        # Phase 2: transformer/PAR flows live in transformers_t, not lines_t.
+        # [MISO RTO-SPEC-006: "Transformer flows" / "PAR flows" telemetry]
+        tp0 = getattr(self.network.transformers_t, "p0", None)
+        tq0 = getattr(self.network.transformers_t, "q0", None)
 
         for i in range(self.num_edges):
             s, d = int(src[i]), int(dst[i])
@@ -461,15 +513,16 @@ class PowerFlowSimulator:
                 # Failed / out-of-service edges carry zero flow
                 continue
 
-            # Map this directed edge back to its single physical PyPSA line.
+            # Map this directed edge back to its single physical PyPSA branch.
             # 'sign' restores the source->destination orientation of this edge
-            # relative to the line's bus0->bus1 convention (Fix #2).
+            # relative to the branch's bus0->bus1 convention (Fix #2).
             name, sign = self.edge_to_line[i]
+            fp, fq = (tp0, tq0) if self.branch_is_trafo.get(name) else (p0, q0)
             try:
-                line_flows_p[i] = float(p0.at["now", name]) * sign
-                line_flows_q[i] = float(q0.at["now", name]) * sign
+                line_flows_p[i] = float(fp.at["now", name]) * sign
+                line_flows_q[i] = float(fq.at["now", name]) * sign
             except (KeyError, AttributeError, TypeError):
-                # Line in an isolated island / not solved — leave as zero flow
+                # Branch in an isolated island / not solved — leave as zero flow
                 continue
 
         return line_flows_p, line_flows_q
@@ -502,7 +555,8 @@ class PowerFlowSimulator:
         for load_name, val in restore.get('load_active', {}).items():
             self.network.loads.at[load_name, "active"] = val
         for line_name, val in restore.get('line_active', {}).items():
-            self.network.lines.at[line_name, "active"] = val
+            # Phase 2: the branch may be a Line or a Transformer component.
+            self._branch_df(line_name).at[line_name, "active"] = val
 
         # Restore slack reassignment.
         for gen_name, val in restore.get('gen_control', {}).items():

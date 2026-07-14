@@ -37,6 +37,7 @@ from .grid_state import (
     build_topology_block, validate_topology_block, ensure_rating_arrays,
     NODE_PROP_KEYS, THRESHOLD_KEYS, LINE_KEYS,
 )
+from .taps import TapController, assign_branch_types
 
 
 class PhysicsBasedGridSimulator:
@@ -249,6 +250,13 @@ class PhysicsBasedGridSimulator:
         #  de-rates" — the de-rate half; schedules arrive in Phase 6]
         self.rating_derate = np.ones(self.num_edges)
 
+        # Phase 2 — branch typing: a fraction of physical branches become LTC
+        # transformers / phase-shifting regulators (mirror-consistent).
+        # [MISO RTO-SPEC-006: "Transformer flows + LTC tap positions",
+        #  "Phase shifter (PAR) flows + tap positions"]
+        self.branch_type = assign_branch_types(
+            self.edge_index.numpy(), rng=np.random.default_rng(seed))
+
         # Decommissioned nodes (topology edits): buses that exist in the
         # arrays but are permanently out of service. Empty for generated
         # grids; from_grid_state() fills it from the block's removed_nodes.
@@ -321,7 +329,13 @@ class PhysicsBasedGridSimulator:
             self.num_nodes, self.edge_index.numpy(), self.positions, self.node_types, self.gen_capacity,
             self.line_reactance, self.line_resistance,
             self.line_susceptance, self.line_conductance, self.thermal_limits,
+            branch_type=self.branch_type,
         )
+
+        # Phase 2 — LTC/PAR tap controller (one mechanical step per timestep,
+        # driven by the previous timestep's power-flow results).
+        self.tap_controller = TapController(
+            self.edge_index.numpy(), self.branch_type)
 
         self.frequency_sim = FrequencyDynamicsSimulator(
             self.num_nodes, self.node_types, self.gen_capacity
@@ -545,6 +559,12 @@ class PhysicsBasedGridSimulator:
         line_failure_record: Dict[int, int] = {}
         self.line_trip_monitor.reset()
 
+        # Phase 2 — tap devices start neutral each scenario; controllers act
+        # on the PREVIOUS timestep's power-flow results (physical delay).
+        self.tap_controller.reset()
+        prev_line_flows = np.zeros(self.num_edges)
+        prev_loading = np.zeros(self.num_edges)
+
         # Stress ramp: rise from 60% to 100% of stress_level over first RAMP_FRACTION of sequence
         earlest_cascade_time = max(1, int(sequence_length * (np.random.uniform(Settings.Simulation.RAMP_FRACTION_MIN, Settings.Simulation.RAMP_FRACTION_MAX))))
         alpha = (0.75/stress_level - 0.6) / earlest_cascade_time
@@ -603,10 +623,20 @@ class PhysicsBasedGridSimulator:
                 ))
                 | cumulative_failed_lines
             )
+            # Phase 2 — step LTC taps / PAR angles from last step's results,
+            # then solve with the new tap state so the devices actually
+            # regulate voltage and reroute flow inside the power flow.
+            tap_ratio_t, phase_shift_t = self.tap_controller.update(
+                prev_voltages if prev_voltages is not None
+                else np.ones(self.num_nodes),
+                prev_line_flows, prev_loading,
+            )
+
             # Run power flow
             voltages, angles, line_flows, node_reactive, line_flows_q, is_stable = (
                 self.power_flow_sim.compute_power_flow(
-                    generation, load_values, failed_lines_t, failed_nodes_t
+                    generation, load_values, failed_lines_t, failed_nodes_t,
+                    tap_ratios=tap_ratio_t, phase_shifts=phase_shift_t,
                 )
             )
 
@@ -639,6 +669,10 @@ class PhysicsBasedGridSimulator:
             # (emergency/normal, load-dump/normal) are unaffected.
             effective_limits = self.thermal_limits * self.rating_derate
             loading_ratios = np.sqrt(line_flows**2 + line_flows_q**2) / (effective_limits + 1e-6)
+
+            # Feed next timestep's tap-controller step (Phase 2)
+            prev_line_flows = line_flows
+            prev_loading = loading_ratios
 
             # Phase 0 — independent line tripping: a line sustaining apparent
             # power above LINE_TRIP_LOADING_RATIO × thermal limit for
@@ -996,9 +1030,10 @@ class PhysicsBasedGridSimulator:
             'thermal_data': thermal_data.astype(np.float16),
             'sensor_data': sensor_data.astype(np.float16),
 
-            # Edge Attribute Format (10 features per edge)
+            # Edge Attribute Format (13 features per edge)
             # CRITICAL: append-only — never reorder. Loss targets hard-code
-            # col 5 (config LAMBDA_FLOW) and dataset.py normalizes 1, 5, 6, 8, 9.
+            # col 5 (config LAMBDA_FLOW); dataset.py normalizes 1, 5, 6, 8, 9,
+            # 11 (/16), 12 (/30); cols 7 and 10 stay raw.
             # Index 0: line_reactance (Ω)
             # Index 1: thermal_limits — NORMAL rating, derated (MVA)
             # Index 2: line_resistance (Ω)
@@ -1021,6 +1056,15 @@ class PhysicsBasedGridSimulator:
                 branch_status,
                 self.emergency_limits * self.rating_derate,
                 self.load_dump_limits * self.rating_derate,
+                # Index 10: branch_type (0=line, 1=LTC transformer, 2=PAR)
+                # Index 11: tap_position (LTC steps, ±16)     ← Phase 2
+                # Index 12: tap_angle (PAR degrees, ±30)      ← Phase 2
+                # [MISO RTO-SPEC-006: "Transformer flows + LTC tap positions",
+                #  "Phase shifter (PAR) flows + tap positions" — flows are
+                #  cols 5–6 (typed by col 10); taps are cols 11–12]
+                self.branch_type,
+                self.tap_controller.tap_position,
+                self.tap_controller.tap_angle,
             ]).astype(np.float32),
 
             'node_labels': np.array([

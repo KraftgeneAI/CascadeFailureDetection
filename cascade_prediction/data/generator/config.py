@@ -257,6 +257,40 @@ class CascadeConfig:
 
 
 # ---------------------------------------------------------------------------
+# Branch Typing & Tap Devices (Phase 2 — MISO data gap plan)
+# [MISO RTO-SPEC-006: "Transformer flows + LTC tap positions" and
+#  "Phase shifter (PAR) flows + tap positions"]
+# ---------------------------------------------------------------------------
+class BranchConfig:
+    # Branch type codes (per directed edge, mirrored across each pair)
+    TYPE_LINE        = 0
+    TYPE_TRANSFORMER = 1     # LTC transformer — regulates voltage magnitude
+    TYPE_PAR         = 2     # phase-angle regulator — reroutes active power
+
+    # Fractions of PHYSICAL (undirected) branches assigned each device type
+    TRANSFORMER_FRACTION = 0.12
+    PAR_FRACTION         = 0.03
+
+    # LTC (load tap changer): tap ∈ [MIN, MAX], each step = STEP_PU voltage
+    # ratio. The controller steps ±1 per timestep (mechanical delay) toward
+    # V_SETPOINT on the regulated bus, ignoring a ±DEADBAND band.
+    LTC_TAP_MIN        = -16
+    LTC_TAP_MAX        = 16
+    LTC_STEP_PU        = 0.00625     # 0.625 % per step (standard 33-step LTC)
+    LTC_V_SETPOINT_PU  = 1.0
+    LTC_DEADBAND_PU    = 0.01
+    LTC_DEAD_BUS_V_PU  = 0.5         # regulated bus below this = de-energized; hold tap
+
+    # PAR (phase-angle regulator): angle ∈ [MIN, MAX] degrees, STEP per
+    # timestep. Controller relieves its OWN loading: above LOADING_TARGET it
+    # steps the shift against the flow direction (DC approx: P ≈ (Δθ + α)/x).
+    PAR_ANGLE_MIN_DEG  = -30.0
+    PAR_ANGLE_MAX_DEG  = 30.0
+    PAR_STEP_DEG       = 2.0
+    PAR_LOADING_TARGET = 0.9
+
+
+# ---------------------------------------------------------------------------
 # Time-Series Simulation
 # ---------------------------------------------------------------------------
 class SimulationConfig:
@@ -377,7 +411,11 @@ class ModelConfig:
     # change requires model retrain.
     # [MISO RTO-SPEC-006: col 7 → "Switching-device open/closed status";
     #  cols 8–9 → "Line ratings — normal/emergency(LEP)/load-dump set"]
-    EDGE_FEATURES       = 10
+    # Phase 2 appended 3 more: [10] branch_type (0=line/1=LTC/2=PAR),
+    # [11] tap_position (LTC steps), [12] tap_angle (PAR degrees).
+    # [MISO RTO-SPEC-006: "Transformer flows + LTC tap positions",
+    #  "Phase shifter (PAR) flows + tap positions"]
+    EDGE_FEATURES       = 13
     RISK_DIM            = 7             # Output dimension of risk assessment head
     GAT_DROPOUT         = 0.1           # Graph attention dropout
     LEAKY_RELU_SLOPE    = 0.2           # LeakyReLU negative slope in GAT
@@ -526,6 +564,7 @@ class Settings:
     Node          = NodeConfig
     Topology      = TopologyConfig
     Cascade       = CascadeConfig
+    Branch        = BranchConfig
     Simulation    = SimulationConfig
     Scenario      = ScenarioConfig
     Dataset       = DatasetConfig

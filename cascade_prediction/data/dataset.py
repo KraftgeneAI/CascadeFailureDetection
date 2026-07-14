@@ -263,31 +263,44 @@ class CascadeDataset(Dataset):
             
             data_arrays['equipment_status'].append(to_tensor(ts.get('equipment_status', np.zeros((num_nodes, 10)))))
 
-            # Per-timestep edge attributes — cols 5-6 (line_flows, line_flows_q)
-            # and col 7 (branch_status) are dynamic and must be collected per
-            # step, not just from the last timestep.
-            ea = ts.get('edge_attr', np.zeros((num_edges, 10))).astype(np.float32)
-            if ea.shape[1] >= 7:
+            # Per-timestep edge attributes — cols 5-6 (line_flows, line_flows_q),
+            # col 7 (branch_status), and cols 11-12 (tap position/angle) are
+            # dynamic and must be collected per step.
+            ea = ts.get('edge_attr', np.zeros((num_edges, 13))).astype(np.float32)
+            orig_w = ea.shape[1]   # normalize only GENERATED columns; backfills
+                                   # are built directly in normalized scale
+            if orig_w >= 7:
                 ea[:, 1] = normalize_power(ea[:, 1], self.base_mva)   # thermal_limits (normal rating)
                 ea[:, 5] = normalize_power(ea[:, 5], self.base_mva)   # line_flows_p
                 ea[:, 6] = normalize_power(ea[:, 6], self.base_mva)   # line_flows_q
-            if ea.shape[1] >= 10:
+            if orig_w >= 10:
                 # Phase 1 columns: [7] branch_status is binary — leave raw.
                 # [MISO RTO-SPEC-006: col 7 → switching-device open/closed
                 #  status; cols 8–9 → line ratings normal/emergency/load-dump]
                 ea[:, 8] = normalize_power(ea[:, 8], self.base_mva)   # emergency (LEP) rating
                 ea[:, 9] = normalize_power(ea[:, 9], self.base_mva)   # load-dump rating
-            elif ea.shape[1] == 7:
-                # Legacy pre-Phase-1 scenarios: backfill appended columns so old
-                # pickles still feed the 10-wide edge encoder — breaker closed,
-                # tiers as nominal multiples of the (already normalized) normal
-                # rating (mid-range of the Phase 1 factor distributions).
+            if orig_w >= 13:
+                # Phase 2 columns: [10] branch_type is categorical — raw.
+                # Normalize taps into ~[-1, 1]: position by max steps (16),
+                # angle by max shift (30°).
+                # [MISO RTO-SPEC-006: LTC tap positions / PAR tap positions]
+                ea[:, 11] = ea[:, 11] / 16.0
+                ea[:, 12] = ea[:, 12] / 30.0
+            if orig_w == 7:
+                # Legacy pre-Phase-1: backfill cols 7-9 — breaker closed,
+                # tiers as nominal multiples of the (already normalized)
+                # normal rating (mid-range of the Phase 1 factors).
                 backfill = np.column_stack([
                     np.ones(ea.shape[0], dtype=np.float32),   # branch_status = closed
                     ea[:, 1] * 1.22,                          # emergency (LEP)
                     ea[:, 1] * 1.47,                          # load-dump
                 ]).astype(np.float32)
                 ea = np.concatenate([ea, backfill], axis=1)
+            if ea.shape[1] == 10:
+                # Pre-Phase-2: backfill cols 10-12 — all plain lines,
+                # neutral taps (zeros are already normalized-scale).
+                ea = np.concatenate([
+                    ea, np.zeros((ea.shape[0], 3), dtype=np.float32)], axis=1)
             data_arrays['edge_attr'].append(to_tensor(ea))
 
             # Edge stress mask: encode thermal loading stress (pre-cascade window has no

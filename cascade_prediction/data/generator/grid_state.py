@@ -38,6 +38,9 @@ LINE_KEYS = [
     # edge_attr packaging; from_grid_state crashes without them. Legacy
     # blocks saved before Phase 1 are backfilled via ensure_rating_arrays().
     'emergency_limits', 'load_dump_limits', 'rating_derate',
+    # Phase 2 branch typing (0=line, 1=LTC transformer, 2=PAR) — static per
+    # edge; tap POSITIONS are dynamic runtime state and are NOT in the block.
+    'branch_type',
 ]
 
 
@@ -55,6 +58,9 @@ def ensure_rating_arrays(block: Dict) -> Dict:
         block['load_dump_limits'] = tl * 1.47
     if 'rating_derate' not in block:
         block['rating_derate'] = np.ones(e)
+    # Phase 2: legacy blocks predate branch typing — all plain lines.
+    if 'branch_type' not in block:
+        block['branch_type'] = np.zeros(e, dtype=np.int64)
     return block
 
 
@@ -199,7 +205,11 @@ def _new_edge_params(block: Dict, s: int, d: int,
     new_dist = float(np.linalg.norm(pos[s] - pos[d]))
     dists = np.linalg.norm(pos[ei[0]] - pos[ei[1]], axis=1)
     donor = int(np.argmin(np.abs(dists - new_dist)))
-    return {key: float(np.asarray(block[key])[donor]) for key in LINE_KEYS}
+    params = {key: float(np.asarray(block[key])[donor]) for key in LINE_KEYS}
+    # User-drawn edges are always plain lines — never clone the donor's
+    # transformer/PAR typing (Phase 2).
+    params['branch_type'] = 0.0
+    return params
 
 
 def apply_topology_edits(block: Dict, edits: Dict) -> Tuple[Dict, Dict[str, int]]:
