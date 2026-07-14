@@ -336,7 +336,6 @@ class PowerFlowSimulator:
             # distribute_slack spreads imbalance across all PV generators,
             # reducing voltage stress on the single slack bus at high load.
             status = self.network.pf(use_seed=False, distribute_slack=True)
-            is_stable = self._pf_converged(status)
             converged = status.get("converged")
             if hasattr(converged, "values"):   # DataFrame: snapshots × sub-networks
                 # ALL sub-networks must converge (an edited grid with a

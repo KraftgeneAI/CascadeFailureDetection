@@ -34,7 +34,28 @@ THRESHOLD_KEYS = [
 LINE_KEYS = [
     'line_reactance', 'line_resistance', 'line_susceptance',
     'line_conductance', 'thermal_limits',
+    # Phase 1 rating tiers + de-rate — REQUIRED by LineTripMonitor and
+    # edge_attr packaging; from_grid_state crashes without them. Legacy
+    # blocks saved before Phase 1 are backfilled via ensure_rating_arrays().
+    'emergency_limits', 'load_dump_limits', 'rating_derate',
 ]
+
+
+def ensure_rating_arrays(block: Dict) -> Dict:
+    """
+    Backfill Phase 1 per-edge rating arrays on legacy topology blocks
+    (embedded before the multi-rating change). Mid-range tier factors match
+    the dataset.py backfill; derate defaults to no-op.
+    """
+    e = int(np.asarray(block['edge_index']).shape[1])
+    tl = np.asarray(block.get('thermal_limits', np.ones(e)), dtype=np.float64)
+    if 'emergency_limits' not in block:
+        block['emergency_limits'] = tl * 1.22
+    if 'load_dump_limits' not in block:
+        block['load_dump_limits'] = tl * 1.47
+    if 'rating_derate' not in block:
+        block['rating_derate'] = np.ones(e)
+    return block
 
 
 def build_topology_block(sim) -> Dict:
@@ -207,6 +228,7 @@ def apply_topology_edits(block: Dict, edits: Dict) -> Tuple[Dict, Dict[str, int]
     TYPE_CODES = {'load': 0, 'generator': 1, 'substation': 2}
     new_block = {k: (v.copy() if isinstance(v, np.ndarray) else v)
                  for k, v in block.items()}
+    ensure_rating_arrays(new_block)   # legacy blocks lack Phase 1 arrays
     seed = new_block.get('seed')
     n = int(new_block['num_nodes'])
 

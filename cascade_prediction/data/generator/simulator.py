@@ -34,7 +34,7 @@ from .robotic import RoboticDataGenerator
 from .utils import get_failed_lines_from_nodes
 from .config import Settings
 from .grid_state import (
-    build_topology_block, validate_topology_block,
+    build_topology_block, validate_topology_block, ensure_rating_arrays,
     NODE_PROP_KEYS, THRESHOLD_KEYS, LINE_KEYS,
 )
 
@@ -249,26 +249,6 @@ class PhysicsBasedGridSimulator:
         #  de-rates" — the de-rate half; schedules arrive in Phase 6]
         self.rating_derate = np.ones(self.num_edges)
 
-        # Phase 1 — multi-rating lines. thermal_limits stays the NORMAL rating
-        # (edge_attr col 1, PyPSA s_nom, loading_ratio denominator). Emergency
-        # (LEP) and load-dump tiers are thresholds used only by trip logic.
-        # [MISO RTO-SPEC-006: "Line ratings — normal/emergency(LEP)/load-dump set"]
-        self.emergency_limits = self.thermal_limits * np.random.uniform(
-            Settings.Cascade.EMERGENCY_RATING_FACTOR_MIN,
-            Settings.Cascade.EMERGENCY_RATING_FACTOR_MAX, self.num_edges)
-        self.load_dump_limits = self.thermal_limits * np.random.uniform(
-            Settings.Cascade.LOAD_DUMP_RATING_FACTOR_MIN,
-            Settings.Cascade.LOAD_DUMP_RATING_FACTOR_MAX, self.num_edges)
-        self.emergency_limits = _mirror(self.emergency_limits)
-        self.load_dump_limits = _mirror(self.load_dump_limits)
-
-        # De-rate multiplier (weather/outage driven; scenario layer modulates
-        # it in Phase 6). Scales all three tiers together; default no-op.
-        # [MISO RTO-SPEC-006: "Transmission/generation outage schedules +
-        #  de-rates" — the de-rate half; schedules arrive in Phase 6]
-        self.rating_derate = np.ones(self.num_edges)
-
-
         # Decommissioned nodes (topology edits): buses that exist in the
         # arrays but are permanently out of service. Empty for generated
         # grids; from_grid_state() fills it from the block's removed_nodes.
@@ -296,6 +276,7 @@ class PhysicsBasedGridSimulator:
         Returns:
             Fully initialized PhysicsBasedGridSimulator.
         """
+        ensure_rating_arrays(topology_block)   # backfill legacy pre-Phase-1 blocks
         problems = validate_topology_block(topology_block)
         if problems:
             raise ValueError(f"invalid topology block: {problems}")
