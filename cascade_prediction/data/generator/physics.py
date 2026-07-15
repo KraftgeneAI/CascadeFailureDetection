@@ -163,8 +163,14 @@ class PowerFlowSimulator:
                 p_nom=gen_capacity[idx],
                 control=control,
                 p_set=0.0,
-                v_set=v_set
+                v_set=v_set   # bookkeeping only — see bus target below
             )
+            # PyPSA reads the PV/Slack voltage TARGET from the BUS attribute
+            # v_mag_pu_set, not from any generator attribute; a bare `v_set`
+            # kwarg is stored as an inert custom column. Without this line
+            # every PV bus silently regulated to the 1.0 default and AVR
+            # setpoints (Phase 3) had no effect on the solve.
+            network.buses.at[f"bus_{idx}", "v_mag_pu_set"] = v_set
         
         # Add loads
         for i in range(self.num_nodes):
