@@ -291,6 +291,40 @@ class BranchConfig:
 
 
 # ---------------------------------------------------------------------------
+# Reactive Support & Voltage Regulation (Phase 3 — MISO data gap plan)
+# [MISO RTO-SPEC-006: "Voltage-regulation equipment (AVR, capacitor/reactor,
+#  SVC) status"]
+# ---------------------------------------------------------------------------
+class ShuntConfig:
+    # Switchable capacitor banks (inject Q, prop voltage up under heavy load)
+    CAP_BANK_FRACTION    = 0.25    # fraction of LOAD buses with a cap bank
+    CAP_BANK_MVAR_MIN    = 20.0
+    CAP_BANK_MVAR_MAX    = 60.0
+    CAP_IN_V_PU          = 0.98    # switch IN below this (hysteresis pair)
+    CAP_OUT_V_PU         = 1.02    # switch OUT above this
+
+    # Switchable reactor banks (absorb Q, pull voltage down at light load)
+    REACTOR_FRACTION     = 0.10    # fraction of SUBSTATION buses with a reactor
+    REACTOR_MVAR_MIN     = 20.0
+    REACTOR_MVAR_MAX     = 50.0
+    REACTOR_IN_V_PU      = 1.02
+    REACTOR_OUT_V_PU     = 0.99
+
+    # SVCs — continuous, fast reactive support: Q = clip(GAIN·(Vset−V), ±Qmax)
+    SVC_FRACTION         = 0.05    # fraction of ALL buses with an SVC
+    SVC_QMAX_MVAR_MIN    = 30.0
+    SVC_QMAX_MVAR_MAX    = 80.0
+    SVC_GAIN_MVAR_PER_PU = 800.0
+    SVC_V_SETPOINT_PU    = 1.0
+
+    # AVR setpoints (generator terminal-voltage targets, telemetered)
+    AVR_SETPOINT_MIN_PU  = 0.99
+    AVR_SETPOINT_MAX_PU  = 1.03
+
+    DEAD_BUS_V_PU        = 0.5     # de-energized bus: devices disconnect/hold
+
+
+# ---------------------------------------------------------------------------
 # Time-Series Simulation
 # ---------------------------------------------------------------------------
 class SimulationConfig:
@@ -500,7 +534,10 @@ class EmbeddingConfig:
     ENV_WEATHER_LSTM_LAYERS = 2         # Weather LSTM layer count
 
     # -- Infrastructure ------------------------------------------------------
-    INFRA_SCADA_FEATURES    = 18        # SCADA measurement feature width
+    # SCADA width: 18 base + 4 Phase 3 reactive-support columns
+    # ([18] cap bank status, [19] reactor status, [20] SVC Q output,
+    #  [21] AVR setpoint). [MISO RTO-SPEC-006: voltage-regulation equipment]
+    INFRA_SCADA_FEATURES    = 22        # SCADA measurement feature width
     INFRA_PMU_FEATURES      = 8         # PMU measurement feature width
     INFRA_EQUIPMENT_FEATURES = 10       # Equipment status feature width
     INFRA_SCADA_HIDDEN      = 64        # SCADA encoder hidden size
@@ -520,26 +557,28 @@ class EmbeddingConfig:
     DROPOUT_CNN             = 0.2       # Spatial (2-D) dropout in CNN blocks
     DROPOUT_FC              = 0.3       # Dropout in fully-connected blocks
 
-    # -- Node-level 119-feature MLP ------------------------------------------
-    # Feature layout per node per timestep (119 total, IMPROVED v2):
-    #   [0:18]   SCADA measurements          (18)
-    #   [18:26]  PMU measurements             ( 8)
-    #   [26:36]  Equipment status            (10)
-    #   [36:37]  Active power injection       ( 1)
-    #   [37:38]  Reactive power injection     ( 1)
-    #   [38:76]  1-step temporal deltas of [0:38]  (38)
-    #   [76:114] 2-step temporal deltas of [0:38]  (38)
-    #   [114]    Normalised timestep position ( 1)
-    #   [115]    TTF voltage  — normalised steps to voltage threshold  ( 1)
-    #   [116]    TTF temp     — normalised steps to temperature threshold ( 1)
-    #   [117]    TTF freq     — normalised steps to frequency threshold  ( 1)
-    #   [118]    TTF loading  — normalised steps to loading threshold    ( 1)
+    # -- Node-level feature MLP ------------------------------------------
+    # Feature layout per node per timestep (136 total; Phase 3 widened SCADA
+    # 18→22, shifting every later offset):
+    #   [0:22]   SCADA measurements          (22; 18-21 reactive support)
+    #   [22:30]  PMU measurements             ( 8)
+    #   [30:40]  Equipment status            (10)
+    #   [40:41]  Active power injection       ( 1)
+    #   [41:42]  Reactive power injection     ( 1)
+    #   [42:84]  1-step temporal deltas of [0:42]  (42)
+    #   [84:126] 2-step temporal deltas of [0:42]  (42)
+    #   [126]    Normalised timestep position ( 1)
+    #   [127]    TTF voltage  — normalised steps to voltage threshold  ( 1)
+    #   [128]    TTF temp     — normalised steps to temperature threshold ( 1)
+    #   [129]    TTF freq     — normalised steps to frequency threshold  ( 1)
+    #   [130]    TTF loading  — normalised steps to loading threshold    ( 1)
+    #   [131:136] Cascade susceptibility      ( 5)
     #
     # The 4 new TTF (time-to-failure) features encode physics-based estimates
     # of how many steps remain before each failure condition is breached.
     # They directly provide the timing signal needed by the TimingHead.
-    NODE_FEATURE_BASE_DIM   = 38        # SCADA+PMU+equip+inj before deltas
-    NODE_FEATURE_DIM        = 124       # Full per-node feature vector width (119 + 5 cascade susceptibility)
+    NODE_FEATURE_BASE_DIM   = 42        # SCADA(22)+PMU(8)+equip(10)+inj(2) before deltas (Phase 3: was 38)
+    NODE_FEATURE_DIM        = 136       # 42*3 + 1 t_pos + 4 TTF + 5 susceptibility (Phase 3: was 124)
     NODE_MLP_HIDDEN_1       = 256       # First hidden layer of NodeFeatureMLP
     NODE_MLP_HIDDEN_2       = 128       # Second hidden layer of NodeFeatureMLP
 
@@ -565,6 +604,7 @@ class Settings:
     Topology      = TopologyConfig
     Cascade       = CascadeConfig
     Branch        = BranchConfig
+    Shunt         = ShuntConfig
     Simulation    = SimulationConfig
     Scenario      = ScenarioConfig
     Dataset       = DatasetConfig

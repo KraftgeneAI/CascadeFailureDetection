@@ -1,27 +1,28 @@
 """
 Node Feature MLP
 ================
-Encodes the 124-feature per-node-per-timestep vector produced by
+Encodes the 136-feature per-node-per-timestep vector produced by
 CascadeDataset._build_node_features() into the shared embedding space.
 
-Feature layout (124 total, IMPROVED v3 — cascade susceptibility):
-  [0:18]   SCADA measurements          (18)
-  [18:26]  PMU measurements             ( 8)
-  [26:36]  Equipment status            (10)
-  [36:37]  Active power injection       ( 1)
-  [37:38]  Reactive power injection     ( 1)
-  [38:76]  1-step temporal deltas      (38)
-  [76:114] 2-step temporal deltas      (38)
-  [114]    Normalised timestep position ( 1)
-  [115]    TTF voltage  (normalised steps to voltage failure)   ( 1)
-  [116]    TTF temp     (normalised steps to temperature failure)( 1)
-  [117]    TTF freq     (normalised steps to frequency failure)  ( 1)
-  [118]    TTF loading  (normalised steps to loading failure)    ( 1)
-  [119]    mean_adjacent_line_loading  (mean |flow|/limit adj edges) ( 1)
-  [120]    cascade_initiation_risk     (|P_inj|/sum_thermal_limits)  ( 1)
-  [121]    cascade_reception_risk      (weighted flow from neighbors)( 1)
-  [122]    max_adjacent_line_loading   (max |flow|/limit adj edges)  ( 1)
-  [123]    loading_x_max_line          (loading_ratio × max_adj_ll)  ( 1)
+Feature layout (136 total, v4 — Phase 3 widened SCADA 18→22):
+  [0:22]   SCADA measurements          (22; 18-21 = cap/reactor status,
+                                        SVC Q, AVR setpoint)
+  [22:30]  PMU measurements             ( 8)
+  [30:40]  Equipment status            (10)
+  [40:41]  Active power injection       ( 1)
+  [41:42]  Reactive power injection     ( 1)
+  [42:84]  1-step temporal deltas      (42)
+  [84:126] 2-step temporal deltas      (42)
+  [126]    Normalised timestep position ( 1)
+  [127]    TTF voltage  (normalised steps to voltage failure)   ( 1)
+  [128]    TTF temp     (normalised steps to temperature failure)( 1)
+  [129]    TTF freq     (normalised steps to frequency failure)  ( 1)
+  [130]    TTF loading  (normalised steps to loading failure)    ( 1)
+  [131]    mean_adjacent_line_loading  (mean |flow|/limit adj edges) ( 1)
+  [132]    cascade_initiation_risk     (|P_inj|/sum_thermal_limits)  ( 1)
+  [133]    cascade_reception_risk      (weighted flow from neighbors)( 1)
+  [134]    max_adjacent_line_loading   (max |flow|/limit adj edges)  ( 1)
+  [135]    loading_x_max_line          (loading_ratio × max_adj_ll)  ( 1)
 
 The 5 new cascade susceptibility features encode topology-informed
 pre-cascade risk signals: which nodes are likely to initiate cascade

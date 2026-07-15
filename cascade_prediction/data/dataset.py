@@ -225,12 +225,27 @@ class CascadeDataset(Dataset):
         # Process each timestep
         for i, ts in enumerate(sequence):
             # SCADA data with normalization (now 18 features with failure proximity ratios)
-            scada_data_raw = ts.get('scada_data', np.zeros((num_nodes, 18))).astype(np.float32)
-            
+            scada_data_raw = ts.get('scada_data', np.zeros((num_nodes, 22))).astype(np.float32)
+
             if scada_data_raw.shape[1] >= 6:
                 scada_data_raw[:, 2] = normalize_power(scada_data_raw[:, 2], self.base_mva)
                 scada_data_raw[:, 3] = normalize_power(scada_data_raw[:, 3], self.base_mva)
                 scada_data_raw[:, 4] = normalize_power(scada_data_raw[:, 4], self.base_mva)
+            if scada_data_raw.shape[1] >= 22:
+                # Phase 3 columns: [18]/[19] bank statuses binary — raw;
+                # [20] SVC Q in MVar — normalize; [21] AVR setpoint p.u. — raw.
+                # [MISO RTO-SPEC-006: voltage-regulation equipment status]
+                scada_data_raw[:, 20] = normalize_power(scada_data_raw[:, 20], self.base_mva)
+            elif scada_data_raw.shape[1] == 18:
+                # Legacy pre-Phase-3 scenarios: no reactive-support devices —
+                # statuses 0, SVC 0, AVR 1.0 p.u. on generator buses (type is
+                # SCADA col 11), 0 elsewhere.
+                is_gen = (scada_data_raw[:, 11] == 1).astype(np.float32)
+                pad = np.column_stack([
+                    np.zeros((scada_data_raw.shape[0], 3), dtype=np.float32),
+                    is_gen * 1.0,
+                ]).astype(np.float32)
+                scada_data_raw = np.concatenate([scada_data_raw, pad], axis=1)
             
             # Keep all 18 features, update time_ratio to be relative to window
             scada_data = scada_data_raw.copy()
@@ -473,27 +488,28 @@ class CascadeDataset(Dataset):
         edge_index:       Optional[np.ndarray] = None,   # (2, E) numpy int array
         edge_attr_list:   Optional[List[np.ndarray]] = None,  # list[T] of (E,7) arrays
     ) -> torch.Tensor:
-        """Build the (T, N, 124) node-feature tensor used by NodeFeatureMLP.
+        """Build the (T, N, 136) node-feature tensor used by NodeFeatureMLP.
 
-        Feature layout (matches Settings.Embedding constants):
-          [0:18]   SCADA measurements         (18)
-          [18:26]  PMU measurements            ( 8)
-          [26:36]  Equipment status           (10)
-          [36:37]  Active power injection      ( 1)
-          [37:38]  Reactive power injection    ( 1)
-          [38:76]  1-step temporal deltas of [0:38]  (38)
-          [76:114] 2-step temporal deltas of [0:38]  (38)
-          [114]    Normalised timestep position ( 1)
-          [115:119] TTF physics estimators     ( 4)
-          [119:124] Cascade susceptibility     ( 5)
-              [119] mean_adjacent_line_loading — mean |flow|/limit of adjacent edges
-              [120] cascade_initiation_risk    — |P_inj| / sum_of_adjacent_thermal_limits
-              [121] cascade_reception_risk     — weighted flow stress from stressed neighbors
-              [122] max_adjacent_line_loading  — max |flow|/limit over adjacent edges
-              [123] loading_x_max_line         — loading_ratio × max_adjacent_line_loading
+        Feature layout (matches Settings.Embedding constants; Phase 3 widened
+        SCADA 18→22, shifting every later offset):
+          [0:22]   SCADA measurements         (22; 18-21 = reactive support)
+          [22:30]  PMU measurements            ( 8)
+          [30:40]  Equipment status           (10)
+          [40:41]  Active power injection      ( 1)
+          [41:42]  Reactive power injection    ( 1)
+          [42:84]  1-step temporal deltas of [0:42]  (42)
+          [84:126] 2-step temporal deltas of [0:42]  (42)
+          [126]    Normalised timestep position ( 1)
+          [127:131] TTF physics estimators     ( 4)
+          [131:136] Cascade susceptibility     ( 5)
+              [131] mean_adjacent_line_loading — mean |flow|/limit of adjacent edges
+              [132] cascade_initiation_risk    — |P_inj| / sum_of_adjacent_thermal_limits
+              [133] cascade_reception_risk     — weighted flow stress from stressed neighbors
+              [134] max_adjacent_line_loading  — max |flow|/limit over adjacent edges
+              [135] loading_x_max_line         — loading_ratio × max_adjacent_line_loading
 
         Args:
-            scada_list:     T tensors of shape (N, 18), already normalised.
+            scada_list:     T tensors of shape (N, 22), already normalised.
             pmu_list:       T tensors of shape (N,  8), already normalised.
             equip_list:     T tensors of shape (N, 10), already normalised.
             sequence:       Raw per-timestep dicts (for power/reactive injection).
@@ -502,7 +518,7 @@ class CascadeDataset(Dataset):
             edge_attr_list: Per-timestep edge attributes list[T] of (E,7) arrays.
 
         Returns:
-            Tensor of shape (T, N, 115), float32.
+            Tensor of shape (T, N, 136), float32.
         """
         T = len(scada_list)
 
@@ -699,7 +715,7 @@ class CascadeDataset(Dataset):
         # Final tensor: 115 + 4 + 5 = 124 features
         return torch.cat(
             [base, delta1, delta2, t_pos, ttf_features, cascade_susceptibility], dim=2
-        ).float()  # (T, N, 124)
+        ).float()  # (T, N, Settings.Embedding.NODE_FEATURE_DIM = 136)
 
     def _process_metadata_format(self, scenario: Dict) -> Dict[str, Any]:
         """

@@ -23,6 +23,10 @@ NODE_PROP_KEYS = [
     'node_types', 'base_load', 'gen_capacity',
     'equipment_age', 'equipment_condition',
     'thermal_capacity', 'cooling_effectiveness', 'thermal_time_constant',
+    # Phase 3 reactive-support devices (static sizing/setpoints; switching
+    # STATE is dynamic runtime data and not in the block). Legacy blocks are
+    # backfilled by ensure_rating_arrays().
+    'shunt_cap_mvar', 'shunt_reactor_mvar', 'svc_qmax_mvar', 'avr_setpoint',
 ]
 THRESHOLD_KEYS = [
     'loading_failure_threshold', 'loading_damage_threshold',
@@ -61,6 +65,15 @@ def ensure_rating_arrays(block: Dict) -> Dict:
     # Phase 2: legacy blocks predate branch typing — all plain lines.
     if 'branch_type' not in block:
         block['branch_type'] = np.zeros(e, dtype=np.int64)
+    # Phase 3: legacy blocks predate reactive support — no devices; AVR
+    # setpoints default to 1.0 p.u. on generator buses (0 elsewhere).
+    n = int(block['num_nodes'])
+    node_types = np.asarray(block.get('node_types', np.zeros(n)))
+    for key in ('shunt_cap_mvar', 'shunt_reactor_mvar', 'svc_qmax_mvar'):
+        if key not in block:
+            block[key] = np.zeros(n)
+    if 'avr_setpoint' not in block:
+        block['avr_setpoint'] = np.where(node_types == 1, 1.0, 0.0)
     return block
 
 

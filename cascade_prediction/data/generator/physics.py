@@ -38,6 +38,7 @@ class PowerFlowSimulator:
         line_conductance: np.ndarray,
         thermal_limits: np.ndarray,
         branch_type: Optional[np.ndarray] = None,
+        avr_setpoint: Optional[np.ndarray] = None,
     ):
         """
         Initialize power flow simulator.
@@ -56,6 +57,10 @@ class PowerFlowSimulator:
             branch_type: Optional per-edge device type (Phase 2): 0=line,
                 1=LTC transformer, 2=phase-shifting transformer (PAR).
                 None → all plain lines (pre-Phase-2 behavior).
+            avr_setpoint: Optional per-node AVR voltage setpoints (Phase 3) —
+                PV generators regulate to these instead of internal randoms,
+                making the setpoint a telemetered, reproducible quantity.
+                [MISO RTO-SPEC-006: AVR status]
         """
         self.num_nodes = num_nodes
         self.num_edges = edge_index.shape[1]
@@ -83,6 +88,9 @@ class PowerFlowSimulator:
         # tan(phi) = sqrt(1 - pf²) / pf  → Q = P * tan(phi)
         self.tan_phi = np.sqrt(1.0 - pf**2) / pf  # per-node Q/P ratio
         
+        # Phase 3 — AVR setpoints (None → legacy internal randoms)
+        self.avr_setpoint = avr_setpoint
+
         # Phase 2 — branch typing (None → all plain lines)
         self.branch_type = (
             np.asarray(branch_type, dtype=np.int64)
@@ -142,7 +150,12 @@ class PowerFlowSimulator:
                 v_set = Settings.PowerFlow.SLACK_V_SET
             else:
                 control = "PV"   # Voltage-regulating generator
-                v_set = np.random.uniform(Settings.PowerFlow.PV_V_SET_MIN, Settings.PowerFlow.PV_V_SET_MAX)
+                # Phase 3: the AVR setpoint IS the PV target — telemetered
+                # (SCADA col 21) instead of an internal random draw.
+                if self.avr_setpoint is not None and self.avr_setpoint[idx] > 0:
+                    v_set = float(self.avr_setpoint[idx])
+                else:
+                    v_set = np.random.uniform(Settings.PowerFlow.PV_V_SET_MIN, Settings.PowerFlow.PV_V_SET_MAX)
             network.add(
                 "Generator",
                 f"gen_{idx}",
@@ -248,6 +261,7 @@ class PowerFlowSimulator:
         failed_nodes: Optional[List[int]] = None,
         tap_ratios: Optional[np.ndarray] = None,
         phase_shifts: Optional[np.ndarray] = None,
+        shunt_q: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool]:
         """
         Compute AC power flow using PyPSA with proper bus isolation.
@@ -271,6 +285,14 @@ class PowerFlowSimulator:
         # Equivalent to shunt capacitor compensation at every load bus, scaled
         # with actual load so there is no over/under-compensation at any stress level.
         q_load = load * self.tan_phi * Settings.PowerFlow.Q_LOAD_FACTOR
+
+        # Phase 3 — reactive-support injection (cap/reactor banks + SVC).
+        # Positive shunt_q injects Q at the bus → reduces the net reactive
+        # demand seen by the network, propping the local voltage — the
+        # mechanism by which exhausted reactive reserves become visible.
+        # [MISO RTO-SPEC-006: voltage-regulation equipment status]
+        if shunt_q is not None:
+            q_load = q_load - shunt_q
 
         failed_node_set = set(int(n) for n in failed_nodes) if failed_nodes else set()
 

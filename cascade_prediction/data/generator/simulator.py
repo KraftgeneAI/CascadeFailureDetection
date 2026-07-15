@@ -38,6 +38,7 @@ from .grid_state import (
     NODE_PROP_KEYS, THRESHOLD_KEYS, LINE_KEYS,
 )
 from .taps import TapController, assign_branch_types
+from .shunts import ShuntController, assign_shunt_devices
 
 
 class PhysicsBasedGridSimulator:
@@ -257,6 +258,17 @@ class PhysicsBasedGridSimulator:
         self.branch_type = assign_branch_types(
             self.edge_index.numpy(), rng=np.random.default_rng(seed))
 
+        # Phase 3 — reactive-support devices per node (cap/reactor banks,
+        # SVCs) + telemetered AVR setpoints on generators.
+        # [MISO RTO-SPEC-006: "Voltage-regulation equipment (AVR,
+        #  capacitor/reactor, SVC) status"]
+        shunt_devices = assign_shunt_devices(
+            self.node_types, rng=np.random.default_rng(seed + 1))
+        self.shunt_cap_mvar = shunt_devices['shunt_cap_mvar']
+        self.shunt_reactor_mvar = shunt_devices['shunt_reactor_mvar']
+        self.svc_qmax_mvar = shunt_devices['svc_qmax_mvar']
+        self.avr_setpoint = shunt_devices['avr_setpoint']
+
         # Decommissioned nodes (topology edits): buses that exist in the
         # arrays but are permanently out of service. Empty for generated
         # grids; from_grid_state() fills it from the block's removed_nodes.
@@ -330,12 +342,18 @@ class PhysicsBasedGridSimulator:
             self.line_reactance, self.line_resistance,
             self.line_susceptance, self.line_conductance, self.thermal_limits,
             branch_type=self.branch_type,
+            avr_setpoint=self.avr_setpoint,
         )
 
         # Phase 2 — LTC/PAR tap controller (one mechanical step per timestep,
         # driven by the previous timestep's power-flow results).
         self.tap_controller = TapController(
             self.edge_index.numpy(), self.branch_type)
+
+        # Phase 3 — reactive-support controller (bank hysteresis + SVC droop),
+        # also driven by the previous timestep's voltages.
+        self.shunt_controller = ShuntController(
+            self.shunt_cap_mvar, self.shunt_reactor_mvar, self.svc_qmax_mvar)
 
         self.frequency_sim = FrequencyDynamicsSimulator(
             self.num_nodes, self.node_types, self.gen_capacity
@@ -565,6 +583,9 @@ class PhysicsBasedGridSimulator:
         prev_line_flows = np.zeros(self.num_edges)
         prev_loading = np.zeros(self.num_edges)
 
+        # Phase 3 — reactive support starts idle each scenario.
+        self.shunt_controller.reset()
+
         # Stress ramp: rise from 60% to 100% of stress_level over first RAMP_FRACTION of sequence
         earlest_cascade_time = max(1, int(sequence_length * (np.random.uniform(Settings.Simulation.RAMP_FRACTION_MIN, Settings.Simulation.RAMP_FRACTION_MAX))))
         alpha = (0.75/stress_level - 0.6) / earlest_cascade_time
@@ -632,11 +653,19 @@ class PhysicsBasedGridSimulator:
                 prev_line_flows, prev_loading,
             )
 
+            # Phase 3 — step reactive support (bank switching + SVC droop)
+            # from last step's voltages; inject the resulting Q this step.
+            shunt_q_t = self.shunt_controller.update(
+                prev_voltages if prev_voltages is not None
+                else np.ones(self.num_nodes)
+            )
+
             # Run power flow
             voltages, angles, line_flows, node_reactive, line_flows_q, is_stable = (
                 self.power_flow_sim.compute_power_flow(
                     generation, load_values, failed_lines_t, failed_nodes_t,
                     tap_ratios=tap_ratio_t, phase_shifts=phase_shift_t,
+                    shunt_q=shunt_q_t,
                 )
             )
 
@@ -959,7 +988,9 @@ class PhysicsBasedGridSimulator:
             'weather_sequence': weather_seq.astype(np.float32),
             'threat_indicators': threat_ind.astype(np.float32),
 
-            # SCADA Data Format (18 features per node)
+            # SCADA Data Format (22 features per node; 18-21 appended in
+            # Phase 3 — reactive support: [18] cap status, [19] reactor
+            # status, [20] SVC Q (MVar), [21] AVR setpoint (p.u.))
             # CRITICAL: Keep this order synchronized with dataset.py extraction!
             # Index 0: voltages (p.u.)
             # Index 1: angles (radians)
@@ -1000,6 +1031,13 @@ class PhysicsBasedGridSimulator:
                 np.full(self.num_nodes, current_frequency) / self.frequency_failure_threshold,  # 16: >1 = safe, <1 = danger
                 # guarded divide: decommissioned nodes have base_load == 0
                 load_values / (self.base_load + 1e-6) / self.loading_failure_threshold,  # 17: <1 = safe, >1 = danger
+                # Phase 3 — reactive-support telemetry (append-only).
+                # [MISO RTO-SPEC-006: "Voltage-regulation equipment (AVR,
+                #  capacitor/reactor, SVC) status"]
+                self.shunt_controller.cap_status.astype(np.float32),      # 18: cap bank in (0/1)
+                self.shunt_controller.reactor_status.astype(np.float32),  # 19: reactor bank in (0/1)
+                self.shunt_controller.svc_q,                              # 20: SVC output (MVar)
+                self.avr_setpoint,                                        # 21: AVR setpoint (p.u., 0=non-gen)
             ]).astype(np.float32),
 
             'pmu_sequence': np.column_stack([
