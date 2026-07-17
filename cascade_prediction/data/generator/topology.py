@@ -125,7 +125,7 @@ class GridTopologyGenerator:
 
         print(
             f"  Loaded topology: {topology['num_nodes']} nodes, "
-            f"{topology['num_edges']} edges \u2190 {path}"
+            f"{topology['num_edges']} edges <- {path}"
         )
         return topology
 

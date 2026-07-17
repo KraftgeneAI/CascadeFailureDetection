@@ -18,6 +18,7 @@ _TEMPORAL_KEYS = {
     'scada_data', 'pmu_sequence', 'equipment_status', 'edge_mask',
     'temporal_sequence',
     'edge_attr',        # [T, E, 13] — per-timestep flows + ratings/status + taps
+    'ras_status',       # [T, N_RAS, 3] — Phase 4 RAS arming telemetry
     'node_features',    # [T, N, 115] — per-node MLP feature tensor
 }
 

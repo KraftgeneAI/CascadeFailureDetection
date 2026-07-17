@@ -197,6 +197,10 @@ class PowerFlowSimulator:
         #                  index (used to look up per-call tap state).
         self.branch_is_trafo = {}
         self.trafo_rep_edge = {}
+        self._ghost_map = {}   # trafo name -> ghost Line name (fallback solves only)
+        self._prefer_ghost_solve = False  # sticky: skip the main solve while the
+                                          # PyPSA transformer-less-island bug bites
+        self.bus_branches = {}  # bus idx -> set of incident physical branch names
         seen = {}                # (min,max) pair -> name
         line_counter = 0
         trafo_counter = 0
@@ -208,17 +212,23 @@ class PowerFlowSimulator:
                 if self.branch_type[i] != 0:
                     # LTC transformer or PAR → PyPSA Transformer.
                     # [MISO RTO-SPEC-006: transformer / PAR flows + taps]
-                    # PyPSA Transformer takes r/x in p.u. on its OWN s_nom
-                    # base:  x_pu = x_ohm * s_nom / v_nom².
+                    # PyPSA Transformer r/x are per-unit on the SYSTEM base
+                    # (network.sn_mva), the same convention Line ohms reduce to
+                    # internally — so convert ohms → system p.u. by dividing by
+                    # z_base_sys = v_nom²/sn_mva. (The earlier ×s_nom/v_nom²
+                    # form assumed an own-s_nom base PyPSA does NOT use here,
+                    # which made transformers ~10× under-impedance and turned
+                    # them into near-short-circuit reactive-current sinks.)
                     name = f"trafo_{trafo_counter}"
                     s_nom = float(thermal_limits[i])
+                    z_base_sys = v_nom ** 2 / Settings.PowerSystem.SN_MVA
                     network.add(
                         "Transformer",
                         name,
                         bus0=f"bus_{key[0]}",
                         bus1=f"bus_{key[1]}",
-                        x=max(float(line_reactance[i]) * s_nom / v_nom**2, 1e-4),
-                        r=float(line_resistance[i]) * s_nom / v_nom**2,
+                        x=max(float(line_reactance[i]) / z_base_sys, 1e-4),
+                        r=float(line_resistance[i]) / z_base_sys,
                         s_nom=s_nom,
                         tap_ratio=1.0,
                         phase_shift=0.0,
@@ -245,6 +255,8 @@ class PowerFlowSimulator:
                     line_counter += 1
                 seen[key] = name
                 self.line_buses[name] = key
+                self.bus_branches.setdefault(key[0], set()).add(name)
+                self.bus_branches.setdefault(key[1], set()).add(name)
             name = seen[key]
             # +1 if this directed edge runs bus0->bus1 (PyPSA p0 convention), else -1
             sign = 1.0 if (s, d) == key else -1.0
@@ -258,6 +270,34 @@ class PowerFlowSimulator:
         """Return the component dataframe (lines or transformers) for a branch."""
         return (self.network.transformers if self.branch_is_trafo.get(name)
                 else self.network.lines)
+
+    # Static attributes preserved when a failed transformer is removed
+    _TRAFO_PARAMS = ('bus0', 'bus1', 'x', 'r', 's_nom',
+                     'tap_ratio', 'phase_shift', 'model')
+
+    def _deactivate_branch(self, name: str, restore: Dict) -> None:
+        """
+        Take a physical branch out of service for this solve.
+
+        Lines: flip 'active' (cheap, restorable).
+        Transformers: REMOVE from the network and re-add on restore. PyPSA's
+        sub-network pf raises KeyError('Transformer') when a sub-network's
+        transformers are all inactive — the apparent-power frame drops the
+        'Transformer' column level while component iteration still requests
+        it. Physically removing the component keeps the frames consistent.
+        """
+        if self.branch_is_trafo.get(name):
+            if (name not in restore['removed_trafos']
+                    and name in self.network.transformers.index):
+                row = self.network.transformers.loc[name]
+                restore['removed_trafos'][name] = {
+                    k: row[k] for k in self._TRAFO_PARAMS}
+                self.network.remove("Transformer", name)
+        else:
+            if name not in restore['line_active']:
+                restore['line_active'][name] = bool(
+                    self.network.lines.at[name, "active"])
+                self.network.lines.at[name, "active"] = False
     
     def compute_power_flow(
         self,
@@ -307,6 +347,7 @@ class PowerFlowSimulator:
             'gen_p_set': {}, 'gen_control': {}, 'gen_active': {},
             'load_p_set': {}, 'load_q_set': {}, 'load_active': {},
             'line_active': {}, 'dummy_gens': [],
+            'removed_trafos': {},   # Phase 2: failed trafos are REMOVED, not deactivated
         }
 
         # 1. Generator active-power setpoints (failed generators contribute 0).
@@ -345,14 +386,11 @@ class PowerFlowSimulator:
                 restore['load_active'][load_name] = bool(self.network.loads.at[load_name, "active"])
                 self.network.loads.at[load_name, "active"] = False
 
-            # Deactivate every physical branch (line OR transformer) touching
-            # a failed bus.
+            # Take every physical branch (line OR transformer) touching a
+            # failed bus out of service.
             for name, (b0, b1) in self.line_buses.items():
                 if b0 in failed_node_set or b1 in failed_node_set:
-                    if name not in restore['line_active']:
-                        df = self._branch_df(name)
-                        restore['line_active'][name] = bool(df.at[name, "active"])
-                        df.at[name, "active"] = False
+                    self._deactivate_branch(name, restore)
 
             # A failed bus is now an isolated single-bus sub-network with no
             # reference, which PyPSA cannot solve.  Give each one a tiny dummy
@@ -374,11 +412,52 @@ class PowerFlowSimulator:
                 mapped = self.edge_to_line.get(int(e_idx))
                 if mapped is None:
                     continue
-                name = mapped[0]
-                if name not in restore['line_active']:
-                    df = self._branch_df(name)
-                    restore['line_active'][name] = bool(df.at[name, "active"])
-                    df.at[name, "active"] = False
+                self._deactivate_branch(mapped[0], restore)
+
+        # 4b. EVERY electrical island must contain a slack source. Branch
+        # outages (line trips, RAS openings, failed-bus disconnections) can
+        # split off generator-less islands of ANY size: PyPSA then either
+        # crashes in its single-bus path (slack_generator=None → KeyError:
+        # None) or builds a singular Jacobian for multi-bus islands ("Matrix
+        # is exactly singular" → non-convergence → KeyError in extraction).
+        # Walk the connected components of the ACTIVE-branch graph and give
+        # each generator-less component a dummy slack at its first bus.
+        out_of_service = set(restore['line_active']) | set(restore['removed_trafos'])
+        if out_of_service or failed_node_set:
+            adj = {b: [] for b in range(self.num_nodes)}
+            for name, (b0, b1) in self.line_buses.items():
+                if name in out_of_service:
+                    continue
+                adj[b0].append(b1)
+                adj[b1].append(b0)
+            seen: set = set()
+            for start in range(self.num_nodes):
+                if start in seen:
+                    continue
+                comp = [start]
+                seen.add(start)
+                stack = [start]
+                while stack:
+                    u = stack.pop()
+                    for v in adj[u]:
+                        if v not in seen:
+                            seen.add(v)
+                            comp.append(v)
+                            stack.append(v)
+                has_slack = any(
+                    (self.node_types[b] == 1 and b not in failed_node_set)
+                    or f"_failslack_{b}" in self.network.generators.index
+                    for b in comp
+                )
+                if not has_slack:
+                    b = comp[0]
+                    dummy = f"_failslack_{b}"
+                    if dummy not in self.network.generators.index:
+                        self.network.add(
+                            "Generator", dummy, bus=f"bus_{b}",
+                            control="Slack", p_set=0.0, v_set=1.0, p_nom=1e-3,
+                        )
+                        restore['dummy_gens'].append(dummy)
 
         # 5. Phase 2 — apply tap state to transformer components.
         # tap_ratio (LTC voltage ratio) and phase_shift (PAR degrees) come
@@ -388,6 +467,8 @@ class PowerFlowSimulator:
         # loop's tap state.  [MISO RTO-SPEC-006: LTC/PAR tap positions]
         if tap_ratios is not None or phase_shifts is not None:
             for name, rep in self.trafo_rep_edge.items():
+                if name not in self.network.transformers.index:
+                    continue   # removed this solve (failed branch)
                 if tap_ratios is not None:
                     self.network.transformers.at[name, "tap_ratio"] = float(tap_ratios[rep])
                 if phase_shifts is not None:
@@ -408,6 +489,20 @@ class PowerFlowSimulator:
                 # No generators left — full collapse
                 self._restore_network_state(restore)
                 return self._get_default_results()
+
+        # Fast path: while the grid is fragmented in a way that triggers the
+        # PyPSA transformer-less-island KeyError, the main solve is guaranteed
+        # to fail — go straight to the ghost-line solve instead of paying for
+        # a doomed full solve every step. The flag clears once a normal solve
+        # succeeds again (healed topology / next scenario's early steps).
+        if self._prefer_ghost_solve and (failed_lines or failed_nodes):
+            fb = self._pf_transformers_as_lines(failed_lines, failed_nodes)
+            self._restore_network_state(restore)
+            if fb == 'unstable':
+                return self._get_default_results()
+            if fb is not None:
+                return fb
+            return self._get_default_results()
 
         try:
             # Flat start (use_seed=False) is more robust than warm start when
@@ -438,14 +533,94 @@ class PowerFlowSimulator:
             # Restore network state
             self._restore_network_state(restore)
 
+            self._prefer_ghost_solve = False   # normal solve works again
             return voltages, angles, line_flows_p, node_reactive, line_flows_q, True
 
         except Exception as e:
+            # PyPSA sub-network pf bug: when a cascade splits off an AC
+            # island that contains NO transformers (while the network has
+            # them globally), branch-flow extraction raises
+            # KeyError('Transformer'). Re-solve this one step with every
+            # transformer modeled as an equivalent Line — tap ratio and
+            # phase shift are approximated away for the step, which is
+            # acceptable in an already-fragmenting grid state and far
+            # better than returning all-zero telemetry.
+            if isinstance(e, KeyError) and 'Transformer' in str(e):
+                print("  [PF-FALLBACK] transformer-less AC island hit PyPSA "
+                      "KeyError('Transformer') — re-solving with transformers "
+                      "as equivalent lines for this step")
+                # Once the grid has fragmented into a state that triggers
+                # this PyPSA bug, every solve until the topology heals will
+                # trigger it too — skip the doomed main solve next time.
+                self._prefer_ghost_solve = True
+                fb = self._pf_transformers_as_lines(failed_lines, failed_nodes)
+                self._restore_network_state(restore)
+                if fb == 'unstable':
+                    # Fallback solved cleanly; the grid state itself doesn't
+                    # converge (singular fragments in deep collapse). This is
+                    # a physical outcome, not an error — no traceback.
+                    return self._get_default_results()
+                if fb is not None:
+                    return fb
+                import traceback
+                print(f"  [WARNING] Power flow exception: {type(e).__name__}: {e}")
+                traceback.print_exc()
+                return self._get_default_results()
             import traceback
             print(f"  [WARNING] Power flow exception: {type(e).__name__}: {e}")
             traceback.print_exc()
             self._restore_network_state(restore)
             return self._get_default_results()
+
+    def _pf_transformers_as_lines(self, failed_lines, failed_nodes):
+        """
+        Fallback solve with all (still-active) transformers temporarily
+        replaced by impedance-equivalent Lines (system-p.u. reactance/resistance
+        converted back to ohms on the system base). Returns the standard
+        6-tuple, or None if the fallback also fails. The base network is fully
+        restored.
+        """
+        v_nom = Settings.PowerSystem.V_NOM_KV
+        z_base_sys = v_nom ** 2 / Settings.PowerSystem.SN_MVA
+        converted = {}
+        for name in list(self.network.transformers.index):
+            row = self.network.transformers.loc[name]
+            ghost = f"_ghost_{name}"
+            s_nom = float(row['s_nom'])
+            # Transformer x/r are system-p.u.; a Line wants ohms → × z_base_sys.
+            self.network.add(
+                "Line", ghost,
+                bus0=row['bus0'], bus1=row['bus1'],
+                x=max(float(row['x']) * z_base_sys, 1e-6),
+                r=float(row['r']) * z_base_sys,
+                s_nom=s_nom,
+            )
+            converted[name] = ({k: row[k] for k in self._TRAFO_PARAMS}, ghost)
+            self.network.remove("Transformer", name)
+        # Extraction reads ghost line flows for transformer-typed branches.
+        self._ghost_map = {n: g for n, (_, g) in converted.items()}
+        try:
+            status = self.network.pf(use_seed=False, distribute_slack=True)
+            converged = status.get("converged")
+            if hasattr(converged, "values"):
+                is_stable = bool(np.asarray(converged.values).astype(bool).all())
+            else:
+                is_stable = bool(converged) if converged is not None else False
+            if not is_stable:
+                return 'unstable'   # solved, but grid state doesn't converge
+            voltages, angles, node_reactive = self._extract_bus_results(failed_nodes)
+            p, q = self._extract_line_results(failed_lines, failed_nodes)
+            return voltages, angles, p, node_reactive, q, True
+        except Exception as e2:
+            print(f"  [PF-FALLBACK] also failed: {type(e2).__name__}: {e2}")
+            return None
+        finally:
+            self._ghost_map = {}
+            for name, (params, ghost) in converted.items():
+                if ghost in self.network.lines.index:
+                    self.network.remove("Line", ghost)
+                if name not in self.network.transformers.index:
+                    self.network.add("Transformer", name, **params)
 
     @staticmethod
     def _pf_converged(status) -> bool:
@@ -545,7 +720,16 @@ class PowerFlowSimulator:
             # 'sign' restores the source->destination orientation of this edge
             # relative to the branch's bus0->bus1 convention (Fix #2).
             name, sign = self.edge_to_line[i]
-            fp, fq = (tp0, tq0) if self.branch_is_trafo.get(name) else (p0, q0)
+            if self.branch_is_trafo.get(name):
+                # During the transformer-less-island fallback, transformer
+                # flows live in the ghost Line (same bus0/bus1 → same sign).
+                ghost = getattr(self, '_ghost_map', {}).get(name)
+                if ghost is not None:
+                    fp, fq, name = p0, q0, ghost
+                else:
+                    fp, fq = tp0, tq0
+            else:
+                fp, fq = p0, q0
             try:
                 line_flows_p[i] = float(fp.at["now", name]) * sign
                 line_flows_q[i] = float(fq.at["now", name]) * sign
@@ -585,6 +769,12 @@ class PowerFlowSimulator:
         for line_name, val in restore.get('line_active', {}).items():
             # Phase 2: the branch may be a Line or a Transformer component.
             self._branch_df(line_name).at[line_name, "active"] = val
+
+        # Phase 2: re-add transformers removed for this solve (failed
+        # branches) so the base network is pristine for the next call.
+        for name, params in restore.get('removed_trafos', {}).items():
+            if name not in self.network.transformers.index:
+                self.network.add("Transformer", name, **params)
 
         # Restore slack reassignment.
         for gen_name, val in restore.get('gen_control', {}).items():

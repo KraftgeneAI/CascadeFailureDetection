@@ -110,4 +110,7 @@ class TestPhase1Config:
         assert c.LOAD_DUMP_RATING_FACTOR_MIN <= c.LOAD_DUMP_RATING_FACTOR_MAX
 
     def test_edge_features_widened(self):
-        assert Settings.Model.EDGE_FEATURES == 10
+        # Phase 1 grew edge_attr beyond the original 7 (later phases append
+        # more — 13 as of Phase 2). Assert the Phase 1 columns exist rather
+        # than pinning the total width, which is allowed to keep growing.
+        assert Settings.Model.EDGE_FEATURES >= 10

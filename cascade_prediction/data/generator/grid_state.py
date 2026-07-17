@@ -46,6 +46,12 @@ LINE_KEYS = [
     # edge; tap POSITIONS are dynamic runtime state and are NOT in the block.
     'branch_type',
 ]
+# Phase 4 RAS scheme definitions — per-SCHEME arrays (variable length, NOT
+# per-node/per-edge, so they skip the length validation). Arming STATUS is
+# dynamic runtime state and stays out of the block.
+RAS_KEYS = [
+    'ras_monitored_edge', 'ras_action_type', 'ras_action_target',
+]
 
 
 def ensure_rating_arrays(block: Dict) -> Dict:
@@ -74,6 +80,10 @@ def ensure_rating_arrays(block: Dict) -> Dict:
             block[key] = np.zeros(n)
     if 'avr_setpoint' not in block:
         block['avr_setpoint'] = np.where(node_types == 1, 1.0, 0.0)
+    # Phase 4: legacy blocks predate RAS — zero schemes (engine no-ops).
+    for key in RAS_KEYS:
+        if key not in block:
+            block[key] = np.array([], dtype=np.int64)
     return block
 
 
@@ -98,6 +108,9 @@ def build_topology_block(sim) -> Dict:
     }
     for key in NODE_PROP_KEYS + THRESHOLD_KEYS + LINE_KEYS:
         block[key] = np.asarray(getattr(sim, key)).copy()
+    for key in RAS_KEYS:
+        block[key] = np.asarray(
+            getattr(sim, key, np.array([], dtype=np.int64))).copy()
     return block
 
 

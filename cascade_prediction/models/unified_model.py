@@ -90,6 +90,17 @@ class UnifiedCascadePredictionModel(nn.Module):
             batch_first=True
         )
         self.fusion_norm = nn.LayerNorm(embedding_dim)
+
+        # Phase 4 — RAS context encoder. The RAS stream is per-SCHEME (a few
+        # grid-level devices), not per-node, so it enters fusion as a GLOBAL
+        # context vector broadcast-added to every node's fused embedding.
+        # [MISO RTO-SPEC-006: "RAS arming status" feature stream]
+        self.ras_in_features = (
+            Settings.RAS.N_SCHEMES * Settings.RAS.RAS_FEATURES)
+        self.ras_encoder = nn.Sequential(
+            nn.Linear(self.ras_in_features, embedding_dim),
+            nn.ReLU(),
+        )
         
         # Temporal GNN layers
         self.temporal_gnn = TemporalGNNCell(
@@ -148,6 +159,24 @@ class UnifiedCascadePredictionModel(nn.Module):
         # Physics-informed loss
         self.physics_loss = PhysicsInformedLoss()
     
+    def _encode_ras(self, ras_t: torch.Tensor) -> torch.Tensor:
+        """
+        Encode one timestep's RAS telemetry [B, N_RAS, F] → [B, D] global
+        context. Pads/truncates the flattened stream to the trained width so
+        scheme-count changes stay load-compatible (same policy as the
+        infrastructure encoders).
+        """
+        flat = ras_t.reshape(ras_t.shape[0], -1).float()
+        cur = flat.shape[-1]
+        if cur < self.ras_in_features:
+            flat = torch.cat([
+                flat,
+                torch.zeros(flat.shape[0], self.ras_in_features - cur,
+                            device=flat.device)], dim=-1)
+        elif cur > self.ras_in_features:
+            flat = flat[:, :self.ras_in_features]
+        return self.ras_encoder(flat)
+
     def forward(
         self,
         batch: Dict[str, torch.Tensor],
@@ -201,6 +230,7 @@ class UnifiedCascadePredictionModel(nn.Module):
             B, T, N, D = infra_emb.shape
 
             # ── Build fused embeddings for all T timesteps ───────────────────
+            ras_input = batch.get('ras_status')   # [B, T, N_RAS, F] or None
             fused_list = []
             for t in range(T):
                 multi_modal_t = torch.stack([
@@ -213,6 +243,11 @@ class UnifiedCascadePredictionModel(nn.Module):
                 )
                 fused_t = fused_t.mean(dim=1).reshape(B, N, D)
                 fused_t = self.fusion_norm(fused_t)
+                # Phase 4 — broadcast the global RAS context into every node
+                if ras_input is not None and ras_input.dim() == 4:
+                    t_ras = min(t, ras_input.shape[1] - 1)
+                    fused_t = fused_t + self._encode_ras(
+                        ras_input[:, t_ras]).unsqueeze(1)
                 fused_list.append(fused_t)
 
             fused_sequence = torch.stack(fused_list, dim=1)   # [B, T, N, D]
@@ -280,6 +315,7 @@ class UnifiedCascadePredictionModel(nn.Module):
 
             node_emb_3d = node_emb if node_emb.dim() == 3 else node_emb.unsqueeze(1).expand(-1, N, -1)
 
+            ras_input = batch.get('ras_status')   # [B, N_RAS, F] or None
             multi_modal = torch.stack([infra_emb, node_emb_3d], dim=2)  # [B, N, 2, D]
             multi_modal_flat = multi_modal.reshape(B * N, 2, D)
 
@@ -288,6 +324,10 @@ class UnifiedCascadePredictionModel(nn.Module):
             )
             fused = fused.mean(dim=1).reshape(B, N, D)
             fused = self.fusion_norm(fused)
+            # Phase 4 — broadcast global RAS context into every node
+            if ras_input is not None:
+                ras_last = ras_input[:, -1] if ras_input.dim() == 4 else ras_input
+                fused = fused + self._encode_ras(ras_last).unsqueeze(1)
 
             edge_embedded = self.edge_embedding(edge_attr_input)
 

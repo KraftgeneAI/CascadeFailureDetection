@@ -65,6 +65,19 @@ class LineImpedanceConfig:
     THERMAL_MARGIN_MAX      = 2.0
     THERMAL_MIN_FRACTION    = 0.05      # Floor: 5% of total load per line
 
+    # Flow-proportional rating calibration (fixes the uniform-566MW limits:
+    # the distance heuristic above was flattened by the floor and its
+    # avg-flow base double-counted directed edges, so backbone corridors
+    # carrying 1400+ MW got the same rating as 20 MW spurs → load-dump
+    # trips at t=0 even in NORMAL scenarios).
+    # Each line's NORMAL rating = base-case |S| × U(HEADROOM_MIN, MAX),
+    # floored at THERMAL_FLOOR_MVA for lightly-loaded lines. Nominal loading
+    # then sits at 1/1.8–1/1.3 ≈ 0.55–0.77 — overloads must EMERGE from the
+    # stress ramp and failures, not exist at birth.
+    THERMAL_HEADROOM_MIN    = 1.30
+    THERMAL_HEADROOM_MAX    = 1.80
+    THERMAL_FLOOR_MVA       = 60.0
+
 
 # ---------------------------------------------------------------------------
 # Under-Frequency Load Shedding (UFLS)
@@ -322,6 +335,35 @@ class ShuntConfig:
     AVR_SETPOINT_MAX_PU  = 1.03
 
     DEAD_BUS_V_PU        = 0.5     # de-energized bus: devices disconnect/hold
+
+
+# ---------------------------------------------------------------------------
+# Remedial Action Schemes (Phase 4 — MISO data gap plan)
+# [MISO RTO-SPEC-006: "RAS arming status (Armed/Available/Triggered/Operated)"]
+# ---------------------------------------------------------------------------
+class RASConfig:
+    N_SCHEMES        = 6      # RAS schemes per grid
+
+    # Arming/trigger thresholds on the monitored line's loading ratio.
+    # Trigger sits BELOW the Phase-0/1 emergency trip band (sustained ≥1.15×):
+    # a RAS exists precisely to act before the line protection does.
+    ARM_LOADING      = 0.80   # scheme arms above this
+    TRIGGER_LOADING  = 1.05   # scheme fires above this (single-shot)
+
+    # Arming status codes (telemetered; MISO vocabulary)
+    STATUS_AVAILABLE = 0      # in service, conditions normal
+    STATUS_ARMED     = 1      # arming condition met — will fire on trigger
+    STATUS_TRIGGERED = 2      # trigger detected this timestep (action firing)
+    STATUS_OPERATED  = 3      # action executed — latched for the scenario
+
+    # Action types (chosen per scheme at assignment)
+    ACTION_TRIP_GEN  = 0      # drop a generator's injection to 0 (controlled)
+    ACTION_SHED_LOAD = 1      # shed a fraction of load at a bus
+    ACTION_OPEN_LINE = 2      # open a designated relief line
+
+    SHED_FRACTION    = 0.30   # load fraction shed by ACTION_SHED_LOAD
+
+    RAS_FEATURES     = 3      # per-scheme stream: [status, monitored_loading, action_type]
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +647,7 @@ class Settings:
     Cascade       = CascadeConfig
     Branch        = BranchConfig
     Shunt         = ShuntConfig
+    RAS           = RASConfig
     Simulation    = SimulationConfig
     Scenario      = ScenarioConfig
     Dataset       = DatasetConfig

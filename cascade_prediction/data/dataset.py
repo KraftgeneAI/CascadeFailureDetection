@@ -214,6 +214,7 @@ class CascadeDataset(Dataset):
             'equipment_status': [],
             'edge_mask': [],
             'edge_attr': [],       # per-timestep: cols 5-6 (line flows) change each step
+            'ras_status': [],      # Phase 4: [N_RAS, 3] per timestep (RAS arming telemetry)
         }
         
         last_step = sequence[-1]
@@ -317,6 +318,16 @@ class CascadeDataset(Dataset):
                 ea = np.concatenate([
                     ea, np.zeros((ea.shape[0], 3), dtype=np.float32)], axis=1)
             data_arrays['edge_attr'].append(to_tensor(ea))
+
+            # Phase 4 — RAS arming telemetry [N_RAS, 3]. Legacy scenarios
+            # have no schemes: all-Available, zero loading, zero action.
+            # [MISO RTO-SPEC-006: RAS arming status]
+            ras = ts.get('ras_status')
+            if ras is None:
+                ras = np.zeros(
+                    (Settings.RAS.N_SCHEMES, Settings.RAS.RAS_FEATURES),
+                    dtype=np.float32)
+            data_arrays['ras_status'].append(to_tensor(np.asarray(ras, dtype=np.float32)))
 
             # Edge stress mask: encode thermal loading stress (pre-cascade window has no
             # failed nodes, so a binary failure mask is always all-ones and useless).
@@ -462,8 +473,10 @@ class CascadeDataset(Dataset):
             # 115-feature node tensor [T, N, 115]
             'node_features': node_features,
             'edge_index': to_tensor(edge_index).long(),
-            'edge_attr': edge_attr,           # [T, E, 7] — per-timestep, dynamic flows included
+            'edge_attr': edge_attr,           # [T, E, 13] — per-timestep, dynamic flows included
             'edge_mask': torch.stack(data_arrays['edge_mask']),
+            # Phase 4 — RAS arming telemetry [T, N_RAS, 3]
+            'ras_status': torch.stack(data_arrays['ras_status']),
             'node_failure_labels': final_labels,
             'cascade_timing': correct_timing_tensor,
             'parent_labels': parent_labels,           # [N] long — causal parent per node

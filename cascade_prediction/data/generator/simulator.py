@@ -35,10 +35,11 @@ from .utils import get_failed_lines_from_nodes
 from .config import Settings
 from .grid_state import (
     build_topology_block, validate_topology_block, ensure_rating_arrays,
-    NODE_PROP_KEYS, THRESHOLD_KEYS, LINE_KEYS,
+    NODE_PROP_KEYS, THRESHOLD_KEYS, LINE_KEYS, RAS_KEYS,
 )
 from .taps import TapController, assign_branch_types
 from .shunts import ShuntController, assign_shunt_devices
+from .ras import RASEngine, assign_ras_schemes
 
 
 class PhysicsBasedGridSimulator:
@@ -232,6 +233,68 @@ class PhysicsBasedGridSimulator:
         self.line_conductance = _mirror(self.line_conductance)
         self.thermal_limits   = _mirror(self.thermal_limits)
 
+        # Phase 2 — branch typing must precede rating calibration so the
+        # base case is solved on the SAME network the scenarios use.
+        # [MISO RTO-SPEC-006: "Transformer flows + LTC tap positions",
+        #  "Phase shifter (PAR) flows + tap positions"]
+        self.branch_type = assign_branch_types(
+            self.edge_index.numpy(), rng=np.random.default_rng(seed))
+
+        # Phase 3 — device assignment must also precede calibration: AVR
+        # setpoints change the PV voltage profile, and reactive flows are
+        # extremely sensitive to it (a mismatched base case under-rated
+        # Q-heavy lines by 4x).
+        # [MISO RTO-SPEC-006: "Voltage-regulation equipment (AVR,
+        #  capacitor/reactor, SVC) status"]
+        shunt_devices = assign_shunt_devices(
+            self.node_types, rng=np.random.default_rng(seed + 1))
+        self.shunt_cap_mvar = shunt_devices['shunt_cap_mvar']
+        self.shunt_reactor_mvar = shunt_devices['shunt_reactor_mvar']
+        self.svc_qmax_mvar = shunt_devices['svc_qmax_mvar']
+        self.avr_setpoint = shunt_devices['avr_setpoint']
+
+        # --- Flow-proportional rating calibration -------------------------
+        # The distance heuristic above produced limits that the total-load
+        # floor flattened to a single uniform value, unrelated to each
+        # line's actual role — backbone corridors then sat at 2-2.6× loading
+        # from t=0 (load-dump trips even in NORMAL scenarios). Re-rate every
+        # line from a BASE-CASE power flow at nominal dispatch:
+        #   normal rating = base |S| × U(HEADROOM_MIN, HEADROOM_MAX)
+        # floored for lightly-loaded lines. See LineImpedanceConfig.
+        print("Calibrating line ratings from base-case power flow...")
+        _base_pf = PowerFlowSimulator(
+            self.num_nodes, self.edge_index.numpy(), self.positions,
+            self.node_types, self.gen_capacity,
+            self.line_reactance, self.line_resistance,
+            self.line_susceptance, self.line_conductance,
+            self.thermal_limits,   # provisional; s_nom doesn't affect the solve
+            branch_type=self.branch_type,     # same devices as the scenarios
+            avr_setpoint=self.avr_setpoint,   # same PV voltage profile → same Q
+        )
+        _gen = np.zeros(self.num_nodes)
+        _load = self.base_load.copy()
+        _gen_idx = np.where(self.node_types == 1)[0]
+        _cap = self.gen_capacity[_gen_idx].sum()
+        if _cap > 0:
+            _gen[_gen_idx] = (self.gen_capacity[_gen_idx] / _cap) \
+                * _load.sum() * Settings.Simulation.GENERATION_MARGIN
+        _v, _a, _p, _q_node, _q, _ok = _base_pf.compute_power_flow(_gen, _load)
+        if _ok:
+            _s_base = np.sqrt(_p**2 + _q**2)
+            headroom = np.random.uniform(
+                Settings.LineImpedance.THERMAL_HEADROOM_MIN,
+                Settings.LineImpedance.THERMAL_HEADROOM_MAX, self.num_edges)
+            self.thermal_limits = _mirror(np.maximum(
+                _s_base * headroom, Settings.LineImpedance.THERMAL_FLOOR_MVA))
+            print(f"  [RATINGS] base |S|: med={np.median(_s_base):.1f} "
+                  f"max={_s_base.max():.1f} → limits: "
+                  f"med={np.median(self.thermal_limits):.1f} "
+                  f"max={self.thermal_limits.max():.1f}")
+        else:
+            print("  [RATINGS] base-case power flow unstable — keeping "
+                  "heuristic limits (WARNING: expect t=0 overloads)")
+        del _base_pf
+
         # Phase 1 — multi-rating lines. thermal_limits stays the NORMAL rating
         # (edge_attr col 1, PyPSA s_nom, loading_ratio denominator). Emergency
         # (LEP) and load-dump tiers are thresholds used only by trip logic.
@@ -251,23 +314,19 @@ class PhysicsBasedGridSimulator:
         #  de-rates" — the de-rate half; schedules arrive in Phase 6]
         self.rating_derate = np.ones(self.num_edges)
 
-        # Phase 2 — branch typing: a fraction of physical branches become LTC
-        # transformers / phase-shifting regulators (mirror-consistent).
-        # [MISO RTO-SPEC-006: "Transformer flows + LTC tap positions",
-        #  "Phase shifter (PAR) flows + tap positions"]
-        self.branch_type = assign_branch_types(
-            self.edge_index.numpy(), rng=np.random.default_rng(seed))
+        # (Phase 2 branch typing and Phase 3 device assignment moved ABOVE
+        # the rating calibration — the base case must be solved on the same
+        # network, with the same AVR setpoints, as the scenarios.)
 
-        # Phase 3 — reactive-support devices per node (cap/reactor banks,
-        # SVCs) + telemetered AVR setpoints on generators.
-        # [MISO RTO-SPEC-006: "Voltage-regulation equipment (AVR,
-        #  capacitor/reactor, SVC) status"]
-        shunt_devices = assign_shunt_devices(
-            self.node_types, rng=np.random.default_rng(seed + 1))
-        self.shunt_cap_mvar = shunt_devices['shunt_cap_mvar']
-        self.shunt_reactor_mvar = shunt_devices['shunt_reactor_mvar']
-        self.svc_qmax_mvar = shunt_devices['svc_qmax_mvar']
-        self.avr_setpoint = shunt_devices['avr_setpoint']
+        # Phase 4 — remedial action schemes on the highest-rated corridors.
+        # [MISO RTO-SPEC-006: "RAS arming status
+        #  (Armed/Available/Triggered/Operated)"]
+        ras_schemes = assign_ras_schemes(
+            self.edge_index.numpy(), self.node_types, self.thermal_limits,
+            rng=np.random.default_rng(seed + 2))
+        self.ras_monitored_edge = ras_schemes['ras_monitored_edge']
+        self.ras_action_type = ras_schemes['ras_action_type']
+        self.ras_action_target = ras_schemes['ras_action_target']
 
         # Decommissioned nodes (topology edits): buses that exist in the
         # arrays but are permanently out of service. Empty for generated
@@ -318,6 +377,9 @@ class PhysicsBasedGridSimulator:
 
         for key in NODE_PROP_KEYS + THRESHOLD_KEYS + LINE_KEYS:
             setattr(self, key, np.asarray(topology_block[key]).copy())
+        for key in RAS_KEYS:
+            setattr(self, key, np.asarray(
+                topology_block.get(key, np.array([], dtype=np.int64))).copy())
 
         # Removed (decommissioned) nodes keep their bus index but have no
         # edges — they'd form single-bus PyPSA islands and blow up the power
@@ -354,6 +416,13 @@ class PhysicsBasedGridSimulator:
         # also driven by the previous timestep's voltages.
         self.shunt_controller = ShuntController(
             self.shunt_cap_mvar, self.shunt_reactor_mvar, self.svc_qmax_mvar)
+
+        # Phase 4 — RAS state machine (Armed/Available/Triggered/Operated).
+        self.ras_engine = RASEngine({
+            'ras_monitored_edge': self.ras_monitored_edge,
+            'ras_action_type': self.ras_action_type,
+            'ras_action_target': self.ras_action_target,
+        })
 
         self.frequency_sim = FrequencyDynamicsSimulator(
             self.num_nodes, self.node_types, self.gen_capacity
@@ -586,6 +655,13 @@ class PhysicsBasedGridSimulator:
         # Phase 3 — reactive support starts idle each scenario.
         self.shunt_controller.reset()
 
+        # Phase 4 — RAS: all schemes Available; controlled-action state.
+        # RAS interventions are NOT failures: tripped gens / shed load stay
+        # out of failure labels; only the grid's dispatch changes.
+        self.ras_engine.reset()
+        ras_gen_tripped: set = set()
+        ras_load_shed = np.ones(self.num_nodes)
+
         # Stress ramp: rise from 60% to 100% of stress_level over first RAMP_FRACTION of sequence
         earlest_cascade_time = max(1, int(sequence_length * (np.random.uniform(Settings.Simulation.RAMP_FRACTION_MIN, Settings.Simulation.RAMP_FRACTION_MAX))))
         alpha = (0.75/stress_level - 0.6) / earlest_cascade_time
@@ -618,6 +694,8 @@ class PhysicsBasedGridSimulator:
             )
             load_values = self.base_load * load_multiplier * (1 + noise)
             load_values *= self.frequency_sim.ufls_shed_factor
+            # Phase 4 — RAS load shedding (controlled, persists post-Operate)
+            load_values *= ras_load_shed
 
             # Zero out failed nodes
             for n in cumulative_failed_nodes:
@@ -626,7 +704,11 @@ class PhysicsBasedGridSimulator:
             # Size generation to match load — only from active (non-failed) generators
             total_load = load_values.sum()
             gen_indices = np.where(self.node_types == 1)[0]
-            active_gen_indices = [idx for idx in gen_indices if idx not in cumulative_failed_nodes]
+            # Phase 4 — RAS-tripped generators are out of dispatch but NOT
+            # failed (no labels, bus stays healthy).
+            active_gen_indices = [idx for idx in gen_indices
+                                  if idx not in cumulative_failed_nodes
+                                  and idx not in ras_gen_tripped]
             active_capacity = self.gen_capacity[active_gen_indices].sum() if len(active_gen_indices) > 0 else 0.0
             generation[:] = 0.0  # reset all first
             for idx in active_gen_indices:
@@ -702,6 +784,34 @@ class PhysicsBasedGridSimulator:
             # Feed next timestep's tap-controller step (Phase 2)
             prev_line_flows = line_flows
             prev_loading = loading_ratios
+
+            # ----------------------------------------------------------------
+            # Phase 4 — RAS state machine: evaluate arming/trigger on this
+            # step's loadings; fired actions modify DISPATCH from next step
+            # (relay delay). Actions are controlled interventions — they must
+            # never appear as failures in the labels.
+            # [MISO RTO-SPEC-006: "RAS arming status" + discrete mitigation]
+            # ----------------------------------------------------------------
+            for act_type, target in self.ras_engine.update(loading_ratios):
+                if act_type == Settings.RAS.ACTION_TRIP_GEN:
+                    ras_gen_tripped.add(int(target))
+                    print(f"  [RAS] t={t}: OPERATED — tripped generator {target}")
+                elif act_type == Settings.RAS.ACTION_SHED_LOAD:
+                    ras_load_shed[int(target)] *= (1.0 - Settings.RAS.SHED_FRACTION)
+                    print(f"  [RAS] t={t}: OPERATED — shed "
+                          f"{Settings.RAS.SHED_FRACTION:.0%} load at bus {target}")
+                else:  # ACTION_OPEN_LINE — open BOTH mirrored rows
+                    tgt = int(target)
+                    s0, d0 = int(self.edge_index[0, tgt]), int(self.edge_index[1, tgt])
+                    ei_np = self.edge_index.numpy()
+                    pair_rows = np.nonzero(
+                        ((ei_np[0] == s0) & (ei_np[1] == d0))
+                        | ((ei_np[0] == d0) & (ei_np[1] == s0)))[0]
+                    for row in pair_rows:
+                        cumulative_failed_lines.add(int(row))
+                        line_failure_record.setdefault(int(row), t)
+                    print(f"  [RAS] t={t}: OPERATED — opened relief line "
+                          f"({s0},{d0}) rows {pair_rows.tolist()}")
 
             # Phase 0 — independent line tripping: a line sustaining apparent
             # power above LINE_TRIP_LOADING_RATIO × thermal limit for
@@ -1111,6 +1221,12 @@ class PhysicsBasedGridSimulator:
             ], dtype=np.float32),
 
             'cascade_timing': current_cascade_timing,
+
+            # Phase 4 — RAS telemetry stream [N_SCHEMES, 3]:
+            # [arming_status, monitored line loading, action_type]
+            # [MISO RTO-SPEC-006: "RAS arming status
+            #  (Armed/Available/Triggered/Operated)"]
+            'ras_status': self.ras_engine.status_stream(loading_ratios),
 
             'conductance': self.line_conductance.astype(np.float32),
             'susceptance': self.line_susceptance.astype(np.float32),
