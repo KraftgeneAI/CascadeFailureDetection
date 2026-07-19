@@ -132,13 +132,40 @@ class ThermalConfig:
     DIURNAL_AMPLITUDE_C = 8.0           # ±°C diurnal swing around base ambient
     DIURNAL_PEAK_HOUR   = 14            # Hour of day for peak temperature
 
-    # Heat-generation scale for the (degree-invariant) MEAN incident-line
-    # loading^2 proxy used by PhysicsBasedGridSimulator._get_heat_generation.
-    # Tuned so normal/stressed loadings stay well below the failure threshold
-    # (~40-60°C rise) and only sustained real overload (line loading >~1.5)
-    # drives equipment to the overheating trip point. Raise toward 2.0 to make
-    # temperature a more active failure mode; lower toward 1.0 to make it inert.
-    HEAT_SCALE          = 1.5
+    # --- Thermal anchor -----------------------------------------------------
+    # Equipment temperature at NOMINAL loading (mean incident-line loading = 1.0)
+    # measured at the reference ambient AMBIENT_TEMP_C. The per-node heat
+    # coefficient is DERIVED from this anchor:
+    #
+    #     k_i = (RATED_TEMP_C - AMBIENT_TEMP_C) * capacity_i * cooling_i / tau_i
+    #
+    # so that every node settles at RATED_TEMP_C when its incident lines run at
+    # exactly their rating, regardless of its random tau / capacity / cooling
+    # draw. Those three then affect only how FAST a node heats and cools (the
+    # transient), not where it settles (the equilibrium) — which is precisely
+    # what "rated" means physically. Steady-state rise scales with I²:
+    #
+    #     dT_ss(L) = (RATED_TEMP_C - AMBIENT_TEMP_C) * L²
+    #
+    # Consequences with the node failure thresholds (105-130°C):
+    #   L <= 1.0  -> settles at or below 75°C: heat released >= heat gained,
+    #                SAFE INDEFINITELY (no thermal failure is possible)
+    #   L ~ 1.26  -> ~105°C, reaches the lowest failure threshold
+    #   L ~ 1.45  -> ~130°C, reaches the highest failure threshold
+    # so thermal node failure spans L in [1.26, 1.45], lining up with the
+    # Phase 1 line tiers (emergency 1.2x, load-dump 1.45x).
+    #
+    # Previously HEAT_SCALE was a hand-tuned scalar, so the random tau /
+    # capacity / cooling draws alone spread the equilibrium temperature at
+    # IDENTICAL rated loading over 37.8-101.5°C (2.7x) — one node barely above
+    # ambient while another sat just under its failure threshold, with no way
+    # to say what temperature "rated load" corresponds to.
+    RATED_TEMP_C        = 75.0
+
+    # Global multiplier on the anchored coefficient. 1.0 = exact physical
+    # anchor (recommended). Raise to make temperature a more aggressive
+    # failure mode, lower to make it more inert.
+    HEAT_SCALE          = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -291,8 +318,23 @@ class BranchConfig:
     LTC_TAP_MAX        = 16
     LTC_STEP_PU        = 0.00625     # 0.625 % per step (standard 33-step LTC)
     LTC_V_SETPOINT_PU  = 1.0
-    LTC_DEADBAND_PU    = 0.01
+    # Deadband must COVER the AVR setpoint spread (AVR_SETPOINT 0.99-1.03,
+    # PV_V_SET 0.98-1.02), otherwise the LTC and the generator voltage
+    # schedules fight each other: any bus held above the band is a permanent
+    # out-of-band error the tap keeps chasing. At the old +-0.01 the band was
+    # [0.99, 1.01] while AVR ran to 1.03, so transformers ratcheted one step
+    # per timestep until they clipped, rerouting flow and tripping lines at
+    # constant load. +-0.03 spans the full schedule range.
+    LTC_DEADBAND_PU    = 0.03
     LTC_DEAD_BUS_V_PU  = 0.5         # regulated bus below this = de-energized; hold tap
+
+    # Anti-windup: a tap that has moved but produces less than
+    # MIN_V_RESPONSE_PU of change at its regulated bus for STALL_STEPS
+    # consecutive steps has no practical authority (e.g. the bus is pinned by
+    # a generator, or the transformer is electrically weak relative to the
+    # rest of the network). Block it rather than let it ratchet to the limit.
+    LTC_MIN_V_RESPONSE_PU = 0.0005
+    LTC_STALL_STEPS       = 3
 
     # PAR (phase-angle regulator): angle ∈ [MIN, MAX] degrees, STEP per
     # timestep. Controller relieves its OWN loading: above LOADING_TARGET it

@@ -409,8 +409,10 @@ class PhysicsBasedGridSimulator:
 
         # Phase 2 — LTC/PAR tap controller (one mechanical step per timestep,
         # driven by the previous timestep's power-flow results).
+        # node_types lets the LTC pick the LOAD-side bus to regulate; a
+        # generator bus is pinned by its AVR and cannot be moved by a tap.
         self.tap_controller = TapController(
-            self.edge_index.numpy(), self.branch_type)
+            self.edge_index.numpy(), self.branch_type, self.node_types)
 
         # Phase 3 — reactive-support controller (bank hysteresis + SVC droop),
         # also driven by the previous timestep's voltages.
@@ -431,6 +433,27 @@ class PhysicsBasedGridSimulator:
         self.thermal_sim = ThermalDynamicsSimulator(
             self.num_nodes, self.thermal_time_constant, self.thermal_capacity, self.cooling_effectiveness
         )
+
+        # Per-node heat coefficient, ANCHORED so that a node whose incident
+        # lines run at exactly their rating (mean loading = 1.0) settles at
+        # Settings.Thermal.RATED_TEMP_C.
+        #
+        # Steady state of ThermalDynamicsSimulator.update_temperatures is
+        #     dT_ss = heat_gen * tau / (capacity * cooling)
+        # so anchoring dT_ss(L=1) = RATED_TEMP_C - AMBIENT_TEMP_C gives
+        #     k_i = dT_rated * capacity_i * cooling_i / tau_i
+        # and therefore  dT_ss(L) = dT_rated * L²  for EVERY node.
+        # tau/capacity/cooling now shape only the transient, not the
+        # equilibrium — see ThermalConfig.RATED_TEMP_C for the rationale.
+        _dT_rated = (Settings.Thermal.RATED_TEMP_C
+                     - Settings.Thermal.AMBIENT_TEMP_C)
+        self.heat_coeff = (
+            _dT_rated
+            * np.asarray(self.thermal_capacity, dtype=np.float64)
+            * np.asarray(self.cooling_effectiveness, dtype=np.float64)
+            / np.maximum(np.asarray(self.thermal_time_constant,
+                                    dtype=np.float64), 1e-6)
+        ) * Settings.Thermal.HEAT_SCALE
 
         # Initialize cascade simulator
         print(f"Initializing cascade simulator...")
@@ -608,7 +631,10 @@ class PhysicsBasedGridSimulator:
         mean_loading_sq = np.divide(
             heat_sum, degree, out=np.zeros_like(heat_sum), where=degree > 0
         )
-        return mean_loading_sq * Settings.Thermal.HEAT_SCALE
+        # Per-node anchored coefficient (see _init_simulators): guarantees
+        # dT_ss = (RATED_TEMP_C - AMBIENT_TEMP_C) * mean_loading² for every
+        # node, so mean loading <= 1.0 can never reach a failure threshold.
+        return mean_loading_sq * self.heat_coeff
 
     def _generate_time_series(
         self,
