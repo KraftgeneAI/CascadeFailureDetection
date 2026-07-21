@@ -87,7 +87,7 @@ def mock_timestep_data():
     num_edges = 50
     
     return {
-        'scada_data': np.random.randn(num_nodes, 22).astype(np.float32),  # Phase 3: 22 cols
+        'scada_data': np.random.randn(num_nodes, 28).astype(np.float32),  # Phase 5: 28 cols
         'pmu_sequence': np.random.randn(num_nodes, 8).astype(np.float32),
         'weather_sequence': np.random.randn(num_nodes, 10, 8).astype(np.float32),
         'satellite_data': np.random.randn(num_nodes, 12, 16, 16).astype(np.float16),
@@ -96,7 +96,7 @@ def mock_timestep_data():
         'thermal_data': np.random.randn(num_nodes, 1, 32, 32).astype(np.float16),
         'sensor_data': np.random.randn(num_nodes, 12).astype(np.float16),
         'equipment_status': np.random.randn(num_nodes, 10).astype(np.float32),
-        'edge_attr': np.random.randn(num_edges, 13).astype(np.float32),  # Phase 2: 13 cols
+        'edge_attr': np.random.randn(num_edges, 14).astype(np.float32),  # Phase 5: 14 cols
         'node_labels': np.zeros(num_nodes, dtype=np.float32),
         'cascade_timing': np.full(num_nodes, -1, dtype=np.float32),
         'conductance': np.random.randn(num_edges).astype(np.float32),

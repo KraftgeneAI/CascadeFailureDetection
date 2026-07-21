@@ -32,7 +32,7 @@ class TestCollation:
             'sensor_data': torch.randn(seq_len, num_nodes, 12),
             'equipment_status': torch.randn(seq_len, num_nodes, 10),
             'edge_index': torch.randint(0, num_nodes, (2, num_edges)),
-            'edge_attr': torch.randn(num_edges, 13),
+            'edge_attr': torch.randn(num_edges, 14),
             'edge_mask': torch.ones(seq_len, num_edges),
             'node_failure_labels': torch.zeros(num_nodes),
             'cascade_timing': torch.full((num_nodes,), -1.0),
@@ -97,7 +97,7 @@ class TestCollation:
         item1 = {
             'scada_data': torch.randn(5, num_nodes, 12),
             'edge_index': torch.randint(0, num_nodes, (2, num_edges)),
-            'edge_attr': torch.randn(num_edges, 13),
+            'edge_attr': torch.randn(num_edges, 14),
             'edge_mask': torch.ones(5, num_edges),
             'node_failure_labels': torch.zeros(num_nodes),
             'temporal_sequence': torch.randn(5, num_nodes, 12),
@@ -108,7 +108,7 @@ class TestCollation:
         item2 = {
             'scada_data': torch.randn(10, num_nodes, 12),
             'edge_index': torch.randint(0, num_nodes, (2, num_edges)),
-            'edge_attr': torch.randn(num_edges, 13),
+            'edge_attr': torch.randn(num_edges, 14),
             'edge_mask': torch.ones(10, num_edges),
             'node_failure_labels': torch.zeros(num_nodes),
             'temporal_sequence': torch.randn(10, num_nodes, 12),

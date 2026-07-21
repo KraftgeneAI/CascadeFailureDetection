@@ -27,6 +27,12 @@ NODE_PROP_KEYS = [
     # STATE is dynamic runtime data and not in the block). Legacy blocks are
     # backfilled by ensure_rating_arrays().
     'shunt_cap_mvar', 'shunt_reactor_mvar', 'svc_qmax_mvar', 'avr_setpoint',
+    # Phase 5 storage (ESR) sizing. A bus is a storage bus iff
+    # storage_power_mw > 0 — deliberately NOT a new node_types value, since
+    # node_types == 1 (generator) is load-bearing in the power flow, the LTC
+    # regulated-bus choice, RAS targeting and dispatch. SOC is dynamic
+    # runtime state and stays out of the block.
+    'storage_power_mw', 'storage_capacity_mwh', 'storage_qmax_mvar',
 ]
 THRESHOLD_KEYS = [
     'loading_failure_threshold', 'loading_damage_threshold',
@@ -45,6 +51,10 @@ LINE_KEYS = [
     # Phase 2 branch typing (0=line, 1=LTC transformer, 2=PAR) — static per
     # edge; tap POSITIONS are dynamic runtime state and are NOT in the block.
     'branch_type',
+    # Phase 5 tie-line designation (1 = boundary tie to the neighbouring RC).
+    # Static per edge, mirror-consistent; the FLOWS on these ties and the net
+    # interchange they sum to are dynamic and stay out of the block.
+    'is_tie_line',
 ]
 # Phase 4 RAS scheme definitions — per-SCHEME arrays (variable length, NOT
 # per-node/per-edge, so they skip the length validation). Arming STATUS is
@@ -84,6 +94,15 @@ def ensure_rating_arrays(block: Dict) -> Dict:
     for key in RAS_KEYS:
         if key not in block:
             block[key] = np.array([], dtype=np.int64)
+    # Phase 5: legacy blocks predate tie lines and storage. No ties means net
+    # interchange is identically 0 (a self-consistent island); no storage
+    # means the controller is a no-op and SOC columns stay 0.
+    if 'is_tie_line' not in block:
+        block['is_tie_line'] = np.zeros(e, dtype=np.int64)
+    for key in ('storage_power_mw', 'storage_capacity_mwh',
+                'storage_qmax_mvar'):
+        if key not in block:
+            block[key] = np.zeros(n)
     return block
 
 

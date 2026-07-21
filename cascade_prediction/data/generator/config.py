@@ -409,6 +409,95 @@ class RASConfig:
 
 
 # ---------------------------------------------------------------------------
+# Inter-area exchange: tie lines & interchange (Phase 5 — MISO data gap plan)
+# [MISO RTO-SPEC-006: "Tie-line flows & net actual interchange",
+#  "Dynamic schedules (interchange MW)"]
+# ---------------------------------------------------------------------------
+class InterchangeConfig:
+    # Tie lines connect our footprint to a synthetic neighbouring RC. They are
+    # chosen as the branches farthest from the network centroid — real ties sit
+    # at the boundary of a footprint, not in its interior.
+    N_TIE_LINES        = 8        # physical branches designated as ties
+
+    # Scheduled interchange (MW, positive = we EXPORT to the neighbour). The
+    # schedule is a slow block profile: it holds for a dwell of timesteps and
+    # then re-steps, mimicking hourly interchange blocks rather than smooth
+    # drift. ACE = schedule - actual, so a schedule step is a genuine
+    # disturbance the model can learn to anticipate.
+    SCHEDULE_BASE_MW   = 0.0      # centre of the schedule distribution
+    SCHEDULE_SPAN_MW   = 400.0    # schedule drawn from +-SPAN around BASE
+    SCHEDULE_DWELL_MIN = 8        # timesteps a schedule block holds (min)
+    SCHEDULE_DWELL_MAX = 16       # ... and max, re-drawn each block
+
+    # Normalisation divisor for the broadcast SCADA columns (MW -> ~unit scale)
+    INTERCHANGE_SCALE_MW = 1000.0
+
+
+# ---------------------------------------------------------------------------
+# Storage / ESR (Phase 5 — MISO data gap plan)
+# [MISO RTO-SPEC-006: "Energy storage resources: SOC, MW, MVAr"]
+# ---------------------------------------------------------------------------
+class StorageConfig:
+    # Storage is a SEPARATE per-node attribute rather than a new node_types
+    # value: node_types == 1 (generator) is load-bearing in the power flow,
+    # the LTC regulated-bus choice, RAS targeting and dispatch, so overloading
+    # it would silently change all of those. A bus is a storage bus iff
+    # storage_power_mw > 0.
+    N_STORAGE_NODES    = 6        # buses fitted with an ESR
+
+    POWER_MW_MIN       = 20.0     # charge/discharge power rating
+    POWER_MW_MAX       = 80.0
+    DURATION_H_MIN     = 2.0      # energy capacity = power x duration
+    DURATION_H_MAX     = 4.0
+    SOC_INIT_FRACTION  = 0.55     # starting state of charge
+
+    # Frequency droop: discharge to support LOW frequency, charge on HIGH.
+    #   flow_mw = clip(DROOP_MW_PER_HZ * (f_nom - f), -power, +power)
+    # positive flow = DISCHARGING (injecting MW, depleting SOC).
+    #
+    # STABILITY — read before retuning. Storage MW feeds the generation sum
+    # that FrequencyDynamicsSimulator uses, so the droop closes a feedback
+    # loop around the frequency model. That model's sensitivity is
+    #     df/dP = BASE_FREQUENCY / (D_TOTAL * total_load)
+    #           = 60 / (0.04 * 8500) ~= 0.18 Hz per MW
+    # so the loop gain is  0.18 * N_STORAGE_NODES * DROOP_MW_PER_HZ.
+    # At the original 120 MW/Hz that gain was ~127: a tiny frequency dip
+    # produced a storage response that overshot by two orders of magnitude,
+    # flipped sign, diverged within one step and collapsed the whole grid on
+    # underfrequency at t=1. MAX_LOOP_GAIN below bounds it structurally in
+    # StorageController.update(), so the cap holds even if this gain is
+    # raised or the grid is resized.
+    # Closed-loop pole is |1 - a - a*G| with a = 1-exp(-dt/TAU_GOV) ~= 0.865
+    # and G = 0.18 * N_STORAGE_NODES * DROOP_MW_PER_HZ. Measured:
+    #   droop 120 -> G=127  pole=110   diverges (the t=1 collapse)
+    #   droop   5 -> G=5.3  pole=4.4   diverges
+    #   droop   1 -> G=1.06 pole=0.78  stable but ~oscillatory
+    #   droop 0.2 -> G=0.21 pole=0.05  settles in ~3 steps, no limit cycle
+    # 0.2 also keeps the response PROPORTIONAL (never hits MAX_LOOP_GAIN in
+    # the normal band), which matters: a saturating cap turns the droop into
+    # a bang-bang controller and leaves a sustained +-0.19 Hz limit cycle.
+    #
+    # CAVEAT — this gain is far below a real ESR's frequency response. It is
+    # sized to THIS frequency model, whose sensitivity (0.18 Hz per MW of
+    # imbalance, from D_TOTAL = 0.04) is roughly two orders of magnitude
+    # twitchier than a real interconnection. The consequence is that storage
+    # MW/SOC barely move, so those SCADA columns carry little signal. Raising
+    # the response meaningfully requires recalibrating FrequencyConfig.D_TOTAL
+    # first — a change to PRE-EXISTING physics that would alter every
+    # scenario's frequency dynamics and needs its own validation.
+    DROOP_MW_PER_HZ    = 0.2
+    MAX_LOOP_GAIN      = 0.25     # structural backstop; scales aggregate response
+    DEADBAND_HZ        = 0.02     # no response inside +-this of nominal
+
+    # Reactive capability, as a fraction of the MW rating (inverter-coupled
+    # ESRs can supply Q largely independent of P).
+    QMAX_FRACTION      = 0.33
+
+    # Round-trip efficiency applied on the CHARGE direction only.
+    CHARGE_EFFICIENCY  = 0.92
+
+
+# ---------------------------------------------------------------------------
 # Time-Series Simulation
 # ---------------------------------------------------------------------------
 class SimulationConfig:
@@ -533,7 +622,9 @@ class ModelConfig:
     # [11] tap_position (LTC steps), [12] tap_angle (PAR degrees).
     # [MISO RTO-SPEC-006: "Transformer flows + LTC tap positions",
     #  "Phase shifter (PAR) flows + tap positions"]
-    EDGE_FEATURES       = 13
+    # Phase 5 appended 1 more: [13] is_tie_line (binary, raw — no normalisation).
+    # [MISO RTO-SPEC-006: "Tie-line flows & net actual interchange"]
+    EDGE_FEATURES       = 14
     RISK_DIM            = 7             # Output dimension of risk assessment head
     GAT_DROPOUT         = 0.1           # Graph attention dropout
     LEAKY_RELU_SLOPE    = 0.2           # LeakyReLU negative slope in GAT
@@ -621,7 +712,20 @@ class EmbeddingConfig:
     # SCADA width: 18 base + 4 Phase 3 reactive-support columns
     # ([18] cap bank status, [19] reactor status, [20] SVC Q output,
     #  [21] AVR setpoint). [MISO RTO-SPEC-006: voltage-regulation equipment]
-    INFRA_SCADA_FEATURES    = 22        # SCADA measurement feature width
+    # Phase 5 appended 6:
+    #   PER-NODE (zero on non-storage buses):
+    #     [22] storage SOC fraction   (soc_mwh / capacity_mwh, 0-1)
+    #     [23] storage MW  (+ discharge / - charge, / power rating)
+    #     [24] storage MVAr           (/ Qmax)
+    #   BROADCAST system-wide scalars — identical on every node, exactly as
+    #   current_frequency already is in col 6. Not local quantities; see the
+    #   plan's note. All divided by InterchangeConfig.INTERCHANGE_SCALE_MW:
+    #     [25] net actual interchange (sum of signed tie flows)
+    #     [26] scheduled interchange
+    #     [27] ACE = schedule - actual
+    # [MISO RTO-SPEC-006: tie-line flows / net actual interchange, dynamic
+    #  schedules, energy storage resources]
+    INFRA_SCADA_FEATURES    = 28        # SCADA measurement feature width
     INFRA_PMU_FEATURES      = 8         # PMU measurement feature width
     INFRA_EQUIPMENT_FEATURES = 10       # Equipment status feature width
     INFRA_SCADA_HIDDEN      = 64        # SCADA encoder hidden size
@@ -661,8 +765,8 @@ class EmbeddingConfig:
     # The 4 new TTF (time-to-failure) features encode physics-based estimates
     # of how many steps remain before each failure condition is breached.
     # They directly provide the timing signal needed by the TimingHead.
-    NODE_FEATURE_BASE_DIM   = 42        # SCADA(22)+PMU(8)+equip(10)+inj(2) before deltas (Phase 3: was 38)
-    NODE_FEATURE_DIM        = 136       # 42*3 + 1 t_pos + 4 TTF + 5 susceptibility (Phase 3: was 124)
+    NODE_FEATURE_BASE_DIM   = 48        # SCADA(28)+PMU(8)+equip(10)+inj(2) before deltas (P3: 38→42, P5: 42→48)
+    NODE_FEATURE_DIM        = 154       # 48*3 + 1 t_pos + 4 TTF + 5 susceptibility (P3: 124→136, P5: 136→154)
     NODE_MLP_HIDDEN_1       = 256       # First hidden layer of NodeFeatureMLP
     NODE_MLP_HIDDEN_2       = 128       # Second hidden layer of NodeFeatureMLP
 
@@ -690,6 +794,8 @@ class Settings:
     Branch        = BranchConfig
     Shunt         = ShuntConfig
     RAS           = RASConfig
+    Interchange   = InterchangeConfig
+    Storage       = StorageConfig
     Simulation    = SimulationConfig
     Scenario      = ScenarioConfig
     Dataset       = DatasetConfig

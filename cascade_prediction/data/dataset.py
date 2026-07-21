@@ -226,12 +226,31 @@ class CascadeDataset(Dataset):
         # Process each timestep
         for i, ts in enumerate(sequence):
             # SCADA data with normalization (now 18 features with failure proximity ratios)
-            scada_data_raw = ts.get('scada_data', np.zeros((num_nodes, 22))).astype(np.float32)
+            scada_data_raw = ts.get('scada_data', np.zeros((num_nodes, 28))).astype(np.float32)
+            scada_w = scada_data_raw.shape[1]   # normalize only GENERATED cols
 
             if scada_data_raw.shape[1] >= 6:
                 scada_data_raw[:, 2] = normalize_power(scada_data_raw[:, 2], self.base_mva)
                 scada_data_raw[:, 3] = normalize_power(scada_data_raw[:, 3], self.base_mva)
                 scada_data_raw[:, 4] = normalize_power(scada_data_raw[:, 4], self.base_mva)
+            if scada_w >= 28:
+                # Phase 5 columns. Per-column policy (plan §3 requires this to
+                # be explicit for every new column):
+                #   [22] storage SOC fraction — already 0-1, RAW.
+                #   [23] storage MW  — normalize on base MVA (signed).
+                #   [24] storage MVAr — normalize on base MVA (signed).
+                #   [25-27] interchange / schedule / ACE — system-wide MW
+                #       broadcast; divide by INTERCHANGE_SCALE_MW so a full
+                #       schedule block lands near unit scale. No loss
+                #       supervises these; they are context features.
+                # [MISO RTO-SPEC-006: energy storage resources; tie-line flows
+                #  & net actual interchange; dynamic schedules]
+                scada_data_raw[:, 23] = normalize_power(scada_data_raw[:, 23], self.base_mva)
+                scada_data_raw[:, 24] = normalize_power(scada_data_raw[:, 24], self.base_mva)
+                _isc = float(getattr(
+                    getattr(Settings, 'Interchange', None),
+                    'INTERCHANGE_SCALE_MW', 1000.0))
+                scada_data_raw[:, 25:28] = scada_data_raw[:, 25:28] / _isc
             if scada_data_raw.shape[1] >= 22:
                 # Phase 3 columns: [18]/[19] bank statuses binary — raw;
                 # [20] SVC Q in MVar — normalize; [21] AVR setpoint p.u. — raw.
@@ -247,6 +266,15 @@ class CascadeDataset(Dataset):
                     is_gen * 1.0,
                 ]).astype(np.float32)
                 scada_data_raw = np.concatenate([scada_data_raw, pad], axis=1)
+            if scada_data_raw.shape[1] == 22:
+                # Legacy pre-Phase-5: no storage and no ties. SOC/MW/MVAr are
+                # 0, and with no tie lines the net actual interchange of a
+                # self-contained island is identically 0 — so schedule and ACE
+                # are 0 too. Zeros are already in normalized scale.
+                scada_data_raw = np.concatenate([
+                    scada_data_raw,
+                    np.zeros((scada_data_raw.shape[0], 6), dtype=np.float32),
+                ], axis=1)
             
             # Keep all 18 features, update time_ratio to be relative to window
             scada_data = scada_data_raw.copy()
@@ -317,6 +345,12 @@ class CascadeDataset(Dataset):
                 # neutral taps (zeros are already normalized-scale).
                 ea = np.concatenate([
                     ea, np.zeros((ea.shape[0], 3), dtype=np.float32)], axis=1)
+            if ea.shape[1] == 13:
+                # Pre-Phase-5: backfill col 13 — no branch is a tie line.
+                # Binary flag, raw (no normalization), so zeros are correct.
+                # [MISO RTO-SPEC-006: tie-line flows & net actual interchange]
+                ea = np.concatenate([
+                    ea, np.zeros((ea.shape[0], 1), dtype=np.float32)], axis=1)
             data_arrays['edge_attr'].append(to_tensor(ea))
 
             # Phase 4 — RAS arming telemetry [N_RAS, 3]. Legacy scenarios

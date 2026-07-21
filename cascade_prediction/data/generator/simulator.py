@@ -40,6 +40,10 @@ from .grid_state import (
 from .taps import TapController, assign_branch_types
 from .shunts import ShuntController, assign_shunt_devices
 from .ras import RASEngine, assign_ras_schemes
+from .interchange import (
+    InterchangeScheduler, StorageController, assign_storage_nodes,
+    assign_tie_lines, net_actual_interchange, tie_representative_rows,
+)
 
 
 class PhysicsBasedGridSimulator:
@@ -328,6 +332,21 @@ class PhysicsBasedGridSimulator:
         self.ras_action_type = ras_schemes['ras_action_type']
         self.ras_action_target = ras_schemes['ras_action_target']
 
+        # --- Phase 5: tie lines & storage ---------------------------------
+        # Ties are the branches farthest from the network centroid (boundary
+        # of the footprint); storage is a separate per-node attribute rather
+        # than a node_types value, because node_types == 1 is load-bearing.
+        # [MISO RTO-SPEC-006: "Tie-line flows & net actual interchange",
+        #  "Dynamic schedules", "Energy storage resources: SOC, MW, MVAr"]
+        self.is_tie_line = assign_tie_lines(
+            self.edge_index.numpy(), self.positions,
+            rng=np.random.default_rng(seed + 3))
+        storage = assign_storage_nodes(
+            self.node_types, rng=np.random.default_rng(seed + 4))
+        self.storage_power_mw = storage['storage_power_mw']
+        self.storage_capacity_mwh = storage['storage_capacity_mwh']
+        self.storage_qmax_mvar = storage['storage_qmax_mvar']
+
         # Decommissioned nodes (topology edits): buses that exist in the
         # arrays but are permanently out of service. Empty for generated
         # grids; from_grid_state() fills it from the block's removed_nodes.
@@ -413,6 +432,17 @@ class PhysicsBasedGridSimulator:
         # generator bus is pinned by its AVR and cannot be moved by a tap.
         self.tap_controller = TapController(
             self.edge_index.numpy(), self.branch_type, self.node_types)
+
+        # Phase 5 — interchange schedule (block profile) + storage droop.
+        # Representative tie rows are cached here: summing BOTH mirrored rows
+        # would cancel to zero, so interchange must use one row per tie.
+        self.tie_rows = tie_representative_rows(
+            self.edge_index.numpy(), self.is_tie_line)
+        self.interchange_scheduler = InterchangeScheduler(
+            rng=np.random.default_rng(getattr(self, 'seed', 0) or 0))
+        self.storage_controller = StorageController(
+            self.storage_power_mw, self.storage_capacity_mwh,
+            self.storage_qmax_mvar)
 
         # Phase 3 — reactive-support controller (bank hysteresis + SVC droop),
         # also driven by the previous timestep's voltages.
@@ -688,6 +718,15 @@ class PhysicsBasedGridSimulator:
         ras_gen_tripped: set = set()
         ras_load_shed = np.ones(self.num_nodes)
 
+        # Phase 5 — interchange schedule re-blocks and storage returns to its
+        # starting SOC each scenario. Storage responds to the PREVIOUS step's
+        # frequency, so it carries a one-step delay like the other controllers.
+        self.interchange_scheduler.reset()
+        self.storage_controller.reset()
+        prev_frequency = Settings.Frequency.BASE_FREQUENCY
+        storage_mw = np.zeros(self.num_nodes)
+        storage_mvar = np.zeros(self.num_nodes)
+
         # Stress ramp: rise from 60% to 100% of stress_level over first RAMP_FRACTION of sequence
         earlest_cascade_time = max(1, int(sequence_length * (np.random.uniform(Settings.Simulation.RAMP_FRACTION_MIN, Settings.Simulation.RAMP_FRACTION_MAX))))
         alpha = (0.75/stress_level - 0.6) / earlest_cascade_time
@@ -768,6 +807,26 @@ class PhysicsBasedGridSimulator:
                 else np.ones(self.num_nodes)
             )
 
+            # Phase 5 — storage responds to LAST step's frequency (droop) and
+            # injects MW as dispatch: positive = discharging. Failed buses
+            # contribute nothing. SOC integrates inside the controller and is
+            # hard-clamped to [0, capacity].
+            # [MISO RTO-SPEC-006: "Energy storage resources: SOC, MW, MVAr"]
+            storage_mw, storage_mvar = self.storage_controller.update(
+                prev_frequency,
+                Settings.Thermal.DT_MINUTES,
+                failed_nodes=set(failed_nodes_t),
+                # Bounds the frequency-loop gain — storage MW feeds the
+                # generation sum the frequency model reads, so an unbounded
+                # droop diverges in one step. See StorageConfig.
+                system_base_mw=float(load_values.sum()),
+            )
+            generation = generation + storage_mw
+            shunt_q_t = shunt_q_t + storage_mvar
+
+            # Scheduled interchange for this step (block profile).
+            schedule_mw = self.interchange_scheduler.step()
+
             # Run power flow
             voltages, angles, line_flows, node_reactive, line_flows_q, is_stable = (
                 self.power_flow_sim.compute_power_flow(
@@ -806,6 +865,17 @@ class PhysicsBasedGridSimulator:
             # (emergency/normal, load-dump/normal) are unaffected.
             effective_limits = self.thermal_limits * self.rating_derate
             loading_ratios = np.sqrt(line_flows**2 + line_flows_q**2) / (effective_limits + 1e-6)
+
+            # Phase 5 — net actual interchange = signed sum of tie flows on
+            # ONE representative row per physical tie (both mirrored rows
+            # would cancel to zero). ACE = schedule - actual, a SYSTEM-WIDE
+            # scalar broadcast to every node in SCADA, exactly as
+            # current_frequency already is — it is not a local quantity.
+            # [MISO RTO-SPEC-006: "Tie-line flows & net actual interchange",
+            #  "Dynamic schedules (interchange MW)"]
+            actual_interchange_mw = net_actual_interchange(
+                line_flows, self.tie_rows)
+            ace_mw = schedule_mw - actual_interchange_mw
 
             # Feed next timestep's tap-controller step (Phase 2)
             prev_line_flows = line_flows
@@ -859,6 +929,9 @@ class PhysicsBasedGridSimulator:
             current_frequency, load_values = self.frequency_sim.update_frequency(
                 generation, load_values, current_frequency, 1.0
             )
+            # Phase 5 — storage droop reads this next step (one-step delay,
+            # like every other controller).
+            prev_frequency = current_frequency
 
             ambient_temp = ambient_temp_base + Settings.Thermal.DIURNAL_AMPLITUDE_C * np.sin(2 * np.pi * ((t / 60.0) - 6) / 24)
             self.thermal_sim.ambient_temperature = ambient_temp
@@ -973,7 +1046,9 @@ class PhysicsBasedGridSimulator:
                 line_flows, line_flows_q, sat_data, weather_seq, threat_ind,
                 vis_data, thermal_data, sensor_data, cumulative_failed_nodes,
                 current_cascade_timing, sequence_length,self.env_gen.fire_location,
-                branch_status
+                branch_status,
+                storage_mw, storage_mvar,
+                actual_interchange_mw, schedule_mw, ace_mw,
             )
             sequence.append(timestep_data)
 
@@ -1116,7 +1191,9 @@ class PhysicsBasedGridSimulator:
         line_flows, line_flows_q, sat_data, weather_seq, threat_ind,
         vis_data, thermal_data, sensor_data, cumulative_failed_nodes,
         current_cascade_timing, sequence_length,fire_location,
-        branch_status
+        branch_status,
+        storage_mw=None, storage_mvar=None,
+        actual_interchange_mw=0.0, schedule_mw=0.0, ace_mw=0.0,
     ) -> Dict:
         """Package all data for a single timestep."""
         return {
@@ -1124,9 +1201,13 @@ class PhysicsBasedGridSimulator:
             'weather_sequence': weather_seq.astype(np.float32),
             'threat_indicators': threat_ind.astype(np.float32),
 
-            # SCADA Data Format (22 features per node; 18-21 appended in
+            # SCADA Data Format (28 features per node; 18-21 appended in
             # Phase 3 — reactive support: [18] cap status, [19] reactor
-            # status, [20] SVC Q (MVar), [21] AVR setpoint (p.u.))
+            # status, [20] SVC Q (MVar), [21] AVR setpoint (p.u.);
+            # 22-27 appended in Phase 5 — [22] storage SOC fraction,
+            # [23] storage MW, [24] storage MVAr, then the three BROADCAST
+            # system-wide scalars [25] net actual interchange, [26] scheduled
+            # interchange, [27] ACE — identical on every node, as col 6 is)
             # CRITICAL: Keep this order synchronized with dataset.py extraction!
             # Index 0: voltages (p.u.)
             # Index 1: angles (radians)
@@ -1174,6 +1255,19 @@ class PhysicsBasedGridSimulator:
                 self.shunt_controller.reactor_status.astype(np.float32),  # 19: reactor bank in (0/1)
                 self.shunt_controller.svc_q,                              # 20: SVC output (MVar)
                 self.avr_setpoint,                                        # 21: AVR setpoint (p.u., 0=non-gen)
+                # Phase 5 — storage (PER-NODE, 0 on non-storage buses) then
+                # interchange (SYSTEM-WIDE, broadcast like frequency in col 6).
+                # [MISO RTO-SPEC-006: "Energy storage resources: SOC, MW,
+                #  MVAr", "Tie-line flows & net actual interchange",
+                #  "Dynamic schedules (interchange MW)"]
+                self.storage_controller.soc_fraction(),                   # 22: SOC (0-1)
+                (storage_mw if storage_mw is not None
+                 else np.zeros(self.num_nodes)),                          # 23: storage MW (+disch)
+                (storage_mvar if storage_mvar is not None
+                 else np.zeros(self.num_nodes)),                          # 24: storage MVAr
+                np.full(self.num_nodes, actual_interchange_mw),           # 25: net actual interchange (MW)
+                np.full(self.num_nodes, schedule_mw),                     # 26: scheduled interchange (MW)
+                np.full(self.num_nodes, ace_mw),                          # 27: ACE = schedule - actual (MW)
             ]).astype(np.float32),
 
             'pmu_sequence': np.column_stack([
@@ -1239,6 +1333,12 @@ class PhysicsBasedGridSimulator:
                 self.branch_type,
                 self.tap_controller.tap_position,
                 self.tap_controller.tap_angle,
+                # Index 13: is_tie_line (binary) — the branch crosses the
+                # boundary to the neighbouring RC. Its FLOW is cols 5–6; the
+                # net interchange those ties sum to is broadcast in SCADA
+                # 25–27. Mirrored rows share the flag.  ← Phase 5
+                # [MISO RTO-SPEC-006: "Tie-line flows & net actual interchange"]
+                self.is_tie_line,
             ]).astype(np.float32),
 
             'node_labels': np.array([
