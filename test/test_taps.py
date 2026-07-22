@@ -83,16 +83,61 @@ class TestLTC:
 
     def test_deadband_holds(self):
         ctl, ei, _ = make_controller()
-        volts = np.ones(6); volts[ei[1, 0]] = 1.005   # inside ±0.01 band
+        volts = np.ones(6)
+        volts[ei[1, 0]] = 1.005   # inside the ±LTC_DEADBAND_PU band
         ctl.update(volts, np.zeros(ei.shape[1]), np.zeros(ei.shape[1]))
         assert ctl.tap_position[0] == 0
 
     def test_one_step_per_timestep_and_limit(self):
+        """
+        Tap moves at most one step per timestep and clamps at LTC_TAP_MAX.
+
+        The regulated voltage must actually RESPOND, or anti-windup correctly
+        blocks the device before it ever reaches the limit (see
+        test_anti_windup_blocks_unresponsive_bus). Here the bus creeps upward
+        by more than LTC_MIN_V_RESPONSE_PU each step while staying below the
+        setpoint band, so the controller keeps raising and hits the clamp.
+        """
         ctl, ei, _ = make_controller()
-        volts = np.ones(6); volts[ei[1, 0]] = 0.8    # far below setpoint
-        for _ in range(50):                           # more steps than range
-            ctl.update(volts, np.zeros(ei.shape[1]), np.zeros(ei.shape[1]))
+        flows = np.zeros(ei.shape[1])
+        loading = np.zeros(ei.shape[1])
+        for k in range(50):                           # more steps than range
+            volts = np.ones(6)
+            volts[ei[1, 0]] = 0.80 + 0.001 * k        # responds, still low
+            ctl.update(volts, flows, loading)
         assert ctl.tap_position[0] == B.LTC_TAP_MAX   # clamped, not runaway
+
+    def test_anti_windup_blocks_unresponsive_bus(self):
+        """
+        A tap with no authority must stop stepping, not ratchet to its limit.
+
+        A frozen regulated voltage is the pathological case that caused the
+        production bug: the LTC was regulating a generator bus pinned by its
+        AVR, so the tap moved one step EVERY timestep, rerouting flow until
+        lines tripped at constant load. Anti-windup blocks after
+        LTC_STALL_STEPS of no voltage response.
+        """
+        ctl, ei, _ = make_controller()
+        volts = np.ones(6)
+        volts[ei[1, 0]] = 0.8         # far below setpoint, and never responds
+        for _ in range(50):
+            ctl.update(volts, np.zeros(ei.shape[1]), np.zeros(ei.shape[1]))
+        assert abs(int(ctl.tap_position[0])) <= B.LTC_STALL_STEPS
+        assert abs(int(ctl.tap_position[0])) < B.LTC_TAP_MAX
+
+    def test_load_side_bus_is_regulated(self):
+        """
+        Given node types, the LTC regulates the NON-generator end. A generator
+        bus is pinned at its AVR setpoint, so a tap has no authority over it.
+        """
+        from cascade_prediction.data.generator.taps import TapController
+        # Two mirrored transformer branches: 0<->1 and 1<->2, bus 1 = generator
+        ei = np.array([[0, 1, 1, 2], [1, 0, 2, 1]])
+        bt = np.array([B.TYPE_TRANSFORMER] * 4)
+        node_types = np.array([0, 1, 0])          # bus 1 is a generator
+        ctl = TapController(ei, bt, node_types)
+        assert 1 not in set(int(b) for b in ctl._rep_dst), \
+            "LTC must not regulate a generator bus"
 
     def test_dead_bus_holds_tap(self):
         ctl, ei, _ = make_controller()
