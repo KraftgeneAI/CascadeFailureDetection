@@ -318,7 +318,10 @@ class CascadeDataset(Dataset):
                 ea[:, 5] = normalize_power(ea[:, 5], self.base_mva)   # line_flows_p
                 ea[:, 6] = normalize_power(ea[:, 6], self.base_mva)   # line_flows_q
             if orig_w >= 10:
-                # Phase 1 columns: [7] branch_status is binary — leave raw.
+                # Phase 1 columns: [7] branch_status — leave RAW. Phase 6 made
+                # it TERNARY (1 closed / 0 forced-open / -1 planned-open); the
+                # values are already in [-1, 1] so no scaling is needed, and
+                # anything masking on it must test == 1, not truthiness.
                 # [MISO RTO-SPEC-006: col 7 → switching-device open/closed
                 #  status; cols 8–9 → line ratings normal/emergency/load-dump]
                 ea[:, 8] = normalize_power(ea[:, 8], self.base_mva)   # emergency (LEP) rating

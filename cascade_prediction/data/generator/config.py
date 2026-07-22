@@ -434,6 +434,91 @@ class InterchangeConfig:
 
 
 # ---------------------------------------------------------------------------
+# Scheduled outages & de-rates (Phase 6 — MISO data gap plan)
+# [MISO RTO-SPEC-006: "Transmission/generation outage schedules + de-rates"]
+# ---------------------------------------------------------------------------
+class OutageConfig:
+    # MASTER SWITCH. When False, scenario generation injects NO planned
+    # outages or scheduled de-rates: branch_status stays binary (1 closed /
+    # 0 forced-open, never -1), no line/generator is taken out on a schedule,
+    # and rating_derate stays at its static baseline. The Phase 6 machinery
+    # (outages.py, this config, the simulator wiring, the tests) remains fully
+    # in place and re-enables with this one flag.
+    #
+    # Rationale for leaving it OFF: a planned outage is a human-scheduled
+    # event, not grid FAILURE behaviour, so it is noise for the core
+    # cascade-prediction task. Turn it on to train the planned-vs-forced
+    # distinction (the ternary branch_status) once that is wanted.
+    ENABLED = False
+
+    # branch_status is TERNARY from Phase 6 onward. A planned outage and a
+    # forced trip both open the branch, but they mean opposite things: one is
+    # an operator decision known in advance, the other is the failure the
+    # model exists to predict. Encoding both in one column keeps the feature
+    # width unchanged and keeps the two facts in the same place.
+    #
+    # ANY consumer that masks on branch_status MUST test `== STATUS_CLOSED`,
+    # never truthiness — STATUS_PLANNED_OPEN is -1.0, which is truthy, so a
+    # planned-open branch would silently stay in the GNN adjacency.
+    STATUS_CLOSED       = 1.0
+    STATUS_FORCED_OPEN  = 0.0
+    STATUS_PLANNED_OPEN = -1.0
+
+    # --- Scheduled TRANSMISSION outages ---------------------------------
+    LINE_OUTAGE_PROBABILITY  = 0.35   # scenarios that carry any line outage
+    N_LINE_OUTAGES_MIN       = 1
+    N_LINE_OUTAGES_MAX       = 3
+    LINE_OUTAGE_DUR_MIN      = 6      # timesteps out of service
+    LINE_OUTAGE_DUR_MAX      = 20
+
+    # --- Scheduled GENERATOR outages ------------------------------------
+    # The unit is derated to zero output but its BUS stays energised — a
+    # planned outage is not a node failure and must never be labelled as one.
+    GEN_OUTAGE_PROBABILITY   = 0.30
+    N_GEN_OUTAGES_MIN        = 1
+    N_GEN_OUTAGES_MAX        = 2
+    GEN_OUTAGE_DUR_MIN       = 8
+    GEN_OUTAGE_DUR_MAX       = 25
+
+    # Outages start early enough in the sequence to be visible before any
+    # cascade, so the model can learn the planned-vs-forced distinction.
+    START_FRACTION_MIN       = 0.05
+    START_FRACTION_MAX       = 0.60
+
+    # OUTAGE SCREENING. A real planned outage is studied first and rejected
+    # if removing that branch creates a thermal violation. Without a screen,
+    # a uniformly-random outage lands on a backbone corridor and its flow
+    # dumps onto a floor-rated parallel path — measured a jump from 1.14x to
+    # 6.85x rating in ONE timestep, which then took the whole grid down from
+    # a PLANNED event. Ratings were calibrated from base-case flow, so the
+    # rating is a proxy for normal loading: exclude the busiest corridors
+    # from outage candidacy.
+    EXCLUDE_TOP_RATED_FRAC   = 0.40   # top 40% by rating are never outaged
+
+    # --- Scheduled DE-RATE events ---------------------------------------
+    DERATE_PROBABILITY       = 0.40
+    N_DERATE_EVENTS_MIN      = 1
+    N_DERATE_EVENTS_MAX      = 4
+    DERATE_FACTOR_MIN        = 0.70   # rating multiplier while in force
+    DERATE_FACTOR_MAX        = 0.92
+    DERATE_DUR_MIN           = 8
+    DERATE_DUR_MAX           = 30
+
+    # --- AMBIENT-driven de-rate -----------------------------------------
+    # A conductor's current rating falls as ambient rises: the thermal limit
+    # is defined at a reference ambient, and a hot afternoon eats headroom.
+    # ~0.4 %/°C is a common planning rule of thumb. This couples to the
+    # diurnal ambient the simulator already swings (ThermalConfig).
+    AMBIENT_REF_C            = 25.0   # nameplate rating holds at/below this
+    AMBIENT_DERATE_PER_C     = 0.004  # rating lost per °C above the reference
+    AMBIENT_DERATE_FLOOR     = 0.80   # ambient alone never de-rates past this
+
+    # Combined de-rate is clamped here so a scheduled event stacked on a hot
+    # day cannot drive a rating to something unphysical.
+    TOTAL_DERATE_FLOOR       = 0.50
+
+
+# ---------------------------------------------------------------------------
 # Storage / ESR (Phase 5 — MISO data gap plan)
 # [MISO RTO-SPEC-006: "Energy storage resources: SOC, MW, MVAr"]
 # ---------------------------------------------------------------------------
@@ -796,6 +881,7 @@ class Settings:
     RAS           = RASConfig
     Interchange   = InterchangeConfig
     Storage       = StorageConfig
+    Outage        = OutageConfig
     Simulation    = SimulationConfig
     Scenario      = ScenarioConfig
     Dataset       = DatasetConfig

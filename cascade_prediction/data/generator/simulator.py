@@ -44,6 +44,7 @@ from .interchange import (
     InterchangeScheduler, StorageController, assign_storage_nodes,
     assign_tie_lines, net_actual_interchange, tie_representative_rows,
 )
+from .outages import OutageSchedule, branch_status_with_outages
 
 
 class PhysicsBasedGridSimulator:
@@ -727,6 +728,33 @@ class PhysicsBasedGridSimulator:
         storage_mw = np.zeros(self.num_nodes)
         storage_mvar = np.zeros(self.num_nodes)
 
+        # Phase 6 — scheduled outages & de-rates. Drawn PER SCENARIO (this is
+        # scenario state, not grid parameterization, so it stays out of the
+        # topology block). Planned outages take equipment out of service in
+        # the power flow but are NEVER failures: they must not reach
+        # node_labels, cumulative_failed_*, or the failure record — the same
+        # discipline RAS actions follow.
+        # [MISO RTO-SPEC-006: "Transmission/generation outage schedules +
+        #  de-rates"]
+        # Seeded from the GLOBAL stream (which the run seeds) so schedules are
+        # reproducible run-to-run while still differing per scenario. An
+        # unseeded default_rng() here made outages non-reproducible, unlike
+        # every other assignment in the generator.
+        self.outage_schedule = OutageSchedule(
+            self.edge_index.numpy(), self.node_types, sequence_length,
+            rng=np.random.default_rng(int(np.random.randint(0, 2**31 - 1))),
+            # Screens backbone corridors out of outage candidacy — see
+            # OutageConfig.EXCLUDE_TOP_RATED_FRAC.
+            thermal_limits=self.thermal_limits,
+            # Master switch: when OFF, this is a live-but-empty schedule, so
+            # scenarios carry no planned outages / de-rates and branch_status
+            # stays binary. The whole Phase 6 path stays wired and re-enables
+            # with OutageConfig.ENABLED. [see OutageConfig]
+            enabled=Settings.Outage.ENABLED,
+        )
+        if self.outage_schedule.has_any():
+            print(f"  [OUTAGE] scheduled: {self.outage_schedule.summary()}")
+
         # Stress ramp: rise from 60% to 100% of stress_level over first RAMP_FRACTION of sequence
         earlest_cascade_time = max(1, int(sequence_length * (np.random.uniform(Settings.Simulation.RAMP_FRACTION_MIN, Settings.Simulation.RAMP_FRACTION_MAX))))
         alpha = (0.75/stress_level - 0.6) / earlest_cascade_time
@@ -769,11 +797,17 @@ class PhysicsBasedGridSimulator:
             # Size generation to match load — only from active (non-failed) generators
             total_load = load_values.sum()
             gen_indices = np.where(self.node_types == 1)[0]
+            # Phase 6 — units on a SCHEDULED outage produce nothing, but the
+            # bus stays energised and healthy. Like the RAS case below, this
+            # is a dispatch change, never a failure: planned_gen_nodes must
+            # not reach cumulative_failed_nodes or node_labels.
+            planned_gen_out = self.outage_schedule.planned_gen_nodes(t)
             # Phase 4 — RAS-tripped generators are out of dispatch but NOT
             # failed (no labels, bus stays healthy).
             active_gen_indices = [idx for idx in gen_indices
                                   if idx not in cumulative_failed_nodes
-                                  and idx not in ras_gen_tripped]
+                                  and idx not in ras_gen_tripped
+                                  and idx not in planned_gen_out]
             active_capacity = self.gen_capacity[active_gen_indices].sum() if len(active_gen_indices) > 0 else 0.0
             generation[:] = 0.0  # reset all first
             for idx in active_gen_indices:
@@ -791,6 +825,16 @@ class PhysicsBasedGridSimulator:
                 ))
                 | cumulative_failed_lines
             )
+
+            # Phase 6 — planned transmission outages. Held in a SEPARATE set
+            # from failed_lines_t: they are handed to the power flow (the
+            # branch really is out of service) but are excluded from the
+            # failure record and from branch_status's forced-open code.
+            planned_line_rows = self.outage_schedule.planned_line_rows(t)
+            planned_line_set = set(int(r) for r in planned_line_rows)
+            # Union ONLY for the solve — never written back into
+            # cumulative_failed_lines.
+            out_of_service_lines = sorted(set(failed_lines_t) | planned_line_set)
             # Phase 2 — step LTC taps / PAR angles from last step's results,
             # then solve with the new tap state so the devices actually
             # regulate voltage and reroute flow inside the power flow.
@@ -830,7 +874,10 @@ class PhysicsBasedGridSimulator:
             # Run power flow
             voltages, angles, line_flows, node_reactive, line_flows_q, is_stable = (
                 self.power_flow_sim.compute_power_flow(
-                    generation, load_values, failed_lines_t, failed_nodes_t,
+                    # out_of_service = failures ∪ PLANNED outages (Phase 6):
+                    # the solve must see the real network, but only the
+                    # failures are labelled as such downstream.
+                    generation, load_values, out_of_service_lines, failed_nodes_t,
                     tap_ratios=tap_ratio_t, phase_shifts=phase_shift_t,
                     shunt_q=shunt_q_t,
                 )
@@ -863,7 +910,19 @@ class PhysicsBasedGridSimulator:
             # Loading vs the (possibly de-rated) NORMAL rating. Derate scales
             # all rating tiers together, so the monitor's tier thresholds
             # (emergency/normal, load-dump/normal) are unaffected.
-            effective_limits = self.thermal_limits * self.rating_derate
+            # Ambient for this step (hoisted above the de-rate: Phase 6 ties
+            # conductor ratings to ambient, and the thermal sim below reuses
+            # the same value rather than recomputing it).
+            ambient_temp = ambient_temp_base + Settings.Thermal.DIURNAL_AMPLITUDE_C * np.sin(2 * np.pi * ((t / 60.0) - 6) / 24)
+
+            # Phase 6 — time-varying de-rate: the STATIC per-edge baseline
+            # from the topology block, times the scenario's scheduled de-rate
+            # events, times the ambient-driven factor (a hot afternoon
+            # genuinely lowers a conductor's rating).
+            # [MISO RTO-SPEC-006: "... outage schedules + de-rates"]
+            derate_t = self.rating_derate * self.outage_schedule.derate(
+                t, ambient_temp)
+            effective_limits = self.thermal_limits * derate_t
             loading_ratios = np.sqrt(line_flows**2 + line_flows_q**2) / (effective_limits + 1e-6)
 
             # Phase 5 — net actual interchange = signed sum of tie flows on
@@ -933,7 +992,7 @@ class PhysicsBasedGridSimulator:
             # like every other controller).
             prev_frequency = current_frequency
 
-            ambient_temp = ambient_temp_base + Settings.Thermal.DIURNAL_AMPLITUDE_C * np.sin(2 * np.pi * ((t / 60.0) - 6) / 24)
+            # ambient_temp computed above (shared with the Phase 6 de-rate)
             self.thermal_sim.ambient_temperature = ambient_temp
             equipment_temps = self.thermal_sim.update_temperatures(heat_generation, 1.0)
 
@@ -1013,8 +1072,15 @@ class PhysicsBasedGridSimulator:
                     extra_failed_nodes=self.decommissioned_nodes,
                     power_flow_simulator=self.power_flow_sim,
                     edge_index=self.edge_index.numpy(),
-                    thermal_limits=self.thermal_limits,
-                    initial_failed_lines=list(cumulative_failed_lines)
+                    # Phase 6 — the cascade must see the DE-RATED ratings: a
+                    # line on a de-rate trips sooner, which is the point.
+                    thermal_limits=effective_limits,
+                    # ... and the true out-of-service set, so its internal
+                    # re-solves don't silently re-energise a branch that is
+                    # out on a planned outage. Only NODE failures come back
+                    # from here, so passing planned lines cannot create
+                    # labels.
+                    initial_failed_lines=list(out_of_service_lines)
                 )
                 # Record every failure from this cascade wave (initial + propagated)
                 for fail_node, fail_time_offset, fail_reason, fail_parent in cascade_sequence:
@@ -1036,9 +1102,13 @@ class PhysicsBasedGridSimulator:
             # already contains both rows of each mirrored pair.
             # [MISO RTO-SPEC-006: "Switching-device (breaker/switch)
             #  open/closed status" — the telemetered data item itself]
-            branch_status = np.ones(self.num_edges, dtype=np.float32)
-            if failed_lines_t:
-                branch_status[np.asarray(failed_lines_t, dtype=np.int64)] = 0.0
+            # Phase 6 — TERNARY: 1 closed, 0 forced open (a failure),
+            # -1 planned open (a scheduled outage, NOT a failure). Planned is
+            # written last so a branch that is both scheduled out and would
+            # read as forced-open reports as planned — the operator took it
+            # out deliberately and it must not look like a trip.
+            branch_status = branch_status_with_outages(
+                self.num_edges, failed_lines_t, planned_line_rows)
 
             timestep_data = self._package_timestep_data(
                 t, current_stress, voltages, angles, generation, node_reactive,
@@ -1049,6 +1119,7 @@ class PhysicsBasedGridSimulator:
                 branch_status,
                 storage_mw, storage_mvar,
                 actual_interchange_mw, schedule_mw, ace_mw,
+                derate_t,
             )
             sequence.append(timestep_data)
 
@@ -1194,8 +1265,11 @@ class PhysicsBasedGridSimulator:
         branch_status,
         storage_mw=None, storage_mvar=None,
         actual_interchange_mw=0.0, schedule_mw=0.0, ace_mw=0.0,
+        derate_t=None,
     ) -> Dict:
         """Package all data for a single timestep."""
+        _derate = (self.rating_derate if derate_t is None
+                   else np.asarray(derate_t, dtype=np.float64))
         return {
             'satellite_data': sat_data.astype(np.float32),
             'weather_sequence': weather_seq.astype(np.float32),
@@ -1317,13 +1391,17 @@ class PhysicsBasedGridSimulator:
             #           outage schedules + de-rates]
             'edge_attr': np.column_stack([
                 self.line_reactance,
-                self.thermal_limits * self.rating_derate,   # telemetered rating reflects derate
+                # Telemetered ratings reflect the de-rate IN FORCE THIS STEP
+                # (Phase 6: static baseline x scheduled event x ambient).
+                # Falls back to the static baseline for callers that don't
+                # pass one.
+                self.thermal_limits * _derate,
                 self.line_resistance,
                 self.line_susceptance, self.line_conductance,
                 line_flows, line_flows_q,
                 branch_status,
-                self.emergency_limits * self.rating_derate,
-                self.load_dump_limits * self.rating_derate,
+                self.emergency_limits * _derate,
+                self.load_dump_limits * _derate,
                 # Index 10: branch_type (0=line, 1=LTC transformer, 2=PAR)
                 # Index 11: tap_position (LTC steps, ±16)     ← Phase 2
                 # Index 12: tap_angle (PAR degrees, ±30)      ← Phase 2
