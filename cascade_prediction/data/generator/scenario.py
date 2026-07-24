@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import pickle
 import gc
-import glob
 
 from .simulator import PhysicsBasedGridSimulator
 from .utils import MemoryMonitor, save_scenarios
@@ -300,21 +299,6 @@ class ScenarioOrchestrator:
         else:  # normal
             stress_level = np.random.uniform(Settings.Scenario.NORMAL_STRESS_MIN, Settings.Scenario.NORMAL_STRESS_MAX)
 
-        # For cascade scenarios, pick a random video from the folder (if provided)
-        if scenario_type == 'cascade' and self.simulator.video_folder:
-            video_files = sorted(glob.glob(f"{self.simulator.video_folder}/*.mp4") +
-                                 glob.glob(f"{self.simulator.video_folder}/*.avi") +
-                                 glob.glob(f"{self.simulator.video_folder}/*.mov"))
-            if video_files:
-                picked = video_files[np.random.randint(len(video_files))]
-                print(f"  [VIDEO] Selected: {picked}")
-                self.simulator.set_video(picked)
-            else:
-                print(f"  [VIDEO] No video files found in {self.simulator.video_folder}, skipping video")
-                self.simulator.set_video(None)
-        else:
-            self.simulator.set_video(None)
-
         for retry in range(max_retries):
 
             # Generate scenario
@@ -419,7 +403,6 @@ def generate_dataset_from_config(
     train_ratio: float = Settings.Dataset.TRAIN_RATIO,
     val_ratio: float = Settings.Dataset.VAL_RATIO,
     test_ratio: float = Settings.Dataset.TEST_RATIO,
-    video_folder: Optional[str] = None
 ) -> Dict[str, int]:
     """
     Convenience function to generate dataset from configuration.
@@ -452,8 +435,6 @@ def generate_dataset_from_config(
         Fraction of data for validation
     test_ratio : float
         Fraction of data for testing
-    video_folder : str, optional
-        Path to folder of wildfire videos. Each cascade scenario picks one at random.
 
     Returns:
     --------
@@ -466,7 +447,6 @@ def generate_dataset_from_config(
         num_nodes=num_nodes,
         seed=seed,
         topology_file=topology_file,
-        video_folder=video_folder
     )
 
     # Save topology if not provided

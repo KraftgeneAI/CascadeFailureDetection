@@ -10,11 +10,22 @@ This module implements:
 - Voltage stability
 """
 
+import logging
+
 import numpy as np
 import pypsa
 from typing import Tuple, Optional, List, Dict
 
 from .config import Settings
+
+# PyPSA emits an INFO line for EVERY sub-network on EVERY solve
+# ("Balancing power on single-bus sub-network ...", "Performing non-linear
+# load-flow ..."). During a cascade the grid fragments into dozens of islands
+# and each node failure triggers a fresh solve, so a single collapse timestep
+# floods the console with hundreds of these lines — the console I/O alone is a
+# large share of wall-clock time. Silence INFO; keep WARNING (non-convergence)
+# and above, which the simulator handles and reports itself.
+logging.getLogger("pypsa").setLevel(logging.WARNING)
 
 
 class PowerFlowSimulator:

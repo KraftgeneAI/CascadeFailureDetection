@@ -29,8 +29,11 @@ import pypsa
 from .topology import GridTopologyGenerator, NodePropertyInitializer
 from .physics import PowerFlowSimulator, FrequencyDynamicsSimulator, ThermalDynamicsSimulator
 from .cascade import CascadeSimulator, LineTripMonitor, create_adjacency_list
-from .environmental import EnvironmentalDataGenerator
-from .robotic import RoboticDataGenerator
+# Environmental (satellite/weather/threat) and robotic (visual/thermal/sensor)
+# data generation, and the wildfire-video failure driver, were removed: the
+# model consumes none of these modalities and wildfire wrote input-invisible
+# failure labels. The environmental.py / robotic.py modules remain on disk but
+# are no longer imported here.
 from .utils import get_failed_lines_from_nodes
 from .config import Settings
 from .grid_state import (
@@ -73,7 +76,6 @@ class PhysicsBasedGridSimulator:
         num_nodes: int = Settings.Scenario.DEFAULT_NUM_NODES,
         seed: int = Settings.Scenario.DEFAULT_SEED,
         topology_file: Optional[str] = None,
-        video_folder: Optional[str] = None
     ):
         """
         Initialize the physics-based grid simulator.
@@ -86,9 +88,6 @@ class PhysicsBasedGridSimulator:
             Random seed for reproducibility
         topology_file : str, optional
             Path to saved topology file (if None, generates new topology)
-        video_folder : str, optional
-            Path to folder containing wildfire videos. Each cascade scenario
-            will pick one video from this folder at random.
         """
         self.num_nodes = num_nodes
         self.seed = seed
@@ -353,11 +352,10 @@ class PhysicsBasedGridSimulator:
         # grids; from_grid_state() fills it from the block's removed_nodes.
         self.decommissioned_nodes = set()
 
-        self._init_simulators(video_folder)
+        self._init_simulators()
 
     @classmethod
-    def from_grid_state(cls, topology_block: Dict,
-                        video_folder: Optional[str] = None
+    def from_grid_state(cls, topology_block: Dict
                         ) -> "PhysicsBasedGridSimulator":
         """
         Build a simulator directly from a scenario's embedded topology block
@@ -370,7 +368,6 @@ class PhysicsBasedGridSimulator:
         Args:
             topology_block: dict produced by build_topology_block() /
                 apply_topology_edits(), validated before use.
-            video_folder: optional wildfire video folder (as in __init__).
 
         Returns:
             Fully initialized PhysicsBasedGridSimulator.
@@ -407,10 +404,10 @@ class PhysicsBasedGridSimulator:
         self.decommissioned_nodes = {
             int(i) for i in topology_block.get('removed_nodes', [])}
 
-        self._init_simulators(video_folder)
+        self._init_simulators()
         return self
 
-    def _init_simulators(self, video_folder: Optional[str]) -> None:
+    def _init_simulators(self) -> None:
         """
         Shared init tail: physics/frequency/thermal simulators, cascade
         simulator, and environmental/robotic generators. Called by both
@@ -509,35 +506,7 @@ class PhysicsBasedGridSimulator:
             fast_trip_ratio=self.load_dump_limits / (self.thermal_limits + 1e-6),
         )
 
-        self.video_folder = video_folder
-        self.video_path = None  # Set per cascade scenario via set_video()
-
-        # Initialize environmental and robotic generators (no video at init)
-        print(f"Initializing environmental and robotic generators...")
-        self.env_gen = EnvironmentalDataGenerator(
-            self.num_nodes, self.positions, self.edge_index.numpy(), None
-        )
-
-        self.robot_gen = RoboticDataGenerator(
-            self.num_nodes, self.equipment_age, self.equipment_condition
-        )
-
         print(f"[OK] Initialized grid: {self.num_nodes} nodes, {self.num_edges} edges")
-
-    def set_video(self, video_path: Optional[str]) -> None:
-        """
-        Set the wildfire video for the next scenario.
-
-        Parameters:
-        -----------
-        video_path : str or None
-            Absolute path to a video file, or None to clear.
-        """
-        self.video_path = video_path
-        if video_path is not None:
-            self.env_gen.load_video(video_path)
-        else:
-            self.env_gen.video_signal = None
 
     def generate_scenario(
         self,
@@ -581,7 +550,6 @@ class PhysicsBasedGridSimulator:
             * np.random.rand()
         )
 
-        self.env_gen.update_fire_location()
         # Generate time series — failures emerge dynamically from physics
         scenario_data = self._generate_time_series(
             stress_level, sequence_length, ambient_temp_base
@@ -625,7 +593,6 @@ class PhysicsBasedGridSimulator:
             'num_nodes': self.num_nodes,
             'num_edges': len(self.edge_index[0]),
             'base_mva': Settings.PowerSystem.SN_MVA,
-            'video_path': self.video_path,
         }
 
         return scenario_data
@@ -682,10 +649,6 @@ class PhysicsBasedGridSimulator:
         self.thermal_sim.ambient_temperature = ambient_temp_base
         self.thermal_sim.reset_temperatures()
         self.frequency_sim.reset_ufls()
-
-        # Draw once per scenario so precursor signals are temporally coherent
-        # across all timesteps (same window edge for every call this scenario).
-        scenario_precursor_duration = int(np.random.randint(8, 20))
 
         generation = np.zeros(self.num_nodes)
         load_values = np.zeros(self.num_nodes)
@@ -1003,23 +966,7 @@ class PhysicsBasedGridSimulator:
             # the existing NodeConfig failure thresholds.
             # ----------------------------------------------------------------
 
-            # Environmental + robotic data
-            sat_data, weather_seq, threat_ind = self.env_gen.generate_correlated_environmental_data(
-                list(cumulative_failed_nodes), failed_lines_t, t, cascade_start_time, current_stress, sequence_length, 
-                scenario_precursor_duration,stress_level > Settings.Scenario.CASCADE_STRESS_MIN
-            )
-
-            vis_data, thermal_data, sensor_data = self.robot_gen.generate_correlated_robotic_data(
-                list(cumulative_failed_nodes), failed_lines_t, t, cascade_start_time, equipment_temps,
-                scenario_precursor_duration
-            )
-
-            # Compute fire stress with spatial decay + amplification
-            fire_stress = threat_ind[:,0]
-
             node_line_loading = load_values / (self.base_load + 1e-6)
-
-            equipment_temps = equipment_temps + 20 * fire_stress
 
             new_failures: List[Tuple[int, str]] = []
 
@@ -1032,12 +979,10 @@ class PhysicsBasedGridSimulator:
                 if n in self.decommissioned_nodes:
                     continue
 
-                # Wildfire trigger
-                if fire_stress[n] > 0.15:
-                    new_failures.append((n, "wildfire"))
-                    continue
-
-                # Original physics-based failure
+                # Physics-based failure (overload / voltage / temperature /
+                # frequency). The wildfire trigger and its fire-driven
+                # temperature bump were removed — equipment temperature now
+                # comes purely from the anchored thermal model.
                 state, reason = self.cascade_sim.check_node_state(
                     n,
                     node_line_loading[n],
@@ -1113,9 +1058,8 @@ class PhysicsBasedGridSimulator:
             timestep_data = self._package_timestep_data(
                 t, current_stress, voltages, angles, generation, node_reactive,
                 load_values, equipment_temps, current_frequency, loading_ratios,
-                line_flows, line_flows_q, sat_data, weather_seq, threat_ind,
-                vis_data, thermal_data, sensor_data, cumulative_failed_nodes,
-                current_cascade_timing, sequence_length,self.env_gen.fire_location,
+                line_flows, line_flows_q, cumulative_failed_nodes,
+                current_cascade_timing, sequence_length,
                 branch_status,
                 storage_mw, storage_mvar,
                 actual_interchange_mw, schedule_mw, ace_mw,
@@ -1259,9 +1203,8 @@ class PhysicsBasedGridSimulator:
     def _package_timestep_data(
         self, t, current_stress, voltages, angles, generation, node_reactive,
         load_values, equipment_temps, current_frequency, loading_ratios,
-        line_flows, line_flows_q, sat_data, weather_seq, threat_ind,
-        vis_data, thermal_data, sensor_data, cumulative_failed_nodes,
-        current_cascade_timing, sequence_length,fire_location,
+        line_flows, line_flows_q, cumulative_failed_nodes,
+        current_cascade_timing, sequence_length,
         branch_status,
         storage_mw=None, storage_mvar=None,
         actual_interchange_mw=0.0, schedule_mw=0.0, ace_mw=0.0,
@@ -1271,10 +1214,6 @@ class PhysicsBasedGridSimulator:
         _derate = (self.rating_derate if derate_t is None
                    else np.asarray(derate_t, dtype=np.float64))
         return {
-            'satellite_data': sat_data.astype(np.float32),
-            'weather_sequence': weather_seq.astype(np.float32),
-            'threat_indicators': threat_ind.astype(np.float32),
-
             # SCADA Data Format (28 features per node; 18-21 appended in
             # Phase 3 — reactive support: [18] cap status, [19] reactor
             # status, [20] SVC Q (MVar), [21] AVR setpoint (p.u.);
@@ -1368,10 +1307,6 @@ class PhysicsBasedGridSimulator:
                 load_values / (self.base_load + 1e-6),
             ]).astype(np.float32),
 
-            'visual_data': vis_data.astype(np.float16),
-            'thermal_data': thermal_data.astype(np.float16),
-            'sensor_data': sensor_data.astype(np.float16),
-
             # Edge Attribute Format (13 features per edge)
             # CRITICAL: append-only — never reorder. Loss targets hard-code
             # col 5 (config LAMBDA_FLOW); dataset.py normalizes 1, 5, 6, 8, 9,
@@ -1437,7 +1372,6 @@ class PhysicsBasedGridSimulator:
             'thermal_limits': self.thermal_limits.astype(np.float32),
             'power_injection': (generation - load_values).astype(np.float32),
             'reactive_injection': (node_reactive).astype(np.float32),
-            'fire_location': fire_location
         }
 
     

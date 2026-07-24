@@ -190,8 +190,7 @@ def validate_scenario(scenario: Dict) -> bool:
         # Check first timestep
         timestep = scenario['sequence'][0]
         required_timestep_keys = [
-            'scada_data', 'pmu_sequence', 'satellite_data',
-            'weather_sequence', 'node_labels'
+            'scada_data', 'pmu_sequence', 'node_labels'
         ]
         for key in required_timestep_keys:
             if key not in timestep:

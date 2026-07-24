@@ -160,14 +160,6 @@ Examples:
         '--start-batch', type=int, default=0,
         help='Starting batch number for output files (for parallel generation)'
     )
-
-    parser.add_argument(
-        '--video-folder',
-        type=str,
-        default=None,
-        help='Optional path to folder of wildfire videos (.mp4/.avi/.mov). '
-             'Each cascade scenario picks one video at random.'
-    )
     args = parser.parse_args()
     
     # Validate ratios
@@ -221,7 +213,6 @@ Examples:
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
         test_ratio=args.test_ratio,
-        video_folder=args.video_folder
     )
     
     # Print summary
