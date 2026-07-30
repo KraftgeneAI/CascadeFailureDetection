@@ -1002,6 +1002,9 @@ class PhysicsBasedGridSimulator:
             # the same simulation minute) and is consistent with the power flow
             # physics used throughout the rest of the simulation.
             # ----------------------------------------------------------------
+            # Per-timestep ground-truth cascade order (empty unless a wave fires
+            # this step). Each entry: {node, t_offset (min), reason, parent}.
+            cascade_events_t: List[Dict] = []
             if new_failures:
                 target_max_failures = min(
                     len(new_failures) + int(self.num_nodes * Settings.Simulation.CASCADE_MAX_SPREAD_FRACTION),
@@ -1036,8 +1039,23 @@ class PhysicsBasedGridSimulator:
                         cumulative_failed_nodes.add(fail_node)
                         generation[fail_node] = 0.0
                         load_values[fail_node] = 0.0
+                        # Preserve the intra-timestep cascade ORDER + sub-minute
+                        # offset (dropped from failure_record, which keeps only
+                        # the integer timestep) so the frontend can replay the
+                        # gradual spread within this step. Initial triggers have
+                        # offset 0.0 and parent None; propagated failures carry
+                        # the offset and the node that caused them.
+                        cascade_events_t.append({
+                            "node": int(fail_node),
+                            "t_offset": float(fail_time_offset),
+                            "reason": str(fail_reason),
+                            "parent": (int(fail_parent)
+                                       if fail_parent is not None else None),
+                        })
                         print(f"  [FAIL] Node {fail_node} failed at t={t} "
                               f"(reason: {fail_reason}, cascade offset: {fail_time_offset:.2f} min)")
+                # Chronological within the step (initial triggers first at 0.0).
+                cascade_events_t.sort(key=lambda e: e["t_offset"])
 
             current_cascade_timing = self._compute_cascade_timing(t, failure_record)
 
@@ -1064,6 +1082,7 @@ class PhysicsBasedGridSimulator:
                 storage_mw, storage_mvar,
                 actual_interchange_mw, schedule_mw, ace_mw,
                 derate_t,
+                cascade_events=cascade_events_t,
             )
             sequence.append(timestep_data)
 
@@ -1209,6 +1228,7 @@ class PhysicsBasedGridSimulator:
         storage_mw=None, storage_mvar=None,
         actual_interchange_mw=0.0, schedule_mw=0.0, ace_mw=0.0,
         derate_t=None,
+        cascade_events=None,
     ) -> Dict:
         """Package all data for a single timestep."""
         _derate = (self.rating_derate if derate_t is None
@@ -1360,6 +1380,15 @@ class PhysicsBasedGridSimulator:
             ], dtype=np.float32),
 
             'cascade_timing': current_cascade_timing,
+
+            # Ground-truth intra-timestep cascade order (empty list unless a
+            # wave fired this step). Ordered by t_offset; each entry is
+            # {node, t_offset (min within the step), reason, parent}. Lets the
+            # frontend replay the gradual spread (t=21.0 → 21.31 → …) instead of
+            # showing every wave node failing at once. Not a model feature —
+            # visualization/metadata only, so it is safe to omit from
+            # required_timestep_keys and ignored by dataset.py.
+            'cascade_events': list(cascade_events or []),
 
             # Phase 4 — RAS telemetry stream [N_SCHEMES, 3]:
             # [arming_status, monitored line loading, action_type]
