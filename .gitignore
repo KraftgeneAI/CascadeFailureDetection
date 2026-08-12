@@ -31,6 +31,7 @@
 !.gitignore
 # Allow git configuration files
 !.gitattributes
+!*.drawio
 
 # Ignore Python cache directories (even in allowed directories)
 **/__pycache__/

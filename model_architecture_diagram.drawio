@@ -1,0 +1,160 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="Model Architecture" id="model">
+    <mxGraphModel dx="1264" dy="768" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1000" pageHeight="860" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="inputs" parent="1" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;spacingLeft=10;spacingTop=6;fillColor=#EEEDFE;strokeColor=#7F77DD;fontColor=#26215C;fontStyle=1;" value="Inputs (batch)" vertex="1">
+          <mxGeometry height="86" width="700" x="131" y="50" as="geometry" />
+        </mxCell>
+        <mxCell id="in_scada" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7F77DD;fontColor=#26215C;fontSize=10;" value="scada_data [28]" vertex="1">
+          <mxGeometry height="22" width="150" x="143" y="78" as="geometry" />
+        </mxCell>
+        <mxCell id="in_pmu" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7F77DD;fontColor=#26215C;fontSize=10;" value="pmu_sequence" vertex="1">
+          <mxGeometry height="22" width="150" x="303" y="78" as="geometry" />
+        </mxCell>
+        <mxCell id="in_equip" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7F77DD;fontColor=#26215C;fontSize=10;" value="equipment_status" vertex="1">
+          <mxGeometry height="22" width="150" x="463" y="78" as="geometry" />
+        </mxCell>
+        <mxCell id="in_node" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7F77DD;fontColor=#26215C;fontSize=10;" value="node_features [154]" vertex="1">
+          <mxGeometry height="22" width="170" x="623" y="78" as="geometry" />
+        </mxCell>
+        <mxCell id="in_edge" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7F77DD;fontColor=#26215C;fontSize=10;" value="edge_attr [14]" vertex="1">
+          <mxGeometry height="22" width="120" x="143" y="106" as="geometry" />
+        </mxCell>
+        <mxCell id="in_ei" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7F77DD;fontColor=#26215C;fontSize=10;" value="edge_index" vertex="1">
+          <mxGeometry height="22" width="110" x="271" y="106" as="geometry" />
+        </mxCell>
+        <mxCell id="in_em" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7F77DD;fontColor=#26215C;fontSize=10;" value="edge_mask" vertex="1">
+          <mxGeometry height="22" width="110" x="389" y="106" as="geometry" />
+        </mxCell>
+        <mxCell id="in_ras" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7F77DD;fontColor=#26215C;fontSize=10;" value="ras_status" vertex="1">
+          <mxGeometry height="22" width="130" x="507" y="106" as="geometry" />
+        </mxCell>
+        <mxCell id="infra" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAECE7;strokeColor=#D85A30;fontColor=#712B13;" value="InfrastructureEmbedding&#xa;scada + pmu + equipment → D" vertex="1">
+          <mxGeometry height="48" width="230" x="36" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="nodemlp" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAECE7;strokeColor=#D85A30;fontColor=#712B13;" value="NodeFeatureMLP&#xa;node_features → D" vertex="1">
+          <mxGeometry height="48" width="220" x="298" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="edgeemb" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAECE7;strokeColor=#D85A30;fontColor=#712B13;" value="Edge embedding&#xa;Linear(14 → hidden)" vertex="1">
+          <mxGeometry height="48" width="180" x="560" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="rasenc" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAECE7;strokeColor=#D85A30;fontColor=#712B13;" value="RAS encoder&#xa;→ global context" vertex="1">
+          <mxGeometry height="48" width="170" x="792" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="fusion" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAECE7;strokeColor=#D85A30;fontColor=#712B13;" value="Fusion — MultiheadAttention (infra ⊕ node)&#xa;mean → LayerNorm  (+ RAS global context)  → fused [B,T,N,D]" vertex="1">
+          <mxGeometry height="54" width="440" x="150" y="290" as="geometry" />
+        </mxCell>
+        <mxCell id="tgnn" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAECE7;strokeColor=#D85A30;strokeWidth=2;fontColor=#712B13;fontStyle=1;" value="TemporalGNNCell — graph attention + LSTM&#xa;over T−1 timesteps  →  hidden hₜ  &amp;  cell cₜ" vertex="1">
+          <mxGeometry height="56" width="440" x="150" y="380" as="geometry" />
+        </mxCell>
+        <mxCell id="sgnn" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAECE7;strokeColor=#D85A30;fontColor=#712B13;" value="Graph Attention layers × N&#xa;residual + LayerNorm → refined h" vertex="1">
+          <mxGeometry height="52" width="330" x="540" y="500" as="geometry" />
+        </mxCell>
+        <mxCell id="cheads" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#D85A30;dashed=1;align=left;verticalAlign=top;spacingLeft=10;spacingTop=6;fontColor=#712B13;fontStyle=1;" value="Cascade heads  (from cₜ — long-range stress)" vertex="1">
+          <mxGeometry height="150" width="400" x="20" y="580" as="geometry" />
+        </mxCell>
+        <mxCell id="h_fp" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D85A30;fontColor=#712B13;fontSize=10;" value="FailureProbabilityHead" vertex="1">
+          <mxGeometry height="26" width="175" x="36" y="610" as="geometry" />
+        </mxCell>
+        <mxCell id="h_tm" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D85A30;fontColor=#712B13;fontSize=10;" value="TimingHead" vertex="1">
+          <mxGeometry height="26" width="175" x="228" y="610" as="geometry" />
+        </mxCell>
+        <mxCell id="h_rk" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D85A30;fontColor=#712B13;fontSize=10;" value="RiskHead" vertex="1">
+          <mxGeometry height="26" width="175" x="36" y="642" as="geometry" />
+        </mxCell>
+        <mxCell id="h_pr" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D85A30;fontColor=#712B13;fontSize=10;" value="ParentPredictionHead" vertex="1">
+          <mxGeometry height="26" width="175" x="228" y="642" as="geometry" />
+        </mxCell>
+        <mxCell id="cout" parent="1" style="text;html=1;align=center;fontColor=#0F6E56;fontSize=9;" value="→ failure_probability · cascade_timing · risk_scores · parent_logits" vertex="1">
+          <mxGeometry height="40" width="368" x="36" y="676" as="geometry" />
+        </mxCell>
+        <mxCell id="pheads" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#D85A30;dashed=1;align=left;verticalAlign=top;spacingLeft=10;spacingTop=6;fontColor=#712B13;fontStyle=1;" value="Physics heads  (from refined h — recent dynamics)" vertex="1">
+          <mxGeometry height="150" width="470" x="470" y="580" as="geometry" />
+        </mxCell>
+        <mxCell id="h_v" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D85A30;fontColor=#712B13;fontSize=10;" value="VoltageHead" vertex="1">
+          <mxGeometry height="26" width="140" x="486" y="610" as="geometry" />
+        </mxCell>
+        <mxCell id="h_t" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D85A30;fontColor=#712B13;fontSize=10;" value="TemperatureHead" vertex="1">
+          <mxGeometry height="26" width="150" x="642" y="610" as="geometry" />
+        </mxCell>
+        <mxCell id="h_f" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D85A30;fontColor=#712B13;fontSize=10;" value="FlowHead (per edge)" vertex="1">
+          <mxGeometry height="26" width="118" x="808" y="610" as="geometry" />
+        </mxCell>
+        <mxCell id="pout" parent="1" style="text;html=1;align=center;fontColor=#0F6E56;fontSize=9;" value="→ voltage_pred · temp_pred (per node) · flow_pred (per edge)" vertex="1">
+          <mxGeometry height="40" width="440" x="486" y="676" as="geometry" />
+        </mxCell>
+        <mxCell id="loss" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1F5EE;strokeColor=#1D9E75;fontColor=#0F6E56;fontStyle=1;" value="PhysicsInformedLoss&#xa;multi-task + physics constraints (training)" vertex="1">
+          <mxGeometry height="44" width="300" x="331" y="760" as="geometry" />
+        </mxCell>
+        <mxCell id="me1" edge="1" parent="1" source="in_scada" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeColor=#666666;exitX=0;exitY=0.5;exitDx=0;exitDy=0;" target="infra">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="90" y="89.05" />
+              <mxPoint x="90" y="150" />
+              <mxPoint x="151.05" y="150" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="me2" edge="1" parent="1" source="in_node" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeColor=#666666;exitX=1;exitY=0.5;exitDx=0;exitDy=0;" target="nodemlp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="me3" edge="1" parent="1" source="in_edge" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeColor=#666666;exitX=0.75;exitY=1;exitDx=0;exitDy=0;" target="edgeemb">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="me4" edge="1" parent="1" source="in_ras" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeColor=#666666;exitX=0.75;exitY=1;exitDx=0;exitDy=0;" target="rasenc">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="604.53" y="160" />
+              <mxPoint x="877.05" y="160" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="me5" edge="1" parent="1" source="infra" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeColor=#666666;" target="fusion">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="me6" edge="1" parent="1" source="nodemlp" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeColor=#666666;" target="fusion">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="me7" edge="1" parent="1" source="rasenc" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;dashed=1;strokeColor=#7F77DD;fontColor=#7F77DD;fontSize=9;exitX=0.25;exitY=1;exitDx=0;exitDy=0;" target="fusion" value="+ context">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="834.53" y="270" />
+              <mxPoint x="370" y="270" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="me8" edge="1" parent="1" source="fusion" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeColor=#666666;" target="tgnn">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="me9" edge="1" parent="1" source="edgeemb" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;dashed=1;strokeColor=#7F77DD;fontColor=#7F77DD;fontSize=9;" target="tgnn" value="edge feats">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="650" y="360" />
+              <mxPoint x="370" y="360" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="me10" edge="1" parent="1" source="edgeemb" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;dashed=1;strokeColor=#7F77DD;" target="sgnn">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="me11" edge="1" parent="1" source="tgnn" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeColor=#534AB7;fontColor=#534AB7;fontStyle=1;" target="cheads" value="cₜ">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="me12" edge="1" parent="1" source="tgnn" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeColor=#534AB7;fontColor=#534AB7;fontStyle=1;" target="sgnn" value="hₜ">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="me13" edge="1" parent="1" source="sgnn" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeColor=#666666;" target="pheads">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="me14" edge="1" parent="1" source="cheads" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeColor=#666666;" target="loss">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="me15" edge="1" parent="1" source="pheads" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;strokeColor=#666666;" target="loss">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

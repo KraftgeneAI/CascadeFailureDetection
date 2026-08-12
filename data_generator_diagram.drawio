@@ -1,0 +1,92 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="Data Generator" id="datagen">
+    <mxGraphModel dx="1201" dy="730" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="960" pageHeight="800" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="config" parent="1" style="rounded=1;whiteSpace=wrap;html=1;align=left;verticalAlign=top;spacingLeft=10;spacingTop=8;fillColor=#EEEDFE;strokeColor=#7F77DD;fontColor=#26215C;" value="config.py — Settings&#xa;(read by all)&#xa;&#xa;· PowerSystem&#xa;· Thermal&#xa;· Cascade&#xa;· Simulation&#xa;· Interchange&#xa;· Storage&#xa;· Outage&#xa;· Dataset" vertex="1">
+          <mxGeometry height="410" width="160" x="20" y="150" as="geometry" />
+        </mxCell>
+        <mxCell id="cli" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EEEDFE;strokeColor=#7F77DD;fontColor=#26215C;fontStyle=1;" value="multimodal_data_generator.py · CLI" vertex="1">
+          <mxGeometry height="36" width="360" x="340" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="orch" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EEEDFE;strokeColor=#7F77DD;fontColor=#26215C;" value="scenario.py — ScenarioOrchestrator&#xa;generate_dataset_from_config · loops N scenarios · batching" vertex="1">
+          <mxGeometry height="48" width="440" x="300" y="72" as="geometry" />
+        </mxCell>
+        <mxCell id="sim" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EEEDFE;strokeColor=#534AB7;strokeWidth=2;fontColor=#26215C;fontStyle=1;" value="simulator.py — PhysicsBasedGridSimulator (orchestrator)&#xa;generate_scenario · owns all components · runs the per-timestep loop" vertex="1">
+          <mxGeometry height="50" width="528" x="256" y="136" as="geometry" />
+        </mxCell>
+        <mxCell id="setup" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAECE7;strokeColor=#D85A30;fontColor=#712B13;" value="Grid setup — topology.py · grid_state.py&#xa;GridTopologyGenerator · NodePropertyInitializer · build_topology_block" vertex="1">
+          <mxGeometry height="46" width="528" x="256" y="202" as="geometry" />
+        </mxCell>
+        <mxCell id="engine" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#BBBBBB;dashed=1;align=left;verticalAlign=top;spacingLeft=10;spacingTop=6;fontColor=#993C1D;fontStyle=1;" value="Per-timestep engine (inside the loop)" vertex="1">
+          <mxGeometry height="238" width="600" x="220" y="264" as="geometry" />
+        </mxCell>
+        <mxCell id="physicsBox" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D85A30;align=center;verticalAlign=top;spacingTop=6;fontColor=#712B13;fontStyle=1;" value="physics.py — solvers" vertex="1">
+          <mxGeometry height="196" width="286" x="238" y="296" as="geometry" />
+        </mxCell>
+        <mxCell id="pf" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAECE7;strokeColor=#D85A30;fontColor=#712B13;" value="PowerFlowSimulator&#xa;AC power flow (PyPSA)" vertex="1">
+          <mxGeometry height="46" width="258" x="252" y="324" as="geometry" />
+        </mxCell>
+        <mxCell id="freq" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAECE7;strokeColor=#D85A30;fontColor=#712B13;" value="FrequencyDynamicsSimulator&#xa;system frequency" vertex="1">
+          <mxGeometry height="44" width="258" x="252" y="378" as="geometry" />
+        </mxCell>
+        <mxCell id="therm" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAECE7;strokeColor=#D85A30;fontColor=#712B13;" value="ThermalDynamicsSimulator&#xa;equipment temperature" vertex="1">
+          <mxGeometry height="44" width="258" x="252" y="430" as="geometry" />
+        </mxCell>
+        <mxCell id="controllers" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D85A30;align=left;verticalAlign=top;spacingLeft=10;spacingTop=6;fontColor=#712B13;" value="Controllers&#xa;&#xa;· taps.py — LTC / PAR taps&#xa;· shunts.py — cap / reactor / SVC / AVR&#xa;· interchange.py — storage + ACE&#xa;· outages.py — schedule + de-rate&#xa;· ras.py — RAS arming / action" vertex="1">
+          <mxGeometry height="196" width="270" x="536" y="296" as="geometry" />
+        </mxCell>
+        <mxCell id="cascade" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAECE7;strokeColor=#D85A30;fontColor=#712B13;" value="cascade.py — CascadeSimulator · propagate_cascade_physics&#xa;BFS over overloads · re-runs PowerFlowSimulator per failure" vertex="1">
+          <mxGeometry height="46" width="528" x="256" y="516" as="geometry" />
+        </mxCell>
+        <mxCell id="pkg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EEEDFE;strokeColor=#7F77DD;fontColor=#26215C;" value="_package_timestep_data → _package_scenario&#xa;scada_data[28] · edge_attr[14] · ras_status · cascade_events · topology block" vertex="1">
+          <mxGeometry height="52" width="528" x="256" y="578" as="geometry" />
+        </mxCell>
+        <mxCell id="out" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F1EFE8;strokeColor=#BBBBBB;fontColor=#333333;fontStyle=1;" value="utils.py — save_scenarios&#xa;scenarios_batch_*.pkl" vertex="1">
+          <mxGeometry height="44" width="368" x="336" y="646" as="geometry" />
+        </mxCell>
+        <mxCell id="orphan" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#CCCCCC;dashed=1;fontColor=#999999;" value="environmental.py · robotic.py — orphaned (removed from pipeline)" vertex="1">
+          <mxGeometry height="34" width="360" x="220" y="706" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" edge="1" parent="1" source="cli" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeColor=#666666;" target="orch">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" edge="1" parent="1" source="orch" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeColor=#666666;" target="sim">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" edge="1" parent="1" source="sim" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeColor=#666666;" target="setup">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" edge="1" parent="1" source="setup" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeColor=#666666;" target="engine">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" edge="1" parent="1" source="engine" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeColor=#666666;" target="cascade">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" edge="1" parent="1" source="cascade" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeColor=#666666;" target="pkg">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" edge="1" parent="1" source="pkg" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeColor=#666666;" target="out">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="c1" edge="1" parent="1" source="config" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=open;dashed=1;strokeColor=#7F77DD;fontColor=#7F77DD;fontSize=9;" target="sim" value="parameterizes">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="c2" edge="1" parent="1" source="config" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=open;dashed=1;strokeColor=#7F77DD;" target="engine">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="loop" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=open;dashed=1;strokeColor=#7F77DD;fontColor=#7F77DD;fontSize=9;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" target="orch" value="save → next scenario">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="870" y="682" />
+              <mxPoint x="870" y="96" />
+            </Array>
+            <mxPoint x="704" y="682" as="sourcePoint" />
+            <mxPoint x="740" y="110" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
