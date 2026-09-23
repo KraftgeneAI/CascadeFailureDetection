@@ -27,7 +27,7 @@ from pathlib import Path
 # Import from refactored modules
 from cascade_prediction.models import UnifiedCascadePredictionModel, PhysicsInformedLoss
 from cascade_prediction.data import CascadeDataset, collate_cascade_batch
-from cascade_prediction.training import Trainer
+from cascade_prediction.training import Trainer, RunTracker, data_fingerprint, git_sha
 from cascade_prediction.data.generator.config import Settings
 
 
@@ -142,7 +142,29 @@ def main():
     print(f"  Mixed precision (AMP): {USE_AMP}")
     print(f"  Early stopping patience: {args.patience}")
     print(f"  Resume training: {args.resume is not None}")
-    
+
+    # ── MLOps: start an experiment-tracking run ────────────────────────────
+    # No-op unless MLflow is installed. Logs to ./mlruns locally, or to an
+    # Azure ML workspace when MLFLOW_TRACKING_URI points at one (and reuses the
+    # job's run automatically when executed inside an Azure ML job).
+    _here = os.path.dirname(os.path.abspath(__file__))
+    _data_version = os.getenv("DATA_VERSION") or data_fingerprint(
+        f"{DATA_DIR}/train", f"{DATA_DIR}/val"
+    )
+    run = RunTracker(
+        experiment=os.getenv("MLFLOW_EXPERIMENT", "cascade-prediction"),
+        run_name=os.getenv("MLFLOW_RUN_NAME"),
+        tags={
+            "git_sha": git_sha(_here) or "unknown",
+            "data_version": _data_version,
+            "stage": "train",
+            "resumed": bool(args.resume),
+        },
+    ).start()
+    run.log_params({**vars(args), "device": DEVICE.type, "use_amp": USE_AMP,
+                    "data_version": _data_version})
+    print(f"  Data version (fingerprint): {_data_version}")
+
     # Load datasets
     print(f"\nLoading datasets...")
     try:
@@ -198,6 +220,13 @@ def main():
         print(f"  Positive samples: {positive_count} ({positive_count/total_samples*100:.1f}%)")
         print(f"  Negative samples: {negative_count} ({negative_count/total_samples*100:.1f}%)")
         print(f"  Calculated weights -> Pos: {pos_weight_val:.2f}, Neg: {neg_weight_val:.2f}")
+
+    run.log_params({
+        "train_samples": len(train_dataset),
+        "val_samples": len(val_dataset),
+        "positive_samples": int(positive_count),
+        "negative_samples": int(len(train_dataset) - positive_count),
+    })
     
     # Create sampler
     sampler = WeightedRandomSampler(
@@ -244,6 +273,7 @@ def main():
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  Total parameters: {total_params:,}")
     print(f"  Trainable parameters: {trainable_params:,}")
+    run.log_params({"total_params": total_params, "trainable_params": trainable_params})
     
     # Initialize loss function with dynamic calibration
     print(f"\nInitializing loss function...")
@@ -294,6 +324,7 @@ def main():
         print(f"    Active flow:     {calibrated_lambdas.get('lambda_active_flow', 0.1) :.6f}")
         print(f"    Voltage:         {calibrated_lambdas.get('lambda_voltage', 1.0) :.6f}")
         print(f"    Capacity:        {calibrated_lambdas.get('lambda_capacity', 0.05) :.6f}")
+        run.log_params({f"calib_{k}": v for k, v in calibrated_lambdas.items()})
     else:
         print("[WARNING] Calibration failed, using default lambda values")
         criterion = PhysicsInformedLoss(
@@ -344,7 +375,8 @@ def main():
         use_amp=USE_AMP,
         model_outputs_logits=False,  # Model outputs probabilities, not logits
         base_mva=args.base_mva,
-        base_freq=args.base_freq
+        base_freq=args.base_freq,
+        tracker=run
     )
     
     # Resume from checkpoint if specified
@@ -373,8 +405,11 @@ def main():
     print("STARTING TRAINING")
     print(f"{'='*80}\n")
     
-    history = trainer.train(num_epochs=NUM_EPOCHS)
-    
+    try:
+        history = trainer.train(num_epochs=NUM_EPOCHS)
+    finally:
+        run.end()
+
     print("\n" + "="*80)
     print("TRAINING COMPLETED SUCCESSFULLY!")
     print("="*80)

@@ -21,5 +21,9 @@ Functions:
 
 from .trainer import Trainer
 from .calibration import calibrate_loss_weights, apply_calibrated_weights
+from .tracking import RunTracker, data_fingerprint, git_sha
 
-__all__ = ['Trainer', 'calibrate_loss_weights', 'apply_calibrated_weights']
+__all__ = [
+    'Trainer', 'calibrate_loss_weights', 'apply_calibrated_weights',
+    'RunTracker', 'data_fingerprint', 'git_sha',
+]

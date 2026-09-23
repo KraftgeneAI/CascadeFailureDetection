@@ -44,3 +44,12 @@
 **/*.egg-info/
 **/dist/
 **/build/
+
+# MLOps (Stage 1): model binaries are versioned in the MLflow / Azure ML model
+# registry, not in git. Keep the small run summaries (curves png, history json).
+#checkpoints/*.pth
+# Local MLflow file store and Azure ML CLI scratch
+#mlruns/
+#mlflow.db
+#.azureml/
+#outputs/

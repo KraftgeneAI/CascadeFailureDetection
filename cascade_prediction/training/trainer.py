@@ -47,7 +47,8 @@ class Trainer:
         use_amp: bool = False,
         model_outputs_logits: bool = False,
         base_mva: float = Settings.Dataset.BASE_MVA,
-        base_freq: float = Settings.Dataset.BASE_FREQUENCY
+        base_freq: float = Settings.Dataset.BASE_FREQUENCY,
+        tracker: Optional["object"] = None
     ):
         """
         Initialize trainer.
@@ -93,7 +94,14 @@ class Trainer:
         self.model_outputs_logits = model_outputs_logits
         self.base_mva = base_mva
         self.base_freq = base_freq
-        
+
+        # Experiment tracker (MLflow/Azure ML). Defaults to a disabled, no-op
+        # RunTracker so training behaves identically when tracking is off.
+        if tracker is None:
+            from .tracking import RunTracker
+            tracker = RunTracker(enabled=False)
+        self.tracker = tracker
+
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
         
@@ -794,6 +802,26 @@ class Trainer:
             self.history['train_risk_mse'].append(train_metrics['risk_mse'])
             self.history['val_risk_mse'].append(val_metrics['risk_mse'])
 
+            # ── MLOps: stream this epoch's metrics to the tracker ──────────
+            self.tracker.log_metrics({
+                'train_loss': train_metrics['loss'],
+                'val_loss': val_metrics['loss'],
+                'train_cascade_f1': train_metrics['cascade_f1'],
+                'val_cascade_f1': val_metrics['cascade_f1'],
+                'train_node_f1': train_metrics['node_f1'],
+                'val_node_f1': val_metrics['node_f1'],
+                'val_cascade_precision': val_metrics['cascade_precision'],
+                'val_cascade_recall': val_metrics['cascade_recall'],
+                'val_node_precision': val_metrics['node_precision'],
+                'val_node_recall': val_metrics['node_recall'],
+                'val_time_mae': val_metrics['time_mae'],
+                'val_risk_mse': val_metrics['risk_mse'],
+                'val_timing_loss': val_metrics['timing_loss'],
+                'learning_rate': current_lr,
+                'best_cascade_threshold': val_metrics['best_cascade_threshold'],
+                'best_node_threshold': val_metrics['best_node_threshold'],
+            }, step=epoch)
+
             print(f"\nEpoch {epoch + 1} Results:")
             print(f"  Train Loss: {train_metrics['loss']:.4f} | Val Loss: {val_metrics['loss']:.4f}")
             
@@ -869,7 +897,21 @@ class Trainer:
         
         self.save_history()
         self.plot_training_curves()
-        
+
+        # ── MLOps: push run summary + artifacts to the tracker ────────────
+        self.tracker.log_metrics({
+            'best_val_loss': self.best_val_loss,
+            'best_val_f1': self.best_val_f1,
+            'best_val_timing_loss': self.best_val_timing_loss,
+        })
+        for _artifact in (
+            f"{self.output_dir}/training_curves.png",
+            f"{self.output_dir}/training_history.json",
+            f"{self.output_dir}/best_f1_model.pth",
+            f"{self.output_dir}/best_model.pth",
+        ):
+            self.tracker.log_artifact(_artifact)
+
         print(f"\n{'='*80}")
         print(f"Training complete!")
         print(f"  Best validation Timing Loss: {self.best_val_timing_loss:.4f}")
