@@ -20,6 +20,7 @@ from tqdm import tqdm
 import numpy as np
 
 from cascade_prediction.data.generator.config import Settings
+from cascade_prediction import contract as _contract
 
 
 class Trainer:
@@ -175,18 +176,22 @@ class Trainer:
 
         # Physics supervision: held-out last timestep of raw SCADA / edge_attr.
         # The LSTM sees timesteps 0..T-2; timestep T-1 is the prediction target.
-        scada     = batch_device.get('scada_data')   # [B, T, N, 18]
-        edge_attr = batch_device.get('edge_attr')    # [B, T, E, 7] or [B, E, 7]
+        # Columns are looked up by name in the data contract (DC-023).
+        scada     = batch_device.get('scada_data')   # [B, T, N, SCADA.width]
+        edge_attr = batch_device.get('edge_attr')    # [B, T, E, EDGE_ATTR.width] or [B, E, ...]
+        _v = _contract.SCADA.idx("voltage")
+        _temp = _contract.SCADA.idx("equipment_temp")
+        _flow = _contract.EDGE_ATTR.idx("p_flow")
 
         if scada is not None and scada.dim() == 4:
-            targets['physics_voltage_target'] = scada[:, -1, :, 0]   # p.u. voltage
-            targets['physics_temp_target']    = scada[:, -1, :, 5]   # temperature °C
+            targets['physics_voltage_target'] = scada[:, -1, :, _v]      # p.u. voltage
+            targets['physics_temp_target']    = scada[:, -1, :, _temp]   # temperature °C
 
         if edge_attr is not None:
             if edge_attr.dim() == 4:
-                targets['physics_flow_target'] = edge_attr[:, -1, :, 5]   # MW active flow
+                targets['physics_flow_target'] = edge_attr[:, -1, :, _flow]   # active flow (p.u.)
             elif edge_attr.dim() == 3:
-                targets['physics_flow_target'] = edge_attr[:, :, 5]
+                targets['physics_flow_target'] = edge_attr[:, :, _flow]
 
         return targets
     
@@ -715,7 +720,8 @@ class Trainer:
             'best_val_mae': self.best_val_mae,
             'best_val_timing_loss': self.best_val_timing_loss,
             'cascade_threshold': self.cascade_threshold,
-            'node_threshold': self.node_threshold
+            'node_threshold': self.node_threshold,
+            **_contract.contract_stamp(),   # DC-030
         }
         
         filepath = os.path.join(self.output_dir, filename)
@@ -741,6 +747,7 @@ class Trainer:
         """
         filepath = os.path.join(self.output_dir, filename)
         checkpoint = torch.load(filepath, map_location=self.device)
+        _contract.check_checkpoint(checkpoint, source=filepath)   # DC-031
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -851,7 +858,8 @@ class Trainer:
                     'node_f1': val_metrics['node_f1'],
                     'cascade_threshold': self.cascade_threshold,
                     'node_threshold': self.node_threshold,
-                    'history': self.history
+                    'history': self.history,
+                    **_contract.contract_stamp(),   # DC-030
                 }, f"{self.output_dir}/best_f1_model.pth")
                 
                 print(f"  ★ SAVED BEST F1 MODEL (Avg F1: {current_f1:.4f} | cF1: {val_metrics['cascade_f1']:.3f}, nF1: {val_metrics['node_f1']:.3f})")
@@ -868,7 +876,8 @@ class Trainer:
                     'val_timing_loss': val_metrics['timing_loss'], 
                     'cascade_threshold': self.cascade_threshold,
                     'node_threshold': self.node_threshold,
-                    'history': self.history
+                    'history': self.history,
+                    **_contract.contract_stamp(),   # DC-030
                 }, f"{self.output_dir}/best_model.pth")
                 print(f"  ✓ Saved best model (New best Val Loss: {val_metrics['loss']:.4f})")
             else:
@@ -892,7 +901,8 @@ class Trainer:
                 'cascade_threshold': self.cascade_threshold,
                 'node_threshold': self.node_threshold,
                 
-                'history': self.history
+                'history': self.history,
+                **_contract.contract_stamp(),   # DC-030
             }, f"{self.output_dir}/latest_checkpoint.pth")
         
         self.save_history()

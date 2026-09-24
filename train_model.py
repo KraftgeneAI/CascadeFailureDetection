@@ -29,6 +29,7 @@ from cascade_prediction.models import UnifiedCascadePredictionModel, PhysicsInfo
 from cascade_prediction.data import CascadeDataset, collate_cascade_batch
 from cascade_prediction.training import Trainer, RunTracker, data_fingerprint, git_sha
 from cascade_prediction.data.generator.config import Settings
+from cascade_prediction import contract as _contract
 
 
 def main():
@@ -159,6 +160,9 @@ def main():
             "data_version": _data_version,
             "stage": "train",
             "resumed": bool(args.resume),
+            # Data contract the model is trained against (spec DC-030).
+            "schema_version": _contract.SCHEMA_VERSION,
+            "layout_hash": _contract.LAYOUT_HASH,
         },
     ).start()
     run.log_params({**vars(args), "device": DEVICE.type, "use_amp": USE_AMP,

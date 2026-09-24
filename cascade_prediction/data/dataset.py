@@ -24,6 +24,7 @@ from tqdm import tqdm
 import json
 
 from .generator.config import Settings
+from .. import contract as _contract
 
 from .preprocessing import (
     normalize_power,
@@ -53,7 +54,8 @@ class CascadeDataset(Dataset):
         mode: str = 'last_timestep',
         base_mva: float = Settings.Dataset.BASE_MVA,
         base_frequency: float = Settings.Dataset.BASE_FREQUENCY,
-        fixed_window: Optional[Tuple[int, int]] = None
+        fixed_window: Optional[Tuple[int, int]] = None,
+        contract_mode: str = "strict",
     ):
         """
         Initialize dataset from a directory of scenario files.
@@ -66,12 +68,26 @@ class CascadeDataset(Dataset):
             fixed_window: Optional (start_idx, end_idx) that bypasses random
                 sliding-window truncation. Used for deterministic streaming
                 inference on an explicit window (e.g. steps 0..t).
+            contract_mode: Data-contract policy (spec specs/data-contract,
+                decision D3).
+                'strict'  (default, training) — every scenario must be
+                          stamped with the current layout or certified;
+                          anything else raises ContractError (DC-020).
+                'migrate' (backend / inference) — legacy layouts are
+                          upgraded through contract.migrate_timestep, and
+                          each migration is logged (DC-021).
         """
+        if contract_mode not in ("strict", "migrate"):
+            raise ValueError(f"contract_mode must be 'strict' or 'migrate', got {contract_mode!r}")
         self.data_dir = Path(data_dir)
         self.mode = mode
         self.base_mva = base_mva
         self.base_frequency = base_frequency
         self.fixed_window = fixed_window
+        self.contract_mode = contract_mode
+        self._norm_constants = {
+            "INTERCHANGE_SCALE_MW": float(Settings.Interchange.INTERCHANGE_SCALE_MW),
+        }
         
         # Find all scenario files
         print(f"Indexing scenarios from: {data_dir}")
@@ -136,7 +152,21 @@ class CascadeDataset(Dataset):
             print(f"  Cascade scenarios: {positive_count} ({positive_count/total*100:.1f}%)")
             print(f"  Normal scenarios:  {total - positive_count} ({(total-positive_count)/total*100:.1f}%)")
         print(f"Ultra-memory-efficient mode: Loading 1 file per sample.")
-    
+
+        # Fail at construction, not mid-epoch, when training on data that
+        # doesn't match the current contract (DC-020).
+        if self.contract_mode == "strict":
+            for path in self.scenario_files:
+                try:
+                    scenarios = _contract.load_scenarios(path)
+                except Exception:
+                    continue          # unreadable files are handled per item
+                for scenario in scenarios:
+                    _contract.require_current(scenario, path)
+                break                 # checking the first readable file is enough here
+        print(f"Data contract: mode={self.contract_mode}, schema "
+              f"{_contract.SCHEMA_VERSION}, layout {_contract.LAYOUT_HASH}")
+
     def __len__(self) -> int:
         return len(self.scenario_files)
 
@@ -154,7 +184,10 @@ class CascadeDataset(Dataset):
         except Exception as e:
             print(f"Error loading {scenario_file}: {e}. Returning empty dict.")
             return {}
-        
+
+        if self.contract_mode == "strict":
+            _contract.require_current(scenario, scenario_file)   # DC-020
+
         # Process based on format
         if 'sequence' in scenario and 'metadata' in scenario:
             sequence = scenario['sequence']
@@ -223,159 +256,55 @@ class CascadeDataset(Dataset):
         num_edges = edge_index.shape[1]
         timing_shape = last_step.get('cascade_timing', np.zeros(num_nodes)).shape
 
-        # Process each timestep
+        # Process each timestep. Column positions, legacy migration and the
+        # per-column normalization policy all come from the data contract
+        # (specs/data-contract, DC-021/DC-022) — no hard-coded indices here.
+        C = _contract
+        _masked_scada = [C.SCADA.idx(n) for n in C.MODEL_MASKED_SCADA]
+        _e_thermal = C.EDGE_ATTR.idx("thermal_limit")
+        _e_pflow = C.EDGE_ATTR.idx("p_flow")
         for i, ts in enumerate(sequence):
-            # SCADA data with normalization (now 18 features with failure proximity ratios)
-            scada_data_raw = ts.get('scada_data', np.zeros((num_nodes, 28))).astype(np.float32)
-            scada_w = scada_data_raw.shape[1]   # normalize only GENERATED cols
+            if self.contract_mode == "migrate":
+                ts = C.migrate_timestep(
+                    ts, n_ras_schemes=Settings.RAS.N_SCHEMES,
+                    context=os.path.basename(str(self.data_dir)))
+            for key in (C.SCADA.key, C.PMU.key, C.EQUIPMENT.key, C.EDGE_ATTR.key, C.RAS_STATUS.key):
+                if key not in ts:
+                    raise C.ContractError(f"timestep {i} is missing '{key}'")
 
-            if scada_data_raw.shape[1] >= 6:
-                scada_data_raw[:, 2] = normalize_power(scada_data_raw[:, 2], self.base_mva)
-                scada_data_raw[:, 3] = normalize_power(scada_data_raw[:, 3], self.base_mva)
-                scada_data_raw[:, 4] = normalize_power(scada_data_raw[:, 4], self.base_mva)
-            if scada_w >= 28:
-                # Phase 5 columns. Per-column policy (plan §3 requires this to
-                # be explicit for every new column):
-                #   [22] storage SOC fraction — already 0-1, RAW.
-                #   [23] storage MW  — normalize on base MVA (signed).
-                #   [24] storage MVAr — normalize on base MVA (signed).
-                #   [25-27] interchange / schedule / ACE — system-wide MW
-                #       broadcast; divide by INTERCHANGE_SCALE_MW so a full
-                #       schedule block lands near unit scale. No loss
-                #       supervises these; they are context features.
-                # [MISO RTO-SPEC-006: energy storage resources; tie-line flows
-                #  & net actual interchange; dynamic schedules]
-                scada_data_raw[:, 23] = normalize_power(scada_data_raw[:, 23], self.base_mva)
-                scada_data_raw[:, 24] = normalize_power(scada_data_raw[:, 24], self.base_mva)
-                _isc = float(getattr(
-                    getattr(Settings, 'Interchange', None),
-                    'INTERCHANGE_SCALE_MW', 1000.0))
-                scada_data_raw[:, 25:28] = scada_data_raw[:, 25:28] / _isc
-            if scada_data_raw.shape[1] >= 22:
-                # Phase 3 columns: [18]/[19] bank statuses binary — raw;
-                # [20] SVC Q in MVar — normalize; [21] AVR setpoint p.u. — raw.
-                # [MISO RTO-SPEC-006: voltage-regulation equipment status]
-                scada_data_raw[:, 20] = normalize_power(scada_data_raw[:, 20], self.base_mva)
-            elif scada_data_raw.shape[1] == 18:
-                # Legacy pre-Phase-3 scenarios: no reactive-support devices —
-                # statuses 0, SVC 0, AVR 1.0 p.u. on generator buses (type is
-                # SCADA col 11), 0 elsewhere.
-                is_gen = (scada_data_raw[:, 11] == 1).astype(np.float32)
-                pad = np.column_stack([
-                    np.zeros((scada_data_raw.shape[0], 3), dtype=np.float32),
-                    is_gen * 1.0,
-                ]).astype(np.float32)
-                scada_data_raw = np.concatenate([scada_data_raw, pad], axis=1)
-            if scada_data_raw.shape[1] == 22:
-                # Legacy pre-Phase-5: no storage and no ties. SOC/MW/MVAr are
-                # 0, and with no tie lines the net actual interchange of a
-                # self-contained island is identically 0 — so schedule and ACE
-                # are 0 too. Zeros are already in normalized scale.
-                scada_data_raw = np.concatenate([
-                    scada_data_raw,
-                    np.zeros((scada_data_raw.shape[0], 6), dtype=np.float32),
-                ], axis=1)
-            
-            # Keep all 18 features, update time_ratio to be relative to window
-            scada_data = scada_data_raw.copy()
-            if scada_data.shape[1] > 12:
-                # FIX: Use ABSOLUTE position (start_idx + i) / len(sequence_original) instead
-                # of relative window position.  This is critical for timing prediction: the model
-                # must know *where in the actual scenario* it is so it can reason "I am at t=0.6
-                # of the full sequence, failures typically occur at t=0.8–0.97, therefore predict
-                # ~0.85".  The old relative encoding gave 0→1 regardless of where the truncated
-                # window started, making the model believe it was always at the beginning.
-                # We use len(sequence_original) (per-scenario actual length) because each scenario
-                # may have a different number of timesteps.
-                # scada_data[:, 12] = (start_idx + i) / max(1.0, float(len(sequence_original)))
-                scada_data[:,12]=0
-                scada_data[:,13]=0
-                # scada_data[:, 13:18] = 0
-                # 13: stress_level - CRITICAL for prediction!
-                # 14: voltage_ratio (voltage / voltage_failure_threshold)
-                # 15: temp_ratio (temp / temp_failure_threshold)
-                # 16: freq_ratio (freq / freq_failure_threshold)
-                # 17: loading_ratio (loading / loading_failure_threshold)
-                
+            # SCADA: normalize by policy, then hide absolute-time / scenario-
+            # level columns from the model (time_ratio, stress_level).
+            scada_data = C.normalize_array(
+                C.SCADA, ts[C.SCADA.key], base_mva=self.base_mva,
+                base_frequency=self.base_frequency, constants=self._norm_constants)
+            scada_data[:, _masked_scada] = 0
             data_arrays['scada_data'].append(to_tensor(scada_data))
-            
-            # PMU data with normalization
-            pmu_data = ts.get('pmu_sequence', np.zeros((num_nodes, 8))).astype(np.float32)
-            if pmu_data.shape[1] >= 6:
-                pmu_data[:, 5] = normalize_frequency(pmu_data[:, 5], self.base_frequency)
-            data_arrays['pmu_sequence'].append(to_tensor(pmu_data))
-            
-            data_arrays['equipment_status'].append(to_tensor(ts.get('equipment_status', np.zeros((num_nodes, 10)))))
 
-            # Per-timestep edge attributes — cols 5-6 (line_flows, line_flows_q),
-            # col 7 (branch_status), and cols 11-12 (tap position/angle) are
-            # dynamic and must be collected per step.
-            ea = ts.get('edge_attr', np.zeros((num_edges, 13))).astype(np.float32)
-            orig_w = ea.shape[1]   # normalize only GENERATED columns; backfills
-                                   # are built directly in normalized scale
-            if orig_w >= 7:
-                ea[:, 1] = normalize_power(ea[:, 1], self.base_mva)   # thermal_limits (normal rating)
-                ea[:, 5] = normalize_power(ea[:, 5], self.base_mva)   # line_flows_p
-                ea[:, 6] = normalize_power(ea[:, 6], self.base_mva)   # line_flows_q
-            if orig_w >= 10:
-                # Phase 1 columns: [7] branch_status — leave RAW. Phase 6 made
-                # it TERNARY (1 closed / 0 forced-open / -1 planned-open); the
-                # values are already in [-1, 1] so no scaling is needed, and
-                # anything masking on it must test == 1, not truthiness.
-                # [MISO RTO-SPEC-006: col 7 → switching-device open/closed
-                #  status; cols 8–9 → line ratings normal/emergency/load-dump]
-                ea[:, 8] = normalize_power(ea[:, 8], self.base_mva)   # emergency (LEP) rating
-                ea[:, 9] = normalize_power(ea[:, 9], self.base_mva)   # load-dump rating
-            if orig_w >= 13:
-                # Phase 2 columns: [10] branch_type is categorical — raw.
-                # Normalize taps into ~[-1, 1]: position by max steps (16),
-                # angle by max shift (30°).
-                # [MISO RTO-SPEC-006: LTC tap positions / PAR tap positions]
-                ea[:, 11] = ea[:, 11] / 16.0
-                ea[:, 12] = ea[:, 12] / 30.0
-            if orig_w == 7:
-                # Legacy pre-Phase-1: backfill cols 7-9 — breaker closed,
-                # tiers as nominal multiples of the (already normalized)
-                # normal rating (mid-range of the Phase 1 factors).
-                backfill = np.column_stack([
-                    np.ones(ea.shape[0], dtype=np.float32),   # branch_status = closed
-                    ea[:, 1] * 1.22,                          # emergency (LEP)
-                    ea[:, 1] * 1.47,                          # load-dump
-                ]).astype(np.float32)
-                ea = np.concatenate([ea, backfill], axis=1)
-            if ea.shape[1] == 10:
-                # Pre-Phase-2: backfill cols 10-12 — all plain lines,
-                # neutral taps (zeros are already normalized-scale).
-                ea = np.concatenate([
-                    ea, np.zeros((ea.shape[0], 3), dtype=np.float32)], axis=1)
-            if ea.shape[1] == 13:
-                # Pre-Phase-5: backfill col 13 — no branch is a tie line.
-                # Binary flag, raw (no normalization), so zeros are correct.
-                # [MISO RTO-SPEC-006: tie-line flows & net actual interchange]
-                ea = np.concatenate([
-                    ea, np.zeros((ea.shape[0], 1), dtype=np.float32)], axis=1)
+            pmu_data = C.normalize_array(
+                C.PMU, ts[C.PMU.key], base_mva=self.base_mva,
+                base_frequency=self.base_frequency, constants=self._norm_constants)
+            data_arrays['pmu_sequence'].append(to_tensor(pmu_data))
+
+            equip = C.normalize_array(
+                C.EQUIPMENT, ts[C.EQUIPMENT.key], base_mva=self.base_mva,
+                base_frequency=self.base_frequency, constants=self._norm_constants)
+            data_arrays['equipment_status'].append(to_tensor(equip))
+
+            # Per-timestep edge attributes (flows, branch status and taps are
+            # dynamic, so they are collected every step).
+            ea = C.normalize_array(
+                C.EDGE_ATTR, ts[C.EDGE_ATTR.key], base_mva=self.base_mva,
+                base_frequency=self.base_frequency, constants=self._norm_constants)
             data_arrays['edge_attr'].append(to_tensor(ea))
 
-            # Phase 4 — RAS arming telemetry [N_RAS, 3]. Legacy scenarios
-            # have no schemes: all-Available, zero loading, zero action.
-            # [MISO RTO-SPEC-006: RAS arming status]
-            ras = ts.get('ras_status')
-            if ras is None:
-                ras = np.zeros(
-                    (Settings.RAS.N_SCHEMES, Settings.RAS.RAS_FEATURES),
-                    dtype=np.float32)
-            data_arrays['ras_status'].append(to_tensor(np.asarray(ras, dtype=np.float32)))
+            data_arrays['ras_status'].append(
+                to_tensor(np.asarray(ts[C.RAS_STATUS.key], dtype=np.float32)))
 
-            # Edge stress mask: encode thermal loading stress (pre-cascade window has no
-            # failed nodes, so a binary failure mask is always all-ones and useless).
-            if ea.shape[1] >= 6:
-                # col 5 after normalisation is line_flows_p / base_mva; thermal_limits
-                # col 1 is also normalised — compute loading ratio as |flow| / limit
-                thermal = np.abs(ea[:, 1]) + 1e-6
-                loading_ratio = np.abs(ea[:, 5]) / thermal
-                edge_mask = to_tensor(np.clip(1.0 - loading_ratio, 0.0, 1.0).astype(np.float32))
-            else:
-                edge_mask = to_tensor(np.ones(num_edges, dtype=np.float32))
+            # Edge stress mask: 1 - |P flow| / normal rating (both normalized
+            # on the same base, so the ratio is scale-free).
+            thermal = np.abs(ea[:, _e_thermal]) + 1e-6
+            loading_ratio = np.abs(ea[:, _e_pflow]) / thermal
+            edge_mask = to_tensor(np.clip(1.0 - loading_ratio, 0.0, 1.0).astype(np.float32))
             data_arrays['edge_mask'].append(edge_mask)
         
         # edge_attr is now collected per-timestep inside the loop above → [T, E, 7]
@@ -475,16 +404,16 @@ class CascadeDataset(Dataset):
                 if 0 <= node < num_nodes:
                     parent_labels[node] = num_nodes
         
-        # ── 115-feature node tensor ──────────────────────────────────────────
+        # ── node-feature tensor (layout: contract.NODE_FEATURE_BLOCKS) ─────────
         # Build (T, N, 115) from the already-collected per-timestep arrays so
         # the NodeFeatureMLP in the unified model can consume it directly.
         # Collect raw edge attributes per timestep (numpy arrays before tensor conversion)
         raw_edge_attrs = [
-            seq_step.get('edge_attr', np.zeros((len(edge_index[0]) if hasattr(edge_index, '__len__') else 1, 7), dtype=np.float32)).astype(np.float32)
+            np.asarray(seq_step[_contract.EDGE_ATTR.key], dtype=np.float32)
             for seq_step in sequence
         ]
         node_features = self._build_node_features(
-            scada_list=data_arrays['scada_data'],       # list[T] of (N,18) tensors
+            scada_list=data_arrays['scada_data'],       # list[T] of (N, SCADA.width) tensors
             pmu_list=data_arrays['pmu_sequence'],       # list[T] of (N, 8) tensors
             equip_list=data_arrays['equipment_status'], # list[T] of (N,10) tensors
             sequence=sequence,                          # raw dicts for injections
@@ -492,9 +421,14 @@ class CascadeDataset(Dataset):
             start_idx=start_idx,                        # absolute window start for t_pos
             seq_len_for_norm=len(sequence_original),    # actual scenario length for t_pos normalisation
             edge_index=edge_index,                      # (2, E) for cascade susceptibility features
-            edge_attr_list=raw_edge_attrs,              # list[T] of (E,7) arrays
+            edge_attr_list=raw_edge_attrs,              # list[T] of RAW (E, EDGE_ATTR.width) arrays
         )
-        node_features[:,:,114]=0
+        # Hide absolute-time features from the model BY NAME (spec D7). This
+        # used to be `node_features[:,:,114]=0`, which targeted t_pos in the
+        # original 38-wide base layout and silently drifted onto the
+        # cap-bank delta2 column when SCADA was widened.
+        for _blk in _contract.MODEL_MASKED_NODE_FEATURES:
+            node_features[:, :, _contract.node_feature_slice(_blk)] = 0
         # Data augmentation (training only)
         is_training = 'train' in str(self.data_dir)
         scada_tensor = torch.stack(data_arrays['scada_data'])
@@ -507,7 +441,7 @@ class CascadeDataset(Dataset):
             'scada_data': scada_tensor,
             'pmu_sequence': torch.stack(data_arrays['pmu_sequence']),
             'equipment_status': torch.stack(data_arrays['equipment_status']),
-            # 115-feature node tensor [T, N, 115]
+            # node-feature tensor [T, N, contract.NODE_FEATURE_DIM]
             'node_features': node_features,
             'edge_index': to_tensor(edge_index).long(),
             'edge_attr': edge_attr,           # [T, E, 13] — per-timestep, dynamic flows included
@@ -536,27 +470,18 @@ class CascadeDataset(Dataset):
         start_idx:        int = 0,
         seq_len_for_norm: int = 30,   # actual un-truncated scenario length
         edge_index:       Optional[np.ndarray] = None,   # (2, E) numpy int array
-        edge_attr_list:   Optional[List[np.ndarray]] = None,  # list[T] of (E,7) arrays
+        edge_attr_list:   Optional[List[np.ndarray]] = None,  # list[T] of RAW edge_attr arrays
     ) -> torch.Tensor:
-        """Build the (T, N, 136) node-feature tensor used by NodeFeatureMLP.
+        """Build the (T, N, contract.NODE_FEATURE_DIM) node-feature tensor.
 
-        Feature layout (matches Settings.Embedding constants; Phase 3 widened
-        SCADA 18→22, shifting every later offset):
-          [0:22]   SCADA measurements         (22; 18-21 = reactive support)
-          [22:30]  PMU measurements            ( 8)
-          [30:40]  Equipment status           (10)
-          [40:41]  Active power injection      ( 1)
-          [41:42]  Reactive power injection    ( 1)
-          [42:84]  1-step temporal deltas of [0:42]  (42)
-          [84:126] 2-step temporal deltas of [0:42]  (42)
-          [126]    Normalised timestep position ( 1)
-          [127:131] TTF physics estimators     ( 4)
-          [131:136] Cascade susceptibility     ( 5)
-              [131] mean_adjacent_line_loading — mean |flow|/limit of adjacent edges
-              [132] cascade_initiation_risk    — |P_inj| / sum_of_adjacent_thermal_limits
-              [133] cascade_reception_risk     — weighted flow stress from stressed neighbors
-              [134] max_adjacent_line_loading  — max |flow|/limit over adjacent edges
-              [135] loading_x_max_line         — loading_ratio × max_adjacent_line_loading
+        Layout is defined by name in the data contract (NODE_BASE_PARTS and
+        NODE_FEATURE_BLOCKS in cascade_prediction/contract.py; generated
+        reference in specs/data-contract/data_contract.md):
+          base            = [scada | pmu | equipment | power_inj | reactive_inj]
+          delta1, delta2  = 1- and 2-step temporal differences of base
+          t_pos           = absolute timestep position (masked by the caller)
+          ttf             = 4 physics time-to-failure estimators
+          susceptibility  = 5 cascade-susceptibility features
 
         Args:
             scada_list:     T tensors of shape (N, 22), already normalised.
@@ -565,10 +490,10 @@ class CascadeDataset(Dataset):
             sequence:       Raw per-timestep dicts (for power/reactive injection).
             num_nodes:      Number of nodes N.
             edge_index:     Graph connectivity (2, E) numpy int array.
-            edge_attr_list: Per-timestep edge attributes list[T] of (E,7) arrays.
+            edge_attr_list: Per-timestep RAW edge attributes, list[T] of (E, width).
 
         Returns:
-            Tensor of shape (T, N, 136), float32.
+            Tensor of shape (T, N, contract.NODE_FEATURE_DIM), float32.
         """
         T = len(scada_list)
 
@@ -634,18 +559,21 @@ class CascadeDataset(Dataset):
         EPS = 1e-6
         T_float = float(max(T, 1))
 
-        # Extract ratios from SCADA (indices 14-17 in the 38-feat base)
-        # base[t, :, 14:18] corresponds to scada[:, 14:18]
-        r_volt    = base[:, :, 14]   # (T, N) — safe >1
-        r_temp    = base[:, :, 15]   # (T, N) — safe <1
-        r_freq    = base[:, :, 16]   # (T, N) — safe >1
-        r_loading = base[:, :, 17]   # (T, N) — safe <1
+        # Failure-proximity ratios, looked up by name in the base layout.
+        _i_volt = _contract.base_index("scada", "voltage_ratio")
+        _i_temp = _contract.base_index("scada", "temp_ratio")
+        _i_freq = _contract.base_index("scada", "freq_ratio")
+        _i_load = _contract.base_index("scada", "loading_ratio")
+        r_volt    = base[:, :, _i_volt]   # (T, N) — safe >1
+        r_temp    = base[:, :, _i_temp]   # (T, N) — safe <1
+        r_freq    = base[:, :, _i_freq]   # (T, N) — safe >1
+        r_loading = base[:, :, _i_load]   # (T, N) — safe <1
 
         # Velocities from 1-step delta (same indices)
-        v_volt    = delta1[:, :, 14]  # rate of change per step
-        v_temp    = delta1[:, :, 15]
-        v_freq    = delta1[:, :, 16]
-        v_loading = delta1[:, :, 17]
+        v_volt    = delta1[:, :, _i_volt]  # rate of change per step
+        v_temp    = delta1[:, :, _i_temp]
+        v_freq    = delta1[:, :, _i_freq]
+        v_loading = delta1[:, :, _i_load]
 
         def ttf(current, threshold, velocity, safe_if_above: bool):
             """Estimated normalised steps to threshold crossing.
@@ -701,17 +629,18 @@ class CascadeDataset(Dataset):
 
             susc_parts = []
             for t in range(T):
-                ea  = edge_attr_list[t]   # (E, 7)
-                loading_ratio = base[t, :, 17].numpy()  # SCADA col 17 (loading_ratio)
+                ea  = edge_attr_list[t]   # (E, edge width) RAW
+                loading_ratio = base[t, :, _i_load].numpy()  # SCADA loading_ratio
 
-                # edge col 5: active power flow (normalized by base_mva)
-                # edge col 1: thermal limits (normalized)
-                flows   = np.abs(ea[:, 5]).astype(np.float32)   # |P_flow| per edge (E,)
-                thermal = np.abs(ea[:, 1]).astype(np.float32) + 1e-6  # thermal limit (E,)
+                # |P flow| / normal rating — a ratio, so raw MW/MVA is fine.
+                flows   = np.abs(ea[:, _contract.EDGE_ATTR.idx("p_flow")]).astype(np.float32)
+                thermal = np.abs(ea[:, _contract.EDGE_ATTR.idx("thermal_limit")]).astype(np.float32) + 1e-6
                 line_loading = np.clip(flows / thermal, 0.0, 2.0)     # |flow|/limit (E,)
 
-                # Power injection magnitude (N,) — reuse from base features (col 36)
-                p_inj = np.abs(base[t, :, 36].numpy()).astype(np.float32)  # |P_inj|
+                # Power injection magnitude (N,), by name. This read base col
+                # 36 until the contract: after SCADA grew to 28 columns, 36 is
+                # equipment_age, so F2 was computed from equipment age.
+                p_inj = np.abs(base[t, :, _contract.base_index("power_injection")].numpy()).astype(np.float32)
 
                 # 5 cascade susceptibility features per node:
                 # F1: mean_adjacent_line_loading  (+0.074 discrimination, pos_frac=1.00)
@@ -765,7 +694,7 @@ class CascadeDataset(Dataset):
         # Final tensor: 115 + 4 + 5 = 124 features
         return torch.cat(
             [base, delta1, delta2, t_pos, ttf_features, cascade_susceptibility], dim=2
-        ).float()  # (T, N, Settings.Embedding.NODE_FEATURE_DIM = 136)
+        ).float()  # (T, N, contract.NODE_FEATURE_DIM)
 
     def _process_metadata_format(self, scenario: Dict) -> Dict[str, Any]:
         """
@@ -777,9 +706,17 @@ class CascadeDataset(Dataset):
         Returns:
             Processed data dictionary with synthetic data
         """
+        # Constitution rule 10: this path fabricates random SCADA/PMU/edge
+        # arrays (with a 13-column SCADA that matches no layout). It must never
+        # feed training. Non-training consumers keep it for backwards
+        # compatibility only.
+        if self.contract_mode == "strict":
+            raise _contract.ContractError(
+                "scenario has an empty sequence; the synthetic metadata-only "
+                "fallback is not allowed in strict (training) mode")
         metadata = scenario['metadata']
         edge_index = scenario['edge_index']
-        
+
         num_nodes = metadata.get('num_nodes', Settings.Dataset.DEFAULT_NUM_NODES)
         num_edges = metadata.get('num_edges', edge_index.shape[1] if hasattr(edge_index, 'shape') else 186)
         
@@ -844,36 +781,40 @@ class CascadeDataset(Dataset):
         if 'conductance' in timestep_data:
             graph_props['conductance'] = torch.from_numpy(timestep_data['conductance']).float()
         else:
-            graph_props['conductance'] = edge_attr[:, 4]
+            graph_props['conductance'] = edge_attr[:, _contract.EDGE_ATTR.idx("conductance")]
         
         if 'susceptance' in timestep_data:
             graph_props['susceptance'] = torch.from_numpy(timestep_data['susceptance']).float()
         else:
-            graph_props['susceptance'] = edge_attr[:, 3]
+            graph_props['susceptance'] = edge_attr[:, _contract.EDGE_ATTR.idx("susceptance")]
         
-        graph_props['thermal_limits'] = edge_attr[:, 1]
+        graph_props['thermal_limits'] = edge_attr[:, _contract.EDGE_ATTR.idx("thermal_limit")]
         
         # Power injection
         if 'power_injection' in timestep_data:
             power_injection_raw = torch.from_numpy(timestep_data['power_injection']).float()
             graph_props['power_injection'] = normalize_power(power_injection_raw, self.base_mva)
         else:
+            # Fallback from RAW SCADA, normalized like the primary path.
             scada = timestep_data.get('scada_data', None)
-            if scada is not None and scada.shape[1] >= 6:
-                generation_pu = scada[:, 2]
-                load_pu = scada[:, 4]
-                graph_props['power_injection'] = generation_pu - load_pu
+            if scada is not None:
+                gen = scada[:, _contract.SCADA.idx("generation")]
+                load = scada[:, _contract.SCADA.idx("load")]
+                graph_props['power_injection'] = normalize_power(
+                    torch.as_tensor(gen - load, dtype=torch.float32), self.base_mva)
         
         # Reactive injection
         if 'reactive_injection' in timestep_data:
             reactive_injection_raw = torch.from_numpy(timestep_data['reactive_injection']).float()
             graph_props['reactive_injection'] = normalize_power(reactive_injection_raw, self.base_mva)
         else:
+            # Fallback: the generator writes reactive_injection = node_reactive.
+            # (Pre-contract this subtracted SCADA col 5, equipment temperature.)
             scada = timestep_data.get('scada_data', None)
-            if scada is not None and scada.shape[1] >= 6:
-                reac_gen_pu = scada[:, 3]
-                reac_load_pu = scada[:, 5]
-                graph_props['reactive_injection'] = reac_gen_pu - reac_load_pu
+            if scada is not None:
+                graph_props['reactive_injection'] = normalize_power(
+                    torch.as_tensor(scada[:, _contract.SCADA.idx("node_reactive")], dtype=torch.float32),
+                    self.base_mva)
         
         if 'base_mva' in metadata:
             graph_props['base_mva'] = torch.tensor(metadata['base_mva'])
@@ -883,9 +824,9 @@ class CascadeDataset(Dataset):
         # scada_data[:, 6] is frequency (around 60 Hz) - DO NOT USE for temperature!
         if 'scada_data' in timestep_data:
             scada_data = timestep_data['scada_data']
-            if scada_data.shape[1] > 5:
-                # Extract equipment_temps from index 5 (range: 25-150°C)
-                graph_props['ground_truth_temperature'] = torch.from_numpy(scada_data[:, 5]).float()
+            if scada_data.shape[1] > _contract.SCADA.idx("equipment_temp"):
+                graph_props['ground_truth_temperature'] = torch.from_numpy(
+                    np.asarray(scada_data[:, _contract.SCADA.idx("equipment_temp")])).float()
             else:
                 graph_props['ground_truth_temperature'] = torch.zeros(scada_data.shape[0])
         

@@ -5,7 +5,13 @@ All hardcoded numeric constants live here. Import with:
     from cascade_prediction.data.generator.config import (
         PowerSystemConfig, FrequencyConfig, ThermalConfig, ...
     )
+
+Array widths and node-feature dimensions are NOT defined here: they are
+derived from the data contract (cascade_prediction/contract.py, spec
+specs/data-contract/spec.md, DC-002). Change the contract, not these values.
 """
+
+from ... import contract as _contract
 
 # ---------------------------------------------------------------------------
 # Power System Base
@@ -405,7 +411,7 @@ class RASConfig:
 
     SHED_FRACTION    = 0.30   # load fraction shed by ACTION_SHED_LOAD
 
-    RAS_FEATURES     = 3      # per-scheme stream: [status, monitored_loading, action_type]
+    RAS_FEATURES     = _contract.RAS_STATUS.width  # DC-002 (3) — per-scheme stream: [status, monitored_loading, action_type]
 
 
 # ---------------------------------------------------------------------------
@@ -709,7 +715,7 @@ class ModelConfig:
     #  "Phase shifter (PAR) flows + tap positions"]
     # Phase 5 appended 1 more: [13] is_tie_line (binary, raw — no normalisation).
     # [MISO RTO-SPEC-006: "Tie-line flows & net actual interchange"]
-    EDGE_FEATURES       = 14
+    EDGE_FEATURES       = _contract.EDGE_ATTR.width       # DC-002 (14)
     RISK_DIM            = 7             # Output dimension of risk assessment head
     GAT_DROPOUT         = 0.1           # Graph attention dropout
     LEAKY_RELU_SLOPE    = 0.2           # LeakyReLU negative slope in GAT
@@ -810,9 +816,9 @@ class EmbeddingConfig:
     #     [27] ACE = schedule - actual
     # [MISO RTO-SPEC-006: tie-line flows / net actual interchange, dynamic
     #  schedules, energy storage resources]
-    INFRA_SCADA_FEATURES    = 28        # SCADA measurement feature width
-    INFRA_PMU_FEATURES      = 8         # PMU measurement feature width
-    INFRA_EQUIPMENT_FEATURES = 10       # Equipment status feature width
+    INFRA_SCADA_FEATURES    = _contract.SCADA.width      # DC-002 (28) — SCADA measurement feature width
+    INFRA_PMU_FEATURES      = _contract.PMU.width        # DC-002 (8) — PMU measurement feature width
+    INFRA_EQUIPMENT_FEATURES = _contract.EQUIPMENT.width # DC-002 (10) — Equipment status feature width
     INFRA_SCADA_HIDDEN      = 64        # SCADA encoder hidden size
     INFRA_PMU_HIDDEN        = 32        # PMU projection hidden size
     INFRA_EQUIP_HIDDEN      = 32        # Equipment encoder hidden size
@@ -831,27 +837,13 @@ class EmbeddingConfig:
     DROPOUT_FC              = 0.3       # Dropout in fully-connected blocks
 
     # -- Node-level feature MLP ------------------------------------------
-    # Feature layout per node per timestep (136 total; Phase 3 widened SCADA
-    # 18→22, shifting every later offset):
-    #   [0:22]   SCADA measurements          (22; 18-21 reactive support)
-    #   [22:30]  PMU measurements             ( 8)
-    #   [30:40]  Equipment status            (10)
-    #   [40:41]  Active power injection       ( 1)
-    #   [41:42]  Reactive power injection     ( 1)
-    #   [42:84]  1-step temporal deltas of [0:42]  (42)
-    #   [84:126] 2-step temporal deltas of [0:42]  (42)
-    #   [126]    Normalised timestep position ( 1)
-    #   [127]    TTF voltage  — normalised steps to voltage threshold  ( 1)
-    #   [128]    TTF temp     — normalised steps to temperature threshold ( 1)
-    #   [129]    TTF freq     — normalised steps to frequency threshold  ( 1)
-    #   [130]    TTF loading  — normalised steps to loading threshold    ( 1)
-    #   [131:136] Cascade susceptibility      ( 5)
-    #
-    # The 4 new TTF (time-to-failure) features encode physics-based estimates
-    # of how many steps remain before each failure condition is breached.
-    # They directly provide the timing signal needed by the TimingHead.
-    NODE_FEATURE_BASE_DIM   = 48        # SCADA(28)+PMU(8)+equip(10)+inj(2) before deltas (P3: 38→42, P5: 42→48)
-    NODE_FEATURE_DIM        = 154       # 48*3 + 1 t_pos + 4 TTF + 5 susceptibility (P3: 124→136, P5: 136→154)
+    # Node-feature layout (base, delta1, delta2, t_pos, TTF, susceptibility)
+    # is defined by name in the data contract — see NODE_BASE_PARTS /
+    # NODE_FEATURE_BLOCKS in cascade_prediction/contract.py and the generated
+    # specs/data-contract/data_contract.md. Hard-coded offsets used to live
+    # here and went stale every time SCADA was widened.
+    NODE_FEATURE_BASE_DIM   = _contract.NODE_FEATURE_BASE_DIM  # DC-002 (48) — SCADA(28)+PMU(8)+equip(10)+inj(2) before deltas (P3: 38→42, P5: 42→48)
+    NODE_FEATURE_DIM        = _contract.NODE_FEATURE_DIM       # DC-002 (154) — 48*3 + 1 t_pos + 4 TTF + 5 susceptibility (P3: 124→136, P5: 136→154)
     NODE_MLP_HIDDEN_1       = 256       # First hidden layer of NodeFeatureMLP
     NODE_MLP_HIDDEN_2       = 128       # Second hidden layer of NodeFeatureMLP
 

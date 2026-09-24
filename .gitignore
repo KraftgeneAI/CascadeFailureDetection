@@ -20,6 +20,10 @@
 !cascade_prediction/
 !cascade_prediction/**
 !test/
+!specs/
+!specs/**
+!azureml/
+!azureml/**
 !archive/
 !videos/
 !videos/**

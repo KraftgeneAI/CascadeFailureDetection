@@ -13,7 +13,17 @@ import shutil
 from pathlib import Path
 import json
 
-from cascade_prediction.data.dataset import CascadeDataset
+from cascade_prediction.data.dataset import CascadeDataset as _CascadeDataset
+
+
+def CascadeDataset(*args, **kwargs):
+    """The fixtures in this module are LEGACY-layout, unstamped scenarios
+    (18-column SCADA, 7-column edge_attr). Under the data contract they are
+    only loadable through the explicit migration path (spec D3 / DC-021), so
+    these tests exercise contract_mode='migrate'. Strict-mode behaviour is
+    covered in test_data_contract.py."""
+    kwargs.setdefault("contract_mode", "migrate")
+    return _CascadeDataset(*args, **kwargs)
 
 
 class TestCascadeDataset:

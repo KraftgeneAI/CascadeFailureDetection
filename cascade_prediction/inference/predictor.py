@@ -15,6 +15,7 @@ from ..models.unified_model import UnifiedCascadePredictionModel
 from ..data.dataset import CascadeDataset
 from ..data.collation import collate_cascade_batch
 from ..data.generator.config import Settings
+from .. import contract as _contract
 
 
 class CascadePredictor:
@@ -32,6 +33,9 @@ class CascadePredictor:
 
         print(f"Loading model from {model_path}...")
         checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+        # DC-031: refuse a checkpoint trained on a different data layout
+        # (warns only if the checkpoint predates contract stamping).
+        _contract.check_checkpoint(checkpoint, source=str(model_path))
         self.model = UnifiedCascadePredictionModel(
             embedding_dim=Settings.Model.EMBEDDING_DIM,
             hidden_dim=Settings.Model.HIDDEN_DIM,
@@ -59,6 +63,7 @@ class CascadePredictor:
             mode="full_sequence",
             base_mva=self.base_mva,
             base_frequency=self.base_freq,
+            contract_mode="migrate",   # inference tolerates legacy layouts (spec D3)
         )
 
         print(f"Running inference on scenario {scenario_idx} / {len(dataset) - 1}...")
@@ -160,6 +165,7 @@ class CascadePredictor:
             base_mva=self.base_mva,
             base_frequency=self.base_freq,
             fixed_window=(start_step, end_step),
+            contract_mode="migrate",   # inference tolerates legacy layouts (spec D3)
         )
 
         item = dataset[scenario_idx]

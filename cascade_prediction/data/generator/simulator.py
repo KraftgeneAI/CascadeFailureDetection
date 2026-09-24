@@ -36,6 +36,7 @@ from .cascade import CascadeSimulator, LineTripMonitor, create_adjacency_list
 # are no longer imported here.
 from .utils import get_failed_lines_from_nodes
 from .config import Settings
+from ... import contract as _contract
 from .grid_state import (
     build_topology_block, validate_topology_block, ensure_rating_arrays,
     NODE_PROP_KEYS, THRESHOLD_KEYS, LINE_KEYS, RAS_KEYS,
@@ -593,7 +594,17 @@ class PhysicsBasedGridSimulator:
             'num_nodes': self.num_nodes,
             'num_edges': len(self.edge_index[0]),
             'base_mva': Settings.PowerSystem.SN_MVA,
+            # Data contract stamp (DC-011): lets strict consumers (training)
+            # prove this scenario matches the current array layout.
+            **_contract.contract_stamp(),
         }
+
+        # DC-010: structural violations abort generation; range violations
+        # are counted into metadata and logged (spec D4), never silently kept.
+        report = _contract.validate_scenario(scenario_data, check_ranges=True)
+        report.raise_if_errors("generated scenario violates the data contract")
+        scenario_data['metadata']['contract_range_warnings'] = report.range_violation_count
+        _contract.log_range_warnings(report, "generator")
 
         return scenario_data
     
@@ -1153,11 +1164,11 @@ class PhysicsBasedGridSimulator:
         col 10: base_load (MW)
         """
         # ── Last timestep SCADA ────────────────────────────────────────────────
-        last_scada = sequence[-1]['scada_data']          # [N, 18]
+        last_scada = sequence[-1][_contract.SCADA.key]   # [N, SCADA.width]
 
-        voltage_ratio  = last_scada[:, 14].astype(np.float32)   # >1 safe
-        temp_ratio     = last_scada[:, 15].astype(np.float32)   # <1 safe
-        loading_ratio  = last_scada[:, 17].astype(np.float32)   # <1 safe
+        voltage_ratio  = last_scada[:, _contract.SCADA.idx("voltage_ratio")].astype(np.float32)   # >1 safe
+        temp_ratio     = last_scada[:, _contract.SCADA.idx("temp_ratio")].astype(np.float32)   # <1 safe
+        loading_ratio  = last_scada[:, _contract.SCADA.idx("loading_ratio")].astype(np.float32)   # <1 safe
 
         # ── Static node properties ─────────────────────────────────────────────
         equipment_condition = self.equipment_condition.astype(np.float32)   # [N]

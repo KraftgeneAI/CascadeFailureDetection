@@ -50,6 +50,7 @@ from cascade_prediction.models import UnifiedCascadePredictionModel, PhysicsInfo
 from cascade_prediction.data import CascadeDataset, collate_cascade_batch
 from cascade_prediction.training import Trainer
 from cascade_prediction.data.generator.config import Settings
+from cascade_prediction import contract as _contract
 
 
 def find_best_node_f1_threshold(probs: torch.Tensor, labels: torch.Tensor):
@@ -149,6 +150,7 @@ def main():
 
     if os.path.exists(args.checkpoint):
         ckpt = torch.load(args.checkpoint, map_location=device)
+        _contract.check_checkpoint(ckpt, source=args.checkpoint)   # DC-031
         saved_state = ckpt['model_state_dict']
 
         # Partial weight loading: the NodeFeatureMLP first layer changed from
@@ -306,6 +308,7 @@ def main():
                 'node_threshold': thresh,
                 'node_precision': prec,
                 'node_recall':   rec,
+                **_contract.contract_stamp(),   # DC-030
             }, save_path)
             print(f"  ★ NEW BEST  Node F1 = {best_node_f1:.4f}  → saved to {save_path}")
         else:

@@ -1,0 +1,6 @@
+# MLOps extras — install alongside requirements.txt to enable experiment
+# tracking locally and against Azure ML. Training runs fine without these
+# (RunTracker degrades to a no-op); install them to actually record runs.
+mlflow>=2.9
+azure-ai-ml>=1.55        # az ml CLI v2 SDK: register data/env, submit jobs
+azureml-mlflow>=1.55     # routes MLflow logging to an Azure ML workspace

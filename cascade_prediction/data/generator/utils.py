@@ -174,40 +174,18 @@ def validate_scenario(scenario: Dict) -> bool:
     Returns:
         True if valid, False otherwise
     """
+    # DC-012: the data contract is the only definition of a valid scenario.
+    # This bool wrapper checks STRUCTURE only; use
+    # cascade_prediction.contract.validate_scenario for range details.
+    from ... import contract as _contract
     try:
-        # Check required keys
-        required_keys = ['sequence', 'edge_index', 'metadata']
-        for key in required_keys:
-            if key not in scenario:
-                print(f"Missing key: {key}")
-                return False
-        
-        # Check sequence
-        if not scenario['sequence']:
-            print("Empty sequence")
-            return False
-        
-        # Check first timestep
-        timestep = scenario['sequence'][0]
-        required_timestep_keys = [
-            'scada_data', 'pmu_sequence', 'node_labels'
-        ]
-        for key in required_timestep_keys:
-            if key not in timestep:
-                print(f"Missing timestep key: {key}")
-                return False
-        
-        # Check for NaN/Inf
-        scada = timestep['scada_data']
-        if np.any(np.isnan(scada)) or np.any(np.isinf(scada)):
-            print("NaN or Inf in SCADA data")
-            return False
-        
-        return True
-        
+        report = _contract.validate_scenario(scenario, check_ranges=False)
     except Exception as e:
         print(f"Validation error: {e}")
         return False
+    if not report.ok:
+        print(f"Invalid scenario: {report.summary()}")
+    return report.ok
 
 
 def get_failed_lines_from_nodes(

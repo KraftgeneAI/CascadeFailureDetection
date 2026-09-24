@@ -1,0 +1,1287 @@
+{
+  "title": "Cascade scenario data contract",
+  "generated_from": "cascade_prediction/contract.py",
+  "schema_version": "1.0.0",
+  "layout_hash": "62c1a44b78b43ec1",
+  "arrays": {
+    "scada_data": {
+      "rows": "N",
+      "width": 28,
+      "legacy_widths": [
+        18,
+        22
+      ],
+      "description": "Per-node SCADA measurements. Broadcast columns hold one system-wide value repeated on every node.",
+      "columns": [
+        {
+          "index": 0,
+          "name": "voltage",
+          "unit": "p.u.",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            1.5
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Bus voltage magnitude (0 = de-energized)"
+        },
+        {
+          "index": 1,
+          "name": "angle",
+          "unit": "rad",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            -3.141592653589793,
+            3.141592653589793
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Bus voltage angle"
+        },
+        {
+          "index": 2,
+          "name": "generation",
+          "unit": "MW",
+          "norm": [
+            "base_mva"
+          ],
+          "valid_range": [
+            -1000.0,
+            20000.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Active generation incl. storage injection"
+        },
+        {
+          "index": 3,
+          "name": "node_reactive",
+          "unit": "MVAr",
+          "norm": [
+            "base_mva"
+          ],
+          "valid_range": [
+            -10000.0,
+            10000.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Net reactive power at the bus"
+        },
+        {
+          "index": 4,
+          "name": "load",
+          "unit": "MW",
+          "norm": [
+            "base_mva"
+          ],
+          "valid_range": [
+            0.0,
+            10000.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Active load"
+        },
+        {
+          "index": 5,
+          "name": "equipment_temp",
+          "unit": "degC",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            -40.0,
+            250.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Equipment temperature (physics temperature target)"
+        },
+        {
+          "index": 6,
+          "name": "frequency",
+          "unit": "Hz",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            57.0,
+            61.8
+          ],
+          "categories": null,
+          "scope": "broadcast",
+          "since": "base",
+          "spec_ref": "",
+          "description": "System frequency (raw Hz; not normalized in SCADA)"
+        },
+        {
+          "index": 7,
+          "name": "equipment_age",
+          "unit": "years",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            100.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Equipment age"
+        },
+        {
+          "index": 8,
+          "name": "equipment_condition",
+          "unit": "fraction",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            1.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Condition index, 1 = new"
+        },
+        {
+          "index": 9,
+          "name": "gen_capacity",
+          "unit": "MW",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            50000.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Installed generation capacity"
+        },
+        {
+          "index": 10,
+          "name": "base_load",
+          "unit": "MW",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            10000.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Nominal (base) load"
+        },
+        {
+          "index": 11,
+          "name": "node_type",
+          "unit": "category",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": null,
+          "categories": [
+            0.0,
+            1.0,
+            2.0
+          ],
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "0 = load, 1 = generator, 2 = substation"
+        },
+        {
+          "index": 12,
+          "name": "time_ratio",
+          "unit": "fraction",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            1.0
+          ],
+          "categories": null,
+          "scope": "broadcast",
+          "since": "base",
+          "spec_ref": "",
+          "description": "t / sequence_length (masked in model input)"
+        },
+        {
+          "index": 13,
+          "name": "stress_level",
+          "unit": "fraction",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            1.0
+          ],
+          "categories": null,
+          "scope": "broadcast",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Scenario stress level (masked in model input)"
+        },
+        {
+          "index": 14,
+          "name": "voltage_ratio",
+          "unit": "ratio",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            2.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "voltage / voltage_failure_threshold (<1 = danger)"
+        },
+        {
+          "index": 15,
+          "name": "temp_ratio",
+          "unit": "ratio",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            3.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "temp / temperature_failure_threshold (>1 = danger)"
+        },
+        {
+          "index": 16,
+          "name": "freq_ratio",
+          "unit": "ratio",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.9,
+            1.1
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "frequency / frequency_failure_threshold (<1 = danger)"
+        },
+        {
+          "index": 17,
+          "name": "loading_ratio",
+          "unit": "ratio",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            5.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "load / base_load / loading_failure_threshold (>1 = danger)"
+        },
+        {
+          "index": 18,
+          "name": "cap_bank_status",
+          "unit": "binary",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": null,
+          "categories": [
+            0.0,
+            1.0
+          ],
+          "scope": "local",
+          "since": "phase3",
+          "spec_ref": "MISO RTO-SPEC-006: voltage-regulation equipment status",
+          "description": "Capacitor bank in service"
+        },
+        {
+          "index": 19,
+          "name": "reactor_status",
+          "unit": "binary",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": null,
+          "categories": [
+            0.0,
+            1.0
+          ],
+          "scope": "local",
+          "since": "phase3",
+          "spec_ref": "MISO RTO-SPEC-006: voltage-regulation equipment status",
+          "description": "Shunt reactor in service"
+        },
+        {
+          "index": 20,
+          "name": "svc_q",
+          "unit": "MVAr",
+          "norm": [
+            "base_mva"
+          ],
+          "valid_range": [
+            -1000.0,
+            1000.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "phase3",
+          "spec_ref": "MISO RTO-SPEC-006: voltage-regulation equipment status",
+          "description": "SVC reactive output"
+        },
+        {
+          "index": 21,
+          "name": "avr_setpoint",
+          "unit": "p.u.",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            1.2
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "phase3",
+          "spec_ref": "MISO RTO-SPEC-006: voltage-regulation equipment status",
+          "description": "AVR voltage setpoint (0 on non-generator buses)"
+        },
+        {
+          "index": 22,
+          "name": "storage_soc",
+          "unit": "fraction",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            1.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "phase5",
+          "spec_ref": "MISO RTO-SPEC-006: energy storage resources",
+          "description": "Storage state of charge (0 on non-storage buses)"
+        },
+        {
+          "index": 23,
+          "name": "storage_mw",
+          "unit": "MW",
+          "norm": [
+            "base_mva"
+          ],
+          "valid_range": [
+            -500.0,
+            500.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "phase5",
+          "spec_ref": "MISO RTO-SPEC-006: energy storage resources",
+          "description": "Storage active power, + = discharging"
+        },
+        {
+          "index": 24,
+          "name": "storage_mvar",
+          "unit": "MVAr",
+          "norm": [
+            "base_mva"
+          ],
+          "valid_range": [
+            -500.0,
+            500.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "phase5",
+          "spec_ref": "MISO RTO-SPEC-006: energy storage resources",
+          "description": "Storage reactive power"
+        },
+        {
+          "index": 25,
+          "name": "actual_interchange",
+          "unit": "MW",
+          "norm": [
+            "divide",
+            "INTERCHANGE_SCALE_MW"
+          ],
+          "valid_range": [
+            -20000.0,
+            20000.0
+          ],
+          "categories": null,
+          "scope": "broadcast",
+          "since": "phase5",
+          "spec_ref": "MISO RTO-SPEC-006: tie-line flows & net actual interchange",
+          "description": "Net actual interchange (sum of signed tie flows)"
+        },
+        {
+          "index": 26,
+          "name": "scheduled_interchange",
+          "unit": "MW",
+          "norm": [
+            "divide",
+            "INTERCHANGE_SCALE_MW"
+          ],
+          "valid_range": [
+            -20000.0,
+            20000.0
+          ],
+          "categories": null,
+          "scope": "broadcast",
+          "since": "phase5",
+          "spec_ref": "MISO RTO-SPEC-006: dynamic schedules",
+          "description": "Scheduled interchange"
+        },
+        {
+          "index": 27,
+          "name": "ace",
+          "unit": "MW",
+          "norm": [
+            "divide",
+            "INTERCHANGE_SCALE_MW"
+          ],
+          "valid_range": [
+            -20000.0,
+            20000.0
+          ],
+          "categories": null,
+          "scope": "broadcast",
+          "since": "phase5",
+          "spec_ref": "MISO RTO-SPEC-006: tie-line flows & net actual interchange",
+          "description": "Area control error = schedule - actual"
+        }
+      ]
+    },
+    "pmu_sequence": {
+      "rows": "N",
+      "width": 8,
+      "legacy_widths": [],
+      "description": "Per-node PMU measurements.",
+      "columns": [
+        {
+          "index": 0,
+          "name": "voltage",
+          "unit": "p.u.",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            1.5
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Bus voltage magnitude"
+        },
+        {
+          "index": 1,
+          "name": "angle",
+          "unit": "rad",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            -3.141592653589793,
+            3.141592653589793
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Bus voltage angle"
+        },
+        {
+          "index": 2,
+          "name": "generation",
+          "unit": "MW",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            -1000.0,
+            20000.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Active generation"
+        },
+        {
+          "index": 3,
+          "name": "load",
+          "unit": "MW",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            10000.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Active load"
+        },
+        {
+          "index": 4,
+          "name": "equipment_temp",
+          "unit": "degC",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            -40.0,
+            250.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Equipment temperature"
+        },
+        {
+          "index": 5,
+          "name": "frequency",
+          "unit": "Hz",
+          "norm": [
+            "base_frequency"
+          ],
+          "valid_range": [
+            57.0,
+            61.8
+          ],
+          "categories": null,
+          "scope": "broadcast",
+          "since": "base",
+          "spec_ref": "",
+          "description": "System frequency"
+        },
+        {
+          "index": 6,
+          "name": "mean_line_loading",
+          "unit": "ratio",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            5.0
+          ],
+          "categories": null,
+          "scope": "broadcast",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Mean line loading ratio across the grid"
+        },
+        {
+          "index": 7,
+          "name": "node_reactive",
+          "unit": "MVAr",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            -10000.0,
+            10000.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Net reactive power at the bus"
+        }
+      ]
+    },
+    "equipment_status": {
+      "rows": "N",
+      "width": 10,
+      "legacy_widths": [],
+      "description": "Per-node equipment health and thermal state.",
+      "columns": [
+        {
+          "index": 0,
+          "name": "equipment_age",
+          "unit": "years",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            100.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Equipment age"
+        },
+        {
+          "index": 1,
+          "name": "equipment_condition",
+          "unit": "fraction",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            1.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Condition index"
+        },
+        {
+          "index": 2,
+          "name": "equipment_temp",
+          "unit": "degC",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            -40.0,
+            250.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Equipment temperature"
+        },
+        {
+          "index": 3,
+          "name": "thermal_capacity",
+          "unit": "ratio",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            5.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Thermal capacity factor"
+        },
+        {
+          "index": 4,
+          "name": "cooling_effectiveness",
+          "unit": "fraction",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            1.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Cooling effectiveness"
+        },
+        {
+          "index": 5,
+          "name": "thermal_time_constant",
+          "unit": "x30 min",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            10.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Thermal time constant / 30"
+        },
+        {
+          "index": 6,
+          "name": "temp_ratio",
+          "unit": "ratio",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            3.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "temp / temperature_failure_threshold"
+        },
+        {
+          "index": 7,
+          "name": "node_type",
+          "unit": "category",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": null,
+          "categories": [
+            0.0,
+            1.0,
+            2.0
+          ],
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "0 = load, 1 = generator, 2 = substation"
+        },
+        {
+          "index": 8,
+          "name": "gen_capacity_fraction",
+          "unit": "fraction",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            1.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "gen_capacity / max gen_capacity"
+        },
+        {
+          "index": 9,
+          "name": "load_ratio",
+          "unit": "ratio",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            5.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "load / base_load"
+        }
+      ]
+    },
+    "edge_attr": {
+      "rows": "E",
+      "width": 14,
+      "legacy_widths": [
+        7,
+        10,
+        13
+      ],
+      "description": "Per-branch attributes. Mirrored rows of one undirected branch share values.",
+      "columns": [
+        {
+          "index": 0,
+          "name": "reactance",
+          "unit": "ohm",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            1000.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Series reactance"
+        },
+        {
+          "index": 1,
+          "name": "thermal_limit",
+          "unit": "MVA",
+          "norm": [
+            "base_mva"
+          ],
+          "valid_range": [
+            0.0,
+            100000.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Normal rating, derated for the step"
+        },
+        {
+          "index": 2,
+          "name": "resistance",
+          "unit": "ohm",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            1000.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Series resistance"
+        },
+        {
+          "index": 3,
+          "name": "susceptance",
+          "unit": "S",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            -1000.0,
+            1000.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Shunt susceptance"
+        },
+        {
+          "index": 4,
+          "name": "conductance",
+          "unit": "S",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            -1000.0,
+            1000.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Shunt conductance"
+        },
+        {
+          "index": 5,
+          "name": "p_flow",
+          "unit": "MW",
+          "norm": [
+            "base_mva"
+          ],
+          "valid_range": [
+            -100000.0,
+            100000.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Active power flow (physics flow target)"
+        },
+        {
+          "index": 6,
+          "name": "q_flow",
+          "unit": "MVAr",
+          "norm": [
+            "base_mva"
+          ],
+          "valid_range": [
+            -100000.0,
+            100000.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "base",
+          "spec_ref": "",
+          "description": "Reactive power flow"
+        },
+        {
+          "index": 7,
+          "name": "branch_status",
+          "unit": "category",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": null,
+          "categories": [
+            -1.0,
+            0.0,
+            1.0
+          ],
+          "scope": "local",
+          "since": "phase1",
+          "spec_ref": "MISO RTO-SPEC-006: switching-device open/closed status",
+          "description": "1 = closed, 0 = forced open, -1 = planned open"
+        },
+        {
+          "index": 8,
+          "name": "emergency_limit",
+          "unit": "MVA",
+          "norm": [
+            "base_mva"
+          ],
+          "valid_range": [
+            0.0,
+            100000.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "phase1",
+          "spec_ref": "MISO RTO-SPEC-006: line ratings",
+          "description": "Emergency (LEP) rating, derated"
+        },
+        {
+          "index": 9,
+          "name": "load_dump_limit",
+          "unit": "MVA",
+          "norm": [
+            "base_mva"
+          ],
+          "valid_range": [
+            0.0,
+            100000.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "phase1",
+          "spec_ref": "MISO RTO-SPEC-006: line ratings",
+          "description": "Load-dump rating, derated"
+        },
+        {
+          "index": 10,
+          "name": "branch_type",
+          "unit": "category",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": null,
+          "categories": [
+            0.0,
+            1.0,
+            2.0
+          ],
+          "scope": "local",
+          "since": "phase2",
+          "spec_ref": "MISO RTO-SPEC-006: transformer / PAR flows and tap positions",
+          "description": "0 = line, 1 = LTC transformer, 2 = phase shifter"
+        },
+        {
+          "index": 11,
+          "name": "tap_position",
+          "unit": "steps",
+          "norm": [
+            "divide",
+            16.0
+          ],
+          "valid_range": [
+            -16.0,
+            16.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "phase2",
+          "spec_ref": "MISO RTO-SPEC-006: LTC tap positions",
+          "description": "LTC tap position"
+        },
+        {
+          "index": 12,
+          "name": "tap_angle",
+          "unit": "deg",
+          "norm": [
+            "divide",
+            30.0
+          ],
+          "valid_range": [
+            -30.0,
+            30.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "phase2",
+          "spec_ref": "MISO RTO-SPEC-006: PAR tap positions",
+          "description": "Phase-shifter angle"
+        },
+        {
+          "index": 13,
+          "name": "is_tie_line",
+          "unit": "binary",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": null,
+          "categories": [
+            0.0,
+            1.0
+          ],
+          "scope": "local",
+          "since": "phase5",
+          "spec_ref": "MISO RTO-SPEC-006: tie-line flows & net actual interchange",
+          "description": "Branch crosses the boundary to the neighbouring RC"
+        }
+      ]
+    },
+    "ras_status": {
+      "rows": "S",
+      "width": 3,
+      "legacy_widths": [],
+      "description": "Per-scheme Remedial Action Scheme telemetry.",
+      "columns": [
+        {
+          "index": 0,
+          "name": "arming_status",
+          "unit": "category",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": null,
+          "categories": [
+            0.0,
+            1.0,
+            2.0,
+            3.0
+          ],
+          "scope": "local",
+          "since": "phase4",
+          "spec_ref": "MISO RTO-SPEC-006: RAS arming status",
+          "description": "0 = available, 1 = armed, 2 = triggered, 3 = operated"
+        },
+        {
+          "index": 1,
+          "name": "monitored_loading",
+          "unit": "ratio",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": [
+            0.0,
+            5.0
+          ],
+          "categories": null,
+          "scope": "local",
+          "since": "phase4",
+          "spec_ref": "",
+          "description": "Loading of the scheme's monitored line"
+        },
+        {
+          "index": 2,
+          "name": "action_type",
+          "unit": "category",
+          "norm": [
+            "raw"
+          ],
+          "valid_range": null,
+          "categories": [
+            0.0,
+            1.0,
+            2.0
+          ],
+          "scope": "local",
+          "since": "phase4",
+          "spec_ref": "",
+          "description": "0 = trip generator, 1 = shed load, 2 = open line"
+        }
+      ]
+    }
+  },
+  "vectors": {
+    "node_labels": {
+      "rows": "N",
+      "unit": "binary",
+      "description": "1 if the node has failed by this step",
+      "valid_range": null,
+      "categories": [
+        0.0,
+        1.0
+      ]
+    },
+    "cascade_timing": {
+      "rows": "N",
+      "unit": "steps",
+      "description": "Failure time relative to cascade start; -1 = does not fail",
+      "valid_range": [
+        -1.0,
+        null
+      ],
+      "categories": null
+    },
+    "power_injection": {
+      "rows": "N",
+      "unit": "MW",
+      "description": "generation - load",
+      "valid_range": null,
+      "categories": null
+    },
+    "reactive_injection": {
+      "rows": "N",
+      "unit": "MVAr",
+      "description": "Net reactive injection",
+      "valid_range": null,
+      "categories": null
+    },
+    "conductance": {
+      "rows": "E",
+      "unit": "S",
+      "description": "Branch conductance (mirror of edge_attr)",
+      "valid_range": null,
+      "categories": null
+    },
+    "susceptance": {
+      "rows": "E",
+      "unit": "S",
+      "description": "Branch susceptance (mirror of edge_attr)",
+      "valid_range": null,
+      "categories": null
+    },
+    "thermal_limits": {
+      "rows": "E",
+      "unit": "MVA",
+      "description": "Static normal rating (not derated)",
+      "valid_range": [
+        0.0,
+        null
+      ],
+      "categories": null
+    }
+  },
+  "required_metadata": [
+    "is_cascade",
+    "num_nodes",
+    "num_edges",
+    "base_mva"
+  ],
+  "node_features": {
+    "base_parts": [
+      {
+        "name": "scada",
+        "offset": 0,
+        "width": 28
+      },
+      {
+        "name": "pmu",
+        "offset": 28,
+        "width": 8
+      },
+      {
+        "name": "equipment",
+        "offset": 36,
+        "width": 10
+      },
+      {
+        "name": "power_injection",
+        "offset": 46,
+        "width": 1
+      },
+      {
+        "name": "reactive_injection",
+        "offset": 47,
+        "width": 1
+      }
+    ],
+    "blocks": [
+      {
+        "name": "base",
+        "offset": 0,
+        "width": 48
+      },
+      {
+        "name": "delta1",
+        "offset": 48,
+        "width": 48
+      },
+      {
+        "name": "delta2",
+        "offset": 96,
+        "width": 48
+      },
+      {
+        "name": "t_pos",
+        "offset": 144,
+        "width": 1
+      },
+      {
+        "name": "ttf",
+        "offset": 145,
+        "width": 4
+      },
+      {
+        "name": "susceptibility",
+        "offset": 149,
+        "width": 5
+      }
+    ],
+    "base_dim": 48,
+    "dim": 154,
+    "ttf": [
+      "ttf_voltage",
+      "ttf_temp",
+      "ttf_freq",
+      "ttf_loading"
+    ],
+    "susceptibility": [
+      "mean_adj_line_loading",
+      "cascade_initiation_risk",
+      "cascade_reception_risk",
+      "max_adj_line_loading",
+      "loading_x_max_adj_loading"
+    ],
+    "masked_scada": [
+      "time_ratio",
+      "stress_level"
+    ],
+    "masked_node_features": [
+      "t_pos"
+    ]
+  }
+}

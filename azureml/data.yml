@@ -1,0 +1,10 @@
+# Azure ML Data asset for the generated scenario set.
+# Register a new immutable version each time you regenerate scenarios:
+#   az ml data create -f azureml/data.yml --set version=$(date +%Y%m%d)
+# Every training run then references azureml:cascade-scenarios@latest (or a
+# pinned version), so the model is always traceable to exact input data.
+$schema: https://azuremlschemas.azureedge.net/latest/data.schema.json
+name: cascade-scenarios
+description: PyPSA-generated train/val/test cascade scenarios (pickled batches).
+type: uri_folder
+path: ../data

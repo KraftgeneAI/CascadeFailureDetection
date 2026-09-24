@@ -12,6 +12,8 @@ import shutil
 import pickle
 from pathlib import Path
 
+from cascade_prediction import contract as _contract
+
 
 @pytest.fixture
 def temp_dir():
@@ -104,6 +106,7 @@ def mock_timestep_data():
         'thermal_limits': np.random.uniform(50, 150, num_edges).astype(np.float32),
         'power_injection': np.random.randn(num_nodes).astype(np.float32),
         'reactive_injection': np.random.randn(num_nodes).astype(np.float32),
+        'ras_status': np.zeros((6, _contract.RAS_STATUS.width), dtype=np.float32),
     }
 
 
@@ -138,6 +141,7 @@ def mock_cascade_scenario(mock_grid_topology, mock_timestep_data):
             'failure_times': [0.0],
             'failure_reasons': ['overload'],
             'stress_level': 0.9,
+            **_contract.contract_stamp(),   # current-layout data (DC-011)
         }
     }
 
@@ -167,6 +171,7 @@ def mock_normal_scenario(mock_grid_topology, mock_timestep_data):
             'failure_times': [],
             'failure_reasons': [],
             'stress_level': 0.5,
+            **_contract.contract_stamp(),   # current-layout data (DC-011)
         }
     }
 

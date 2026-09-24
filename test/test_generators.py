@@ -690,22 +690,16 @@ class TestUtils:
         assert len(splits['test']) == 15
     
     def test_validate_scenario_valid(self):
-        """Test scenario validation with valid scenario."""
-        scenario = {
-            'sequence': [
-                {
-                    'scada_data': np.random.randn(30, 14).astype(np.float32),
-                    'pmu_sequence': np.random.randn(30, 8).astype(np.float32),
-                    'satellite_data': np.random.randn(30, 12, 16, 16).astype(np.float32),
-                    'weather_sequence': np.random.randn(30, 10, 8).astype(np.float32),
-                    'node_labels': np.zeros(30, dtype=np.float32),
-                }
-            ],
-            'edge_index': np.random.randint(0, 30, (2, 50)),
-            'metadata': {'is_cascade': False}
-        }
-        
-        assert validate_scenario(scenario) == True
+        """DC-012: a contract-conformant scenario validates."""
+        from contract_factory import make_scenario
+        assert validate_scenario(make_scenario()) == True
+
+    def test_validate_scenario_rejects_old_width(self):
+        """DC-012: a 14-column SCADA array (pre-contract layout) is invalid."""
+        from contract_factory import make_scenario
+        scenario = make_scenario()
+        scenario['sequence'][0]['scada_data'] = np.zeros((12, 14), np.float32)
+        assert validate_scenario(scenario) == False
     
     def test_validate_scenario_invalid(self):
         """Test scenario validation with invalid scenario."""

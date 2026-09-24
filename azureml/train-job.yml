@@ -1,0 +1,39 @@
+# Azure ML command job: train the cascade model on a GPU cluster and log the
+# run (params, metrics, artifacts) to the workspace MLflow store automatically.
+# Submit with:
+#   az ml job create -f azureml/train-job.yml --web
+#
+# Inside an Azure ML job, MLFLOW_TRACKING_URI is set for you, so RunTracker
+# reuses the job's run and no extra configuration is needed.
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+display_name: cascade-train
+experiment_name: cascade-prediction
+description: Train UnifiedCascadePredictionModel with physics-informed loss.
+
+# Snapshot the whole repo root so imports (cascade_prediction/...) resolve.
+code: ..
+command: >-
+  python train_model.py
+  --data_dir ${{inputs.data}}
+  --output_dir ${{outputs.model_dir}}
+  --epochs ${{inputs.epochs}}
+  --batch_size ${{inputs.batch_size}}
+  --lr ${{inputs.lr}}
+
+inputs:
+  data:
+    type: uri_folder
+    path: azureml:cascade-scenarios@latest
+  epochs: 60
+  batch_size: 8
+  lr: 0.0005
+
+outputs:
+  model_dir:
+    type: uri_folder
+
+environment: azureml:cascade-train-env@latest
+compute: azureml:gpu-cluster        # create once: az ml compute create -n gpu-cluster --type amlcompute --size Standard_NC6s_v3 --min-instances 0 --max-instances 2
+
+environment_variables:
+  MLFLOW_EXPERIMENT: cascade-prediction
