@@ -167,6 +167,40 @@ class CascadeDataset(Dataset):
         print(f"Data contract: mode={self.contract_mode}, schema "
               f"{_contract.SCHEMA_VERSION}, layout {_contract.LAYOUT_HASH}")
 
+    @classmethod
+    def item_from_scenario(
+        cls,
+        scenario: Dict[str, Any],
+        *,
+        fixed_window: Tuple[int, int],
+        base_mva: float = Settings.Dataset.BASE_MVA,
+        base_frequency: float = Settings.Dataset.BASE_FREQUENCY,
+        contract_mode: str = "strict",
+    ) -> Dict[str, Any]:
+        """
+        Process one in-memory scenario ({'sequence', 'edge_index', 'metadata'})
+        exactly as __getitem__ would, without scanning a directory or reading
+        pickles. Used for live-stream inference (spec 001, STR-041), where the
+        frames were already validated against the telemetry contract.
+        """
+        if contract_mode not in ("strict", "migrate"):
+            raise ValueError(f"contract_mode must be 'strict' or 'migrate', got {contract_mode!r}")
+        self = cls.__new__(cls)
+        self.data_dir = Path("<in-memory>")
+        self.mode = "full_sequence"
+        self.base_mva = base_mva
+        self.base_frequency = base_frequency
+        self.fixed_window = fixed_window
+        self.contract_mode = contract_mode
+        self._norm_constants = {
+            "INTERCHANGE_SCALE_MW": float(Settings.Interchange.INTERCHANGE_SCALE_MW),
+        }
+        self.scenario_files = []
+        self.cascade_labels = []
+        if not scenario.get("sequence"):
+            raise ValueError("scenario has no sequence")
+        return self._process_sequence_format(scenario)
+
     def __len__(self) -> int:
         return len(self.scenario_files)
 

@@ -500,8 +500,14 @@ def _rows_expected(rows: str, n: Optional[int], e: Optional[int]) -> Optional[in
 
 def validate_timestep(ts: Mapping[str, Any], num_nodes: Optional[int] = None,
                       num_edges: Optional[int] = None, *, check_ranges: bool = True,
-                      where: str = "") -> ValidationReport:
-    """Structural (+ optional range) validation of one timestep dict."""
+                      where: str = "",
+                      vectors: Optional[Sequence[VectorSpec]] = None) -> ValidationReport:
+    """Structural (+ optional range) validation of one timestep dict.
+
+    ``vectors`` restricts which per-row vectors are required (default: all of
+    VECTORS). Live telemetry passes the observable subset, since ground-truth
+    labels such as ``cascade_timing`` do not exist for a live grid.
+    """
     rep = ValidationReport()
     pre = f"{where}." if where else ""
     if not isinstance(ts, Mapping):
@@ -536,7 +542,7 @@ def validate_timestep(ts: Mapping[str, Any], num_nodes: Optional[int] = None,
                 rep.add_range(f"{spec.key}.{col.name}",
                               _count_out_of_range(arr[:, j], col.valid_range, col.categories))
 
-    for vec in VECTORS:
+    for vec in (VECTORS if vectors is None else vectors):
         if vec.key not in ts:
             rep.errors.append(f"{pre}{vec.key} missing")
             continue

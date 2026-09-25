@@ -9,7 +9,7 @@ on a single scenario using the same CascadeDataset pipeline as training.
 import pickle
 import torch
 import numpy as np
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from ..models.unified_model import UnifiedCascadePredictionModel
 from ..data.dataset import CascadeDataset
@@ -140,16 +140,25 @@ class CascadePredictor:
 
     def predict_window(
         self,
-        data_path: str,
-        scenario_idx: int,
-        end_step: int,
+        data_path: Optional[str] = None,
+        scenario_idx: Optional[int] = None,
+        end_step: int = 0,
         start_step: int = 0,
+        *,
+        scenario: Optional[Dict] = None,
+        episode_length: Optional[int] = None,
     ) -> Dict:
         """
         Deterministic inference on an explicit window of a scenario.
 
-        Used by streaming mode: the model sees sequence[start_step:end_step]
-        (no random truncation). Requires end_step - start_step >= 10.
+        The model sees sequence[start_step:end_step] (no random truncation).
+        Requires end_step - start_step >= 10.
+
+        Either a file-based scenario (data_path + scenario_idx; legacy layouts
+        migrated) or an in-memory `scenario` dict (live stream, spec 001:
+        strict contract, no files). For the live path `episode_length` scales
+        the timing head to minutes, so pred_time_minutes always comes from
+        the model (STR-047).
 
         Returns a lean dict: cascade_detected, cascade_probability,
         risky_nodes [{node_id, score, pred_time_minutes}].
@@ -159,23 +168,32 @@ class CascadePredictor:
                 f"Window must be >= 10 timesteps, got {end_step - start_step}"
             )
 
-        dataset = CascadeDataset(
-            data_path,
-            mode="full_sequence",
-            base_mva=self.base_mva,
-            base_frequency=self.base_freq,
-            fixed_window=(start_step, end_step),
-            contract_mode="migrate",   # inference tolerates legacy layouts (spec D3)
-        )
-
-        item = dataset[scenario_idx]
+        if scenario is not None:
+            item = CascadeDataset.item_from_scenario(
+                scenario,
+                fixed_window=(start_step, end_step),
+                base_mva=self.base_mva,
+                base_frequency=self.base_freq,
+                contract_mode="strict",
+            )
+        else:
+            dataset = CascadeDataset(
+                data_path,
+                mode="full_sequence",
+                base_mva=self.base_mva,
+                base_frequency=self.base_freq,
+                fixed_window=(start_step, end_step),
+                contract_mode="migrate",   # inference tolerates legacy layouts (spec D3)
+            )
+            item = dataset[scenario_idx]
         if not item:
             raise ValueError(
                 f"Scenario {scenario_idx} could not be loaded from {data_path}"
             )
 
         original_seq_len = int(
-            item.get("original_sequence_length", Settings.Simulation.DEFAULT_SEQUENCE_LENGTH)
+            episode_length
+            or item.get("original_sequence_length", Settings.Simulation.DEFAULT_SEQUENCE_LENGTH)
         )
 
         batch = collate_cascade_batch([item])
