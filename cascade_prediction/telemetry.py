@@ -16,8 +16,10 @@ module never pads, defaults or truncates data (rule 10) — it reports errors.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import pickle
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,7 +29,7 @@ import numpy as np
 
 from . import contract as C
 
-TELEMETRY_VERSION = "1.0.0"
+TELEMETRY_VERSION = "1.1.0"   # 1.1.0: optional episode_id / showing (MINOR)
 
 # AWS IoT Core caps a message at 128 KB; keep 25% headroom (research R2).
 MAX_FRAME_BYTES = 96 * 1024
@@ -65,6 +67,9 @@ ENVELOPE_FIELDS: Dict[str, tuple] = {
     "status":            ((str,), True, True),
     "drop_reason":       ((str,), False, True),
     "stream_info":       ((dict,), True, False),
+    # 1.1.0 (spec 001 amendment, STR-064): which library episode, which showing.
+    "episode_id":        ((str,), False, False),
+    "showing":           (_INT, False, False),
     "arrays":            ((dict,), True, False),
     "cascade_events":    ((list,), True, False),
 }
@@ -85,6 +90,30 @@ STREAM_INFO_FIELDS: Dict[str, tuple] = {
 
 def _major(version: str) -> str:
     return str(version).split(".", 1)[0]
+
+
+def grid_fingerprint(edge_index: Any, num_nodes: int) -> str:
+    """
+    Identity of a grid's wiring (spec 001, STR-060..062, research R13): the
+    first 16 hex digits of SHA-256 over num_nodes and the int64 edge list.
+    Computed from the actual edges, so a wrong grid cannot hide behind a label.
+    """
+    ei = np.ascontiguousarray(np.asarray(edge_index), dtype=np.int64)
+    digest = hashlib.sha256(np.int64(num_nodes).tobytes() + ei.tobytes()).hexdigest()
+    return digest[:16]
+
+
+def reference_grid_id(topology_path: str) -> str:
+    """Fingerprint of a saved topology pickle (e.g. data/grid_topology.pkl)."""
+    with open(topology_path, "rb") as f:
+        topo = pickle.load(f)
+    edge_index = topo["edge_index"]
+    if hasattr(edge_index, "numpy"):
+        edge_index = edge_index.numpy()
+    num_nodes = topo.get("num_nodes")
+    if num_nodes is None:
+        num_nodes = np.asarray(topo["adjacency_matrix"]).shape[0]
+    return grid_fingerprint(edge_index, int(num_nodes))
 
 
 def _round_array(value: Any, precision: int) -> List:
@@ -125,8 +154,9 @@ def build_stream_info(topology: Mapping[str, Any], *, episode_length: int,
 
 
 def _envelope(*, stream_id: str, episode: int, seq: int, is_last: bool,
-              grid_time_minutes: float, emitted_at: Optional[float], status: str) -> Dict[str, Any]:
-    return {
+              grid_time_minutes: float, emitted_at: Optional[float], status: str,
+              episode_id: Optional[str] = None, showing: Optional[int] = None) -> Dict[str, Any]:
+    env = {
         "telemetry_version": TELEMETRY_VERSION,
         "schema_version": C.SCHEMA_VERSION,
         "layout_hash": C.LAYOUT_HASH,
@@ -138,16 +168,24 @@ def _envelope(*, stream_id: str, episode: int, seq: int, is_last: bool,
         "grid_time_minutes": float(grid_time_minutes),
         "status": status,
     }
+    if episode_id is not None:
+        env["episode_id"] = str(episode_id)
+    if showing is not None:
+        env["showing"] = int(showing)
+    return env
 
 
 def build_frame(timestep: Mapping[str, Any], *, stream_id: str, episode: int, seq: int,
                 is_last: bool, stream_info: Mapping[str, Any],
                 emitted_at: Optional[float] = None,
-                precision: int = DEFAULT_PRECISION) -> Dict[str, Any]:
+                precision: int = DEFAULT_PRECISION,
+                episode_id: Optional[str] = None,
+                showing: Optional[int] = None) -> Dict[str, Any]:
     """Wrap one generator timestep as a telemetry frame (used by the emitter)."""
     frame = _envelope(stream_id=stream_id, episode=episode, seq=seq, is_last=is_last,
                       grid_time_minutes=seq * float(stream_info["dt_minutes"]),
-                      emitted_at=emitted_at, status=STATUS_OK)
+                      emitted_at=emitted_at, status=STATUS_OK,
+                      episode_id=episode_id, showing=showing)
     frame["stream_info"] = dict(stream_info)
     frame["arrays"] = {key: _round_array(timestep[key], precision) for key in FRAME_ARRAY_KEYS}
     frame["cascade_events"] = _clean_events(timestep.get("cascade_events"), precision)
@@ -156,11 +194,14 @@ def build_frame(timestep: Mapping[str, Any], *, stream_id: str, episode: int, se
 
 def build_dropped_marker(*, stream_id: str, episode: int, seq: int, is_last: bool,
                          dt_minutes: float, drop_reason: str,
-                         emitted_at: Optional[float] = None) -> Dict[str, Any]:
+                         emitted_at: Optional[float] = None,
+                         episode_id: Optional[str] = None,
+                         showing: Optional[int] = None) -> Dict[str, Any]:
     """Stand-in for a frame that could not be published in full (keeps seq contiguous)."""
     marker = _envelope(stream_id=stream_id, episode=episode, seq=seq, is_last=is_last,
                        grid_time_minutes=seq * float(dt_minutes),
-                       emitted_at=emitted_at, status=STATUS_DROPPED)
+                       emitted_at=emitted_at, status=STATUS_DROPPED,
+                       episode_id=episode_id, showing=showing)
     marker["drop_reason"] = str(drop_reason)
     return marker
 
@@ -241,6 +282,8 @@ def validate_frame(obj: Any, *, num_nodes: Optional[int] = None,
                                   f"!= {C.SCHEMA_VERSION}/{C.LAYOUT_HASH}")
     if chk.seq is not None and chk.seq < 0:
         chk.fail(REASON_INVALID, "seq is negative")
+    if "showing" in obj and _type_ok(obj["showing"], _INT) and obj["showing"] < 1:
+        chk.fail(REASON_INVALID, "showing must be >= 1")
 
     if dropped or not chk.ok:
         return chk
