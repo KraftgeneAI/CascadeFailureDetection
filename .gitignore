@@ -57,3 +57,16 @@
 #mlflow.db
 #.azureml/
 #outputs/
+# Fixtures the root repository's CI needs (spec 002, R2): the reference grid the
+# model was trained on, and the five held-out test batches the tests read. Everything else under data/
+# stays ignored.
+!data/
+data/*
+!data/grid_topology.pkl
+!data/test/
+data/test/*
+!data/test/scenarios_batch_0.pkl
+!data/test/scenarios_batch_1.pkl
+!data/test/scenarios_batch_2.pkl
+!data/test/scenarios_batch_3.pkl
+!data/test/scenarios_batch_4.pkl
